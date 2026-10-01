@@ -872,23 +872,32 @@ COPY conf/php-cli.ini /usr/local/etc/php/conf.d/10-php.ini
 USER www-data
 CMD ["php", "-a"]
 
+# Node 24 LTS for cli-builder, copied out of the official image instead of
+# Debian's nodejs/npm (trixie ships Node 20, which upstream no longer
+# maintains). Pinned by the multi-arch INDEX digest, so both the amd64 and the
+# arm64 build resolve it and a retag upstream cannot change what ships.
+# node 24.21.0 / npm 11.19.0 at the time of pinning.
+FROM node:24-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS node24
+
+# cli-builder is a pure asset/test/deploy image: composer, node and the CLI
+# tooling a build or deploy stage reaches for. It carries no compiler and no
+# phpize -- compiling an extension is ext-builder's job below.
 FROM cli AS cli-builder
 USER root
-# gcc + libc6-dev + autoconf: phpize/php-config below ship the PHP headers
-# precisely so an extension can be built against them, and that needs a full
-# toolchain, not just make (already in the list). phpize itself calls out to
-# autoconf to regenerate an extension's configure script from config.m4
-# before ./configure ever runs, so autoconf is as load-bearing here as gcc --
-# phpize fails outright ("Cannot find autoconf") without it, compiler or not.
-# Scoped to this stage only; fpm and cli derive from runtime-base
-# independently and never see it.
+COPY --from=node24 /usr/local/bin/node /usr/local/bin/node
+COPY --from=node24 /usr/local/lib/node_modules /usr/local/lib/node_modules
+# less, nano, procps, zip, unzip and zstd are already in runtime-base.
+# mariadb-client-core there only has the mariadb/mysql shell; the full
+# mariadb-client adds mariadb-dump/mysqldump (and pulls perl back in).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      git rsync patch make brotli sqlite3 nodejs npm gcc libc6-dev autoconf \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=php-build /usr/local/bin/phpize /usr/local/bin/phpize
-COPY --from=php-build /usr/local/bin/php-config /usr/local/bin/php-config
-COPY --from=php-build /usr/local/include/php /usr/local/include/php
+    set -eux; \
+    ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm; \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx; \
+    ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      git rsync patch make brotli sqlite3 jq mariadb-client; \
+    rm -rf /var/lib/apt/lists/*
 COPY conf/php-builder.ini /usr/local/etc/php/conf.d/10-php.ini
 # The installer is verified against the signature Composer publishes; piping it
 # straight into php would trust whatever the network returned.
@@ -899,6 +908,32 @@ RUN set -eux; \
     php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer; \
     rm -f /tmp/composer-setup.php /tmp/composer-setup.sig; \
     composer --version
+RUN set -eux; \
+    node -v; \
+    npm install -g semantic-release; \
+    npm cache clean --force; \
+    semantic-release --version
 USER www-data
 ENV COMPOSER_HOME=/tmp/composer
+CMD ["bash"]
+
+# Build-stage-only image for compiling PHP extensions that are then COPYed into
+# fpm/cli of the same PHP version. Same php-build output as every other flavor
+# of that version (no second compile, no second PGO run); only the headers and
+# phpize/php-config are copied out of it. Runs as root: it is a build stage and
+# `make install` writes into the extension dir. No composer, no node.
+FROM cli AS ext-builder
+USER root
+# g++: several extensions are C++. autoconf: phpize regenerates ./configure
+# from config.m4 and fails outright ("Cannot find autoconf") without it.
+# pkg-config: extension configure scripts locate their -dev libraries with it.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      gcc g++ make autoconf pkg-config libc6-dev; \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=php-build /usr/local/bin/phpize /usr/local/bin/phpize
+COPY --from=php-build /usr/local/bin/php-config /usr/local/bin/php-config
+COPY --from=php-build /usr/local/include/php /usr/local/include/php
 CMD ["bash"]

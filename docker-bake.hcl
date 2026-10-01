@@ -156,9 +156,10 @@ group "default" {
 }
 
 # The PR subset: oldest and newest ends where breakage concentrates,
-# one mid-range version, and the heaviest flavor.
+# one mid-range version, the heaviest flavor, and ext-builder (whose CI leg
+# also runs tests/test-ext-builder.sh against that version's fpm and cli).
 group "pr" {
-  targets = ["php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm", "php-8_5-cli-builder"]
+  targets = ["php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm", "php-8_5-cli-builder", "php-8_5-ext-builder"]
 }
 
 # ------------------------------------------------------------------ bootstrap
