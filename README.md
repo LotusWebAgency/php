@@ -507,13 +507,23 @@ docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --format '{{ json .S
 docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --format '{{ json .Provenance }}'
 ```
 
-A pull request builds and tests without publishing; a Trivy gate fails the
+A pull request or a push to `develop` builds and tests without publishing; a Trivy gate fails the
 build on any fixable CRITICAL or HIGH finding before anything can reach a
 registry (`.trivyignore` at the repo root records accepted risks with a
 reason). Trivy scans the Debian package layer -- it can't see the statically
 linked libraries (OpenSSL, ICU and similar) vendored into the 7.0–8.0 builds,
 which are tracked through `deps/versions.lock`'s pins instead. See
 [SECURITY.md](SECURITY.md) for the reporting channel and what's automated.
+
+## Branches and releases
+
+Work lands on `develop` through pull requests. A pull request (to `develop` or
+`main`) builds, tests and Trivy-gates a representative subset on amd64. A push
+to `develop` builds every image natively on amd64 and arm64 and runs the smoke
+tests, the extension end-to-end test and the Trivy gate on each, but never
+publishes anything. A pull request from `develop` to `main` is the release:
+merging it builds, tests, publishes and signs every image. The weekly rebuild
+runs on `main` only, to pick up base-image and package updates.
 
 ## Building locally
 

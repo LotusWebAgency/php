@@ -26,15 +26,17 @@ path. Tag lifecycle and rebuild cadence are described in [SUPPORT.md](SUPPORT.md
 
 ## What is already automated
 
-Every build — pull request, merge, or the weekly rebuild — runs a Trivy scan
-and fails on any *fixable* CRITICAL or HIGH finding before an image can be
+Every build — pull request, push to `develop`, merge to `main`, or the weekly
+rebuild — runs a Trivy scan and fails on any *fixable* CRITICAL or HIGH finding before an image can be
 published, so a known-vulnerable Debian package cannot ship silently. Trivy
 scans the OS package layer; it cannot see the statically linked libraries
 (OpenSSL, ICU and similar) vendored into the 7.0–8.0 builds, since those never
 touch a package manager. Those are tracked by hand instead, through the
-pinned versions in `deps/versions.lock`. `main` is branch-protected:
-publishing requires a green pull request. Published digests carry an SBOM,
-max-mode SLSA provenance and a keyless Cosign signature.
+pinned versions in `deps/versions.lock`. Only `main` publishes, and `main` is
+branch-protected: publishing requires a green pull request (work lands on
+`develop`, which builds and tests both architectures but never publishes).
+Published digests carry an SBOM, max-mode SLSA provenance and a keyless Cosign
+signature.
 
 Verify what you pulled:
 

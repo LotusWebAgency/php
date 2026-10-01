@@ -241,7 +241,7 @@ cosign verify \
   lotuswebagency/php:8.5-fpm
 ```
 
-A pull request builds and tests without publishing; a Trivy gate fails the
+A pull request or a push to `develop` builds and tests without publishing; a Trivy gate fails the
 build on any fixable CRITICAL or HIGH finding before anything reaches a
 registry. Trivy scans the Debian package layer -- it can't see the statically
 linked libraries (OpenSSL, ICU and similar) vendored into the 7.0–8.0 builds,
