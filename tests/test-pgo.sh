@@ -96,6 +96,14 @@ case "$compiler" in
   gcc)   expect_lto=none;   want_flags="-ffunction-sections -freorder-functions -freorder-blocks-and-partition" ;;
   *)     fail "the build record names an unknown compiler=$compiler" ;;
 esac
+# php/build.sh leaves block partitioning off for gcc on arm64 (aarch64 jump
+# tables cannot span .text/.text.unlikely), and it must stay off there.
+if [ "$compiler" = gcc ] && [ "$(docker image inspect --format '{{.Architecture}}' "$IMAGE")" = arm64 ]; then
+  want_flags="-ffunction-sections -freorder-functions"
+  case "$(field cflags)" in
+    *-freorder-blocks-and-partition*) fail "arm64 gcc build records -freorder-blocks-and-partition, which aarch64 cannot assemble" ;;
+  esac
+fi
 [ "$(field lto)" = "$expect_lto" ] \
   || fail "the build record says lto=$(field lto) for compiler=$compiler; expected $expect_lto"
 [ "$(field discriminator_control)" = ok ] \

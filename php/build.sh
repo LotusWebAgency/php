@@ -488,6 +488,16 @@ case "${COMPILER:-clang}" in
     # linker option (see the Dockerfile's ld-shim for why it needs gold, not
     # the CFLAGS/LDFLAGS here) so it is not repeated on this line.
     LTO_CFLAGS="-ffunction-sections -freorder-functions -freorder-blocks-and-partition"
+    # Not on arm64: aarch64 gcc keeps block partitioning off by default
+    # because its compact jump tables are label differences that cannot span
+    # .text and .text.unlikely, and forcing it on fails in the assembler
+    # (ext/standard/var_unserializer.c, 8.1/8.2, even without a profile).
+    # Measured there (gcc 16.2, gold): -freorder-functions alone already puts
+    # profiled-hot functions in .text.hot.*, and discriminator-control.sh
+    # passes both ways with it.
+    if [ "$(dpkg --print-architecture)" = arm64 ]; then
+      LTO_CFLAGS="-ffunction-sections -freorder-functions"
+    fi
     LTO_LDFLAGS="-Wl,-z,keep-text-section-prefix"
     ;;
   *) echo "php/build.sh: unsupported COMPILER=${COMPILER:-<unset>}" >&2; exit 1 ;;
