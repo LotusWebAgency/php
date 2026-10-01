@@ -231,6 +231,12 @@ php_configure() {
   args="$(render_configure_args)"
   # shellcheck disable=SC2086  # the rendered flags and cache overrides are meant to word-split
   ./configure $args $CONFIGURE_CACHE_OVERRIDES
+  # The VM this build gets, from the header's own ZEND_VM_KIND (see
+  # read_zend_vm_kind). The messages below name it instead of assuming gcc means
+  # HYBRID: 7.0/7.1 are CALL on every arch even though they pin the same
+  # registers, and 7.2/7.3 on aarch64 have no register probe at all.
+  ZEND_VM_KIND_CONFIG="$(read_zend_vm_kind)" || exit 1
+  local vm_name="${ZEND_VM_KIND_CONFIG^^}"
   # Task 33: the whole point of COMPILER=gcc. PHP's HYBRID VM pins
   # execute_data/opline into %r14/%r15 via GCC global register variables
   # (Zend/zend_execute.c) when ./configure's own probe decides the compiler
@@ -262,7 +268,7 @@ php_configure() {
       grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h \
         || { echo "FATAL: COMPILER=gcc on aarch64 but HAVE_GCC_GLOBAL_REGS did not take, though this" \
                   "branch's Zend/Zend.m4 probe knows __aarch64__ -- check main/php_config.h" >&2; exit 1; }
-      echo "ok: HAVE_GCC_GLOBAL_REGS=1 -- the HYBRID VM will pin execute_data/opline in x27/x28 (aarch64)"
+      echo "ok: HAVE_GCC_GLOBAL_REGS=1 -- the ${vm_name} VM will pin execute_data/opline in x27/x28 (aarch64)"
     else
       if grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h; then
         echo "FATAL: HAVE_GCC_GLOBAL_REGS=1 on aarch64, but this branch's Zend/Zend.m4 probe only" \
@@ -275,7 +281,7 @@ php_configure() {
   elif [ "${COMPILER:-clang}" = gcc ]; then
     grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h \
       || { echo "FATAL: COMPILER=gcc but HAVE_GCC_GLOBAL_REGS did not take -- check main/php_config.h" >&2; exit 1; }
-    echo "ok: HAVE_GCC_GLOBAL_REGS=1 -- the HYBRID VM will pin execute_data/opline in %r14/%r15"
+    echo "ok: HAVE_GCC_GLOBAL_REGS=1 -- the ${vm_name} VM will pin execute_data/opline in %r14/%r15"
   elif grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h; then
     echo "FATAL: COMPILER=clang but HAVE_GCC_GLOBAL_REGS=1 was defined -- this build no longer" \
          "demonstrates the finding task 33 exists to test" >&2
@@ -295,22 +301,11 @@ php_configure() {
   # Task 37b: tests/smoke.sh's VM-kind expectation needs a build-time answer
   # for the versions it cannot ask at runtime -- 7.0-7.3 have no FFI (ext.json's
   # floor is >=7.4), so there is no `zend_vm_kind()` to call from a shipped
-  # image. What decided the VM was already computed two probes up
-  # (HAVE_GCC_GLOBAL_REGS -> HYBRID, HAVE_PRESERVE_NONE -> TAILCALL, neither ->
-  # the plain CALL VM); this just names the answer so write_build_record can
-  # ship it. The two defines are mutually exclusive on every toolchain this
-  # project builds (gcc has no preserve_none calling convention; clang has no
-  # global register variables), so exactly one of the first two branches can
-  # ever be true here -- this does not re-decide anything, only records what
-  # the canaries above already asserted.
-  if grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h; then
-    ZEND_VM_KIND_CONFIG=hybrid
-  elif grep -Eq '^[[:space:]]*#[[:space:]]*define[[:space:]]+HAVE_PRESERVE_NONE[[:space:]]+1' main/php_config.h; then
-    ZEND_VM_KIND_CONFIG=tailcall
-  else
-    ZEND_VM_KIND_CONFIG=call
-  fi
-  echo "ok: vm_kind_config=$ZEND_VM_KIND_CONFIG (from main/php_config.h)"
+  # image. ZEND_VM_KIND_CONFIG was read from the generated header right after
+  # configure (read_zend_vm_kind); this just reports it so write_build_record
+  # can ship it. It used to be inferred from HAVE_GCC_GLOBAL_REGS, which
+  # recorded hybrid for 7.0/7.1 although their header pins the CALL VM.
+  echo "ok: vm_kind_config=$ZEND_VM_KIND_CONFIG (ZEND_VM_KIND from Zend/zend_vm_opcodes.h and main/php_config.h)"
 }
 
 # The only place a compile is driven. Task 17's PGO passes belong here, which is

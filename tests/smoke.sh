@@ -105,22 +105,30 @@ else
   echo "ok: com.lotuswebagency.compiler=$VM_COMPILER matches matrix.json"
 fi
 
-# gcc's HYBRID VM (global register variables) and clang's TAILCALL VM
-# (preserve_none + musttail, 8.5+ only -- see php/build-canaries.sh's
-# assert_preserve_none_canary) are the only two ways off the plain CALL VM
-# this toolchain matrix produces, so the expectation is a function of
-# VM_COMPILER (and, for clang, of whether this version is new enough for
-# TAILCALL) rather than a per-version literal.
+# The expectation is a function of VM_COMPILER, the PHP version and the image's
+# architecture, mirroring what Zend/zend_vm_opcodes.h derives at build time:
+#   - 7.0 and 7.1 define ZEND_VM_KIND as ZEND_VM_KIND_CALL unconditionally, on
+#     every compiler and arch. gcc still pins execute_data/opline in global
+#     registers there (HAVE_GCC_GLOBAL_REGS), but that is the CALL VM with
+#     registers, not HYBRID.
+#   - gcc from 7.2 gets the HYBRID VM (global register variables), except on
+#     arm64 below 7.4, where Zend/Zend.m4's probe only knows __aarch64__ from
+#     7.4 on -- 7.2/7.3 run the CALL VM there.
+#   - clang has no usable global register variables: TAILCALL
+#     (preserve_none + musttail, 8.5+ only -- see php/build-canaries.sh's
+#     assert_preserve_none_canary), the plain CALL VM before that.
 #
 # The image's own architecture, not the host's: an arm64 image smoke-tested
-# under emulation on an amd64 host is still an arm64 build. On arm64, gcc's
-# global registers exist only from 7.4 on (Zend/Zend.m4's probe knows
-# __aarch64__ from then; php/build.sh asserts the same derivation at configure
-# time), so 7.0-7.3 run the CALL VM there.
+# under emulation on an amd64 host is still an arm64 build.
 IMAGE_ARCH=$(docker image inspect --format '{{.Architecture}}' "$IMAGE")
+version_lt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
 case "$VM_COMPILER" in
   gcc)
-    if [ "$IMAGE_ARCH" = arm64 ] && [ "$(printf '7.4\n%s\n' "$EXPECT" | sort -V | head -1)" != "7.4" ]; then
+    if version_lt "$EXPECT" 7.2; then
+      EXPECTED_VM_KIND=1
+      EXPECTED_VM_NAME=CALL
+      echo "note: PHP $EXPECT defines ZEND_VM_KIND as CALL unconditionally (HYBRID arrived in 7.2), expecting the CALL VM"
+    elif [ "$IMAGE_ARCH" = arm64 ] && version_lt "$EXPECT" 7.4; then
       EXPECTED_VM_KIND=1
       EXPECTED_VM_NAME=CALL
       echo "note: arm64 gcc build of PHP $EXPECT -- no aarch64 global registers before 7.4, expecting the CALL VM"
@@ -130,12 +138,12 @@ case "$VM_COMPILER" in
     fi
     ;;
   clang)
-    if [ "$(printf '8.5\n%s\n' "$EXPECT" | sort -V | head -1)" = "8.5" ]; then
-      EXPECTED_VM_KIND=5
-      EXPECTED_VM_NAME=TAILCALL
-    else
+    if version_lt "$EXPECT" 8.5; then
       EXPECTED_VM_KIND=1
       EXPECTED_VM_NAME=CALL
+    else
+      EXPECTED_VM_KIND=5
+      EXPECTED_VM_NAME=TAILCALL
     fi
     ;;
   *)
@@ -688,27 +696,29 @@ else
   echo "ok: JIT not applicable on PHP $EXPECT (introduced in PHP 8.0)"
 fi
 
-# The VM kind, expected from VM_COMPILER/EXPECTED_VM_KIND computed above
-# (task 37b), not from PHP_VERSION alone: gcc gets the HYBRID VM (global
-# register variables, Zend/zend_execute.c) on every version it builds; clang
-# gets the plain CALL VM except on 8.5, which adds the TAILCALL VM (needs
-# HAVE_PRESERVE_NONE from a configure probe that 8.5.0 failed silently under
-# ThinLTO -- php/build-canaries.sh's assert_preserve_none_canary).
+# The VM kind, expected from VM_COMPILER/PHP version/IMAGE_ARCH (task 37b, see
+# the table above), checked two ways:
 #
-# Measured two different ways depending on whether this version has FFI to
-# measure it with. zend_vm_kind() is ZEND_API and exported, and FFI (shipped
-# shared, opt-in) can call it in a throwaway process -- this is the end-to-end
-# half of assert_preserve_none_canary and the HAVE_GCC_GLOBAL_REGS check in
-# php/build.sh's php_configure(). But ext.json floors ffi at >=7.4, so 7.0-7.3
-# have nothing in the image that can call zend_vm_kind() at all; for those,
-# the check falls back to the build record's own vm_kind_config field
-# (php/build.sh: recorded from main/php_config.h's HAVE_GCC_GLOBAL_REGS/
-# HAVE_PRESERVE_NONE at configure time, the same probes that decide the VM) --
-# a build that got the wrong VM records the wrong value there just as
-# reliably as it would answer wrong at runtime, so a CALL-VM build still fails
-# this either way.
+#   - the build record's vm_kind_config (php/build.sh: ZEND_VM_KIND as the
+#     generated Zend/zend_vm_opcodes.h resolves it against this build's own
+#     php_config.h), on every version. A build that got the wrong VM records the
+#     wrong value there just as reliably as it would answer wrong at runtime.
+#   - on versions with FFI, zend_vm_kind() called in a throwaway process. It is
+#     ZEND_API and exported, and this is the end-to-end half of
+#     assert_preserve_none_canary and of the record itself. ext.json floors ffi
+#     at >=7.4, so 7.0-7.3 can only be checked through the record.
 has_ffi=false
 for _sx in $SHARED_EXTS; do [ "$_sx" = ffi ] && has_ffi=true; done
+
+build_record=$(docker run --rm --entrypoint cat "$IMAGE" /usr/local/share/php-build/pgo.txt 2>/dev/null) \
+  || { echo "FAIL: $IMAGE has no /usr/local/share/php-build/pgo.txt -- cannot check vm_kind_config"; exit 1; }
+vm_kind_config=$(sed -n 's/^vm_kind_config=//p' <<<"$build_record" | head -1)
+[ -n "$vm_kind_config" ] \
+  || { echo "FAIL: the build record has no vm_kind_config line -- this image predates the task 37b VM-kind recording, rebuild it"; exit 1; }
+want=$(tr '[:upper:]' '[:lower:]' <<<"$EXPECTED_VM_NAME")
+[ "$vm_kind_config" = "$want" ] \
+  || { echo "FAIL: the build record says vm_kind_config=$vm_kind_config for PHP $EXPECT ($VM_COMPILER, $IMAGE_ARCH), expected $want (ZEND_VM_KIND_$EXPECTED_VM_NAME)"; exit 1; }
+echo "ok: build record shows vm_kind_config=$vm_kind_config for PHP $EXPECT ($VM_COMPILER, $IMAGE_ARCH)"
 
 if [ "$has_ffi" = true ]; then
   vm_kind=$(docker run --rm "$IMAGE" php -d extension=ffi -d ffi.enable=1 \
@@ -717,15 +727,7 @@ if [ "$has_ffi" = true ]; then
     || { echo "FAIL: PHP $EXPECT ($VM_COMPILER) runs VM kind '$vm_kind', expected $EXPECTED_VM_KIND (ZEND_VM_KIND_$EXPECTED_VM_NAME)"; exit 1; }
   echo "ok: interpreter is ZEND_VM_KIND_$EXPECTED_VM_NAME (zend_vm_kind()=$vm_kind)"
 else
-  build_record=$(docker run --rm --entrypoint cat "$IMAGE" /usr/local/share/php-build/pgo.txt 2>/dev/null) \
-    || { echo "FAIL: $IMAGE has no /usr/local/share/php-build/pgo.txt -- cannot check vm_kind_config on a version with no FFI to probe zend_vm_kind() directly"; exit 1; }
-  vm_kind_config=$(sed -n 's/^vm_kind_config=//p' <<<"$build_record" | head -1)
-  [ -n "$vm_kind_config" ] \
-    || { echo "FAIL: the build record has no vm_kind_config line -- this image predates the task 37b VM-kind recording, rebuild it"; exit 1; }
-  want=$(tr '[:upper:]' '[:lower:]' <<<"$EXPECTED_VM_NAME")
-  [ "$vm_kind_config" = "$want" ] \
-    || { echo "FAIL: the build record says vm_kind_config=$vm_kind_config for $VM_COMPILER, expected $want (ZEND_VM_KIND_$EXPECTED_VM_NAME) -- no FFI on PHP $EXPECT to check zend_vm_kind() directly"; exit 1; }
-  echo "ok: build record shows vm_kind_config=$vm_kind_config (no FFI on PHP $EXPECT, so this comes from main/php_config.h at configure time rather than zend_vm_kind())"
+  echo "note: no FFI on PHP $EXPECT, so the VM kind rests on the build record alone"
 fi
 
 # Per-flavor ini differences, driven by the $FLAVOR argument, not the image tag.

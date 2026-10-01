@@ -426,3 +426,34 @@ assert_preserve_none_canary() {
   fi
   echo "ok: HAVE_PRESERVE_NONE defined -- clang builds the TAILCALL VM on this branch"
 }
+
+# read_zend_vm_kind
+#
+# Prints the dispatch model this build actually gets, as call|switch|goto|
+# hybrid|tailcall, by running Zend/zend_vm_opcodes.h and the freshly generated
+# main/php_config.h through the same $CC/$CFLAGS/$CPPFLAGS configure ran with and
+# reading what ZEND_VM_KIND expands to. The header is the authority: 7.0 and 7.1
+# define it as ZEND_VM_KIND_CALL unconditionally, so HAVE_GCC_GLOBAL_REGS being
+# set there (the CALL VM still pins registers) says nothing about the kind, and
+# 7.2+ choose HYBRID/TAILCALL/CALL from compiler and HAVE_* conditions that only
+# the preprocessor evaluates correctly. Run from the PHP source root, after
+# ./configure.
+read_zend_vm_kind() {
+  local n
+  [ -f Zend/zend_vm_opcodes.h ] && [ -f main/php_config.h ] \
+    || { echo "FATAL: read_zend_vm_kind needs Zend/zend_vm_opcodes.h and main/php_config.h in $PWD" >&2; return 1; }
+  # shellcheck disable=SC2086  # CFLAGS/CPPFLAGS are flag lists meant to word-split
+  n="$(printf '#include "main/php_config.h"\n#include "Zend/zend_vm_opcodes.h"\nZEND_VM_KIND_IS ZEND_VM_KIND\n' \
+        | "${CC:-cc}" -E -P -x c -I. -IZend -Imain ${CFLAGS:-} ${CPPFLAGS:-} - \
+        | sed -n 's/^ZEND_VM_KIND_IS[[:space:]]*//p' | tail -1 | tr -d '[:space:]')"
+  case "$n" in
+    1) echo call ;;
+    2) echo switch ;;
+    3) echo goto ;;
+    4) echo hybrid ;;
+    5) echo tailcall ;;
+    *) echo "FATAL: ZEND_VM_KIND did not preprocess to 1-5 (got '${n}') -- Zend/zend_vm_opcodes.h" \
+            "changed shape, so the recorded VM kind would be a guess" >&2
+       return 1 ;;
+  esac
+}
