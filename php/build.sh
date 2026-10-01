@@ -240,7 +240,39 @@ php_configure() {
   # directions are asserted: gcc must get it, and clang -- the control this
   # whole experiment is measured against -- must not, or the premise this
   # task tests no longer holds.
-  if [ "${COMPILER:-clang}" = gcc ]; then
+  #
+  # %r14/%r15 is the x86_64 pair. On aarch64 the gcc answer depends on the
+  # branch, not the compiler: Zend/Zend.m4's global-register probe only knows
+  # __aarch64__ (x27/x28, Zend/zend_execute.c) from 7.4 on -- 7.0-7.3 list
+  # i386/x86_64 alone, so their probe answers no on arm64 under any gcc and
+  # those builds get the plain CALL VM. Which case applies is read out of the
+  # probe block itself rather than keyed off a version list, and it is still
+  # asserted both ways: a branch whose probe knows aarch64 must get the
+  # registers, one whose probe does not must not have them by some other route.
+  if [ "${COMPILER:-clang}" = gcc ] && [ "$(uname -m)" = aarch64 ]; then
+    # From the --enable-gcc-global-regs option to the probe's #error: the
+    # probe program and nothing else. Every branch's block names __x86_64__,
+    # so a range that does not is a stale extraction, not an answer.
+    local regs_probe
+    regs_probe="$(sed -n '/gcc-global-regs/,/global register variables are not supported/p' Zend/Zend.m4)"
+    grep -q '__x86_64__' <<<"$regs_probe" \
+      || { echo "FATAL: could not find the global-register probe in Zend/Zend.m4 (no __x86_64__ in the" \
+                "extracted block) -- the aarch64 expectation below would be guessed, not derived" >&2; exit 1; }
+    if grep -q '__aarch64__' <<<"$regs_probe"; then
+      grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h \
+        || { echo "FATAL: COMPILER=gcc on aarch64 but HAVE_GCC_GLOBAL_REGS did not take, though this" \
+                  "branch's Zend/Zend.m4 probe knows __aarch64__ -- check main/php_config.h" >&2; exit 1; }
+      echo "ok: HAVE_GCC_GLOBAL_REGS=1 -- the HYBRID VM will pin execute_data/opline in x27/x28 (aarch64)"
+    else
+      if grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h; then
+        echo "FATAL: HAVE_GCC_GLOBAL_REGS=1 on aarch64, but this branch's Zend/Zend.m4 probe only" \
+             "knows i386/x86_64 -- the derivation above is stale" >&2
+        exit 1
+      fi
+      echo "ok: HAVE_GCC_GLOBAL_REGS is not defined on aarch64, as expected -- PHP ${PHP_VERSION}'s" \
+           "Zend/Zend.m4 probe predates aarch64 global registers (added in 7.4), so this build runs the CALL VM"
+    fi
+  elif [ "${COMPILER:-clang}" = gcc ]; then
     grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h \
       || { echo "FATAL: COMPILER=gcc but HAVE_GCC_GLOBAL_REGS did not take -- check main/php_config.h" >&2; exit 1; }
     echo "ok: HAVE_GCC_GLOBAL_REGS=1 -- the HYBRID VM will pin execute_data/opline in %r14/%r15"
