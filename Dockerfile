@@ -914,7 +914,13 @@ RUN set -eux; \
     npm cache clean --force; \
     semantic-release --version
 USER www-data
-ENV COMPOSER_HOME=/tmp/composer
+# www-data's HOME (/var/www) does not exist, so npm and corepack would try to
+# write their caches under a directory uid 33 cannot create. Set after the
+# root-run `npm install -g` above so that step does not leave a root-owned
+# /tmp/npm behind.
+ENV COMPOSER_HOME=/tmp/composer \
+    npm_config_cache=/tmp/npm \
+    COREPACK_HOME=/tmp/corepack
 CMD ["bash"]
 
 # Build-stage-only image for compiling PHP extensions that are then COPYed into

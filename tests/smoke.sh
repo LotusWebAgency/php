@@ -1051,6 +1051,18 @@ case "$FLAVOR" in
       docker run --rm "$IMAGE" sh -c "$cmd" >/dev/null 2>&1 \
         || { echo "FAIL: cli-builder: '$cmd' does not run as the image user"; exit 1; }
     done
+    # npm and corepack cache under HOME by default, and uid 33's HOME (/var/www)
+    # does not exist: `npm ci` as the image user fails unless both caches point
+    # somewhere writable.
+    for probe in "npm config get cache" 'printenv COREPACK_HOME'; do
+      cache_dir=$(docker run --rm "$IMAGE" sh -c "$probe") \
+        || { echo "FAIL: cli-builder: '$probe' failed as the image user"; exit 1; }
+      [ -n "$cache_dir" ] && [ "$cache_dir" != undefined ] \
+        || { echo "FAIL: cli-builder: '$probe' printed '$cache_dir'"; exit 1; }
+      docker run --rm "$IMAGE" sh -c 'mkdir -p "$1" && t=$(mktemp -p "$1") && rm -f "$t"' sh "$cache_dir" \
+        || { echo "FAIL: cli-builder: $cache_dir ('$probe') is not writable as the image user (uid $(docker run --rm "$IMAGE" id -u))"; exit 1; }
+    done
+    echo "ok: cli-builder's npm and corepack caches are writable as the image user"
     echo "ok: cli-builder carries node $node_major, npm, npx, corepack, composer, semantic-release, git, rsync, patch, make, brotli, sqlite3, jq, less, nano, procps, unzip, zip, zstd and the mariadb client"
     ;;
   cli|fpm)
