@@ -112,15 +112,45 @@ if [ "$MAIN" -eq 1 ]; then
   # of the base distribution's toolchain defaults, not of this build. Asserting
   # it would fail on a correctly built image; claiming it passes would be worse.
   # See the task 15 report.
-  case "$(uname -m)" in
-    x86_64)
+  #
+  # The arch is the binary's own (ELF Machine), not the host's: an arm64 image
+  # smoke-tested under emulation on an amd64 host carries aarch64 code, and
+  # asking it for endbr64 would fail a correct build.
+  machine="$(sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p' <<<"$(readelf -hW "$f")")"
+  case "$machine" in
+    *X86-64*)
       n_endbr="$(objdump -d "$f" 2>/dev/null | grep -c 'endbr64' || true)"
       [ "${n_endbr:-0}" -gt 0 ] \
         || { echo "FAIL[$LABEL]: $name contains no endbr64 landing pads (-fcf-protection=full did not take)"; exit 1; }
       echo "ok[$LABEL]: $name has __stack_chk_fail, $n_chk __*_chk symbols and $n_endbr endbr64 landing pads (whole-binary; php-src's own share is attributed at build time)"
       ;;
+    AArch64)
+      # -mbranch-protection=standard: BTI landing pads ("bti c"/"bti jc") and
+      # PAC (paciasp, which also serves as a landing pad on functions that save
+      # LR). Same whole-binary caveat as endbr64; php/build.sh attributes it.
+      # GNU objdump on an amd64 host is usually built for x86 alone and prints
+      # no instructions for an aarch64 file, so fall back to llvm-objdump, and
+      # require that the disassembly produced *some* instructions -- an empty
+      # one is a broken measurement, not a missing feature.
+      dis=""
+      for od in objdump llvm-objdump; do
+        command -v "$od" >/dev/null || continue
+        dis="$("$od" -d "$f" 2>/dev/null || true)"
+        grep -qE '[[:space:]](ret|bl|ldr)[[:space:]]' <<<"$dis" && break
+        dis=""
+      done
+      [ -n "$dis" ] \
+        || { echo "FAIL[$LABEL]: neither objdump nor llvm-objdump could disassemble aarch64 $name -- the BTI/PAC check measures nothing"; exit 1; }
+      n_bti="$(grep -cE '[[:space:]]bti([[:space:]]|$)' <<<"$dis" || true)"
+      n_pac="$(grep -cE '[[:space:]]paci[ab]sp([[:space:]]|$)' <<<"$dis" || true)"
+      [ "${n_bti:-0}" -gt 0 ] \
+        || { echo "FAIL[$LABEL]: $name contains no bti landing pads (-mbranch-protection=standard did not take)"; exit 1; }
+      [ "${n_pac:-0}" -gt 0 ] \
+        || { echo "FAIL[$LABEL]: $name contains no paciasp/pacibsp (-mbranch-protection=standard's pac-ret did not take)"; exit 1; }
+      echo "ok[$LABEL]: $name has __stack_chk_fail, $n_chk __*_chk symbols, $n_bti bti landing pads and $n_pac paciasp (whole-binary; php-src's own share is attributed at build time)"
+      ;;
     *)
-      echo "ok[$LABEL]: $name has __stack_chk_fail and $n_chk __*_chk symbols (endbr64 check is x86_64-only)"
+      echo "FAIL[$LABEL]: $name is a '$machine' ELF -- no landing-pad check is defined for it"; exit 1
       ;;
   esac
 fi

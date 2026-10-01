@@ -111,10 +111,23 @@ fi
 # this toolchain matrix produces, so the expectation is a function of
 # VM_COMPILER (and, for clang, of whether this version is new enough for
 # TAILCALL) rather than a per-version literal.
+#
+# The image's own architecture, not the host's: an arm64 image smoke-tested
+# under emulation on an amd64 host is still an arm64 build. On arm64, gcc's
+# global registers exist only from 7.4 on (Zend/Zend.m4's probe knows
+# __aarch64__ from then; php/build.sh asserts the same derivation at configure
+# time), so 7.0-7.3 run the CALL VM there.
+IMAGE_ARCH=$(docker image inspect --format '{{.Architecture}}' "$IMAGE")
 case "$VM_COMPILER" in
   gcc)
-    EXPECTED_VM_KIND=4
-    EXPECTED_VM_NAME=HYBRID
+    if [ "$IMAGE_ARCH" = arm64 ] && [ "$(printf '7.4\n%s\n' "$EXPECT" | sort -V | head -1)" != "7.4" ]; then
+      EXPECTED_VM_KIND=1
+      EXPECTED_VM_NAME=CALL
+      echo "note: arm64 gcc build of PHP $EXPECT -- no aarch64 global registers before 7.4, expecting the CALL VM"
+    else
+      EXPECTED_VM_KIND=4
+      EXPECTED_VM_NAME=HYBRID
+    fi
     ;;
   clang)
     if [ "$(printf '8.5\n%s\n' "$EXPECT" | sort -V | head -1)" = "8.5" ]; then
@@ -658,7 +671,13 @@ echo "on:jit=" . (!empty($s["jit"]["on"]) ? "1" : "0");
 echo "ok: opcache activates when explicitly enabled ($on)"
 
 php_major="${RELEASE%%.*}"
-if [ "$php_major" -ge 8 ]; then
+# 8.0's ext/opcache/config.m4 builds the JIT for i386/x86 hosts only (aarch64
+# DynASM arrived in 8.1) and turns it off elsewhere with a configure warning,
+# so an arm64 8.0 has no JIT to run -- asserted as off, not skipped.
+if [ "$IMAGE_ARCH" = arm64 ] && [ "$EXPECT" = "8.0" ]; then
+  [ "$on" = "on:jit=0" ] || { echo "FAIL: PHP 8.0 on arm64 reports a running JIT, but 8.0's opcache builds none for aarch64: $on"; exit 1; }
+  echo "ok: JIT not available on PHP 8.0/arm64 (8.0's JIT is x86-only; aarch64 support arrived in 8.1)"
+elif [ "$php_major" -ge 8 ]; then
   [ "$on" = "on:jit=1" ] || { echo "FAIL: opcache activated but JIT is not actually running -- PHP $EXPECT should support it: $on"; exit 1; }
   echo "ok: JIT active on PHP $EXPECT when opcache is enabled"
 else
