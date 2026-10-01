@@ -105,7 +105,7 @@ set-but-empty value, refuses to start with a named reason.
 | `PHP_DISABLE_FUNCTIONS` | `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec` | **Adds to** the baked list, never replaces it. `proc_open` is deliberately never disabled — Composer and `symfony/process` need it. |
 | `PHP_OPCACHE_ENABLE` / `_MEMORY` / `_VALIDATE_TIMESTAMPS` / `_JIT` | `1` / autotuned 64–512 MB / `1` / `tracing` | OPcache tuning. |
 | `PHP_EXT_ENABLE` | _(unset)_ | Comma-separated shared extensions to turn on, e.g. `ldap,uuid` — see below. |
-| `PHP_SNUFFLEUPAGUS` | _(unset)_ | `default` / `wordpress` / `prestashop` / `laravel` — loads that virtual-patching ruleset. |
+| `PHP_SNUFFLEUPAGUS` | _(unset)_ | `default` / `wordpress` / `prestashop` / `laravel`, or the name of a custom ruleset you mounted — loads that virtual-patching ruleset. |
 | `PHP_CHMOD_SHIM` | `0` | `true` enables the PrestaShop `chmod(0)` cache-bug workaround shim. |
 | `PHP_FPM_PM` / `_MAX_REQUESTS` / `_LISTEN` / `_STATUS_PATH` / `_ACCESS_LOG` / `_SLOWLOG_TIMEOUT` | `dynamic` / `1000` / `0.0.0.0:9000` / `/fpm-status` / `/proc/self/fd/2` / `10s` | `fpm` flavor pool config. |
 | `PHP_FPM_MAX_CHILDREN` (+ `_START_SERVERS` / `_MIN_SPARE` / `_MAX_SPARE`) | autotuned from the container's memory limit | Pool sizing — any one you set is honored exactly; the rest move to stay consistent. |
@@ -139,6 +139,13 @@ stripped.
 **Snuffleupagus** virtual patching ships compiled but never loaded —
 `PHP_SNUFFLEUPAGUS=prestashop` (or `default`/`wordpress`/`laravel`) turns
 it on.
+To use your own rules, mount
+`/usr/local/etc/php/snuffleupagus/<name>.rules` read-only and set
+`PHP_SNUFFLEUPAGUS=<name>` (lowercase letters, digits, `-` and `_`, starting
+with a letter or digit; anything else, including a path, is refused). Start
+from a copy of `default.rules`. The XXE feature (`sp.xxe_protection`) is not
+enabled: it does not hold across requests, and on PHP 7 it would nop your own
+`libxml_disable_entity_loader(true)`.
 
 ## Measured performance
 

@@ -174,7 +174,7 @@ reason rather than silently falling back to the image default.
 | `PHP_OPCACHE_JIT` | `tracing` | `opcache.jit`. PHP 8+ only; no-op on 7.x. |
 | `PHP_OPCACHE_JIT_BUFFER` | `64M` | `opcache.jit_buffer_size`. |
 | `PHP_EXT_ENABLE` | _(unset)_ | Comma-separated list of shared extensions to turn on — see [Extensions](#extensions). |
-| `PHP_SNUFFLEUPAGUS` | _(unset)_ | Name of a ruleset (`default`, `wordpress`, `prestashop`, `laravel`) to load — see [Hardening](#hardening). |
+| `PHP_SNUFFLEUPAGUS` | _(unset)_ | Name of a ruleset (`default`, `wordpress`, `prestashop`, `laravel`, or a [custom one](#custom-rulesets) you mounted) to load — see [Hardening](#hardening). |
 | `PHP_CHMOD_SHIM` | `0` | `1`/`true`/`yes`/`on` `LD_PRELOAD`s the PrestaShop `chmod(0)` cache-bug shim (see below); any other spelling than the accepted on/off ones refuses to start. |
 | `PHP_INI_SCAN_DIR` | _(image default)_ | Standard PHP variable; setting it *replaces* the default scan path. The entrypoint always splices the baked conf.d and its own writable/private directory back in, unless you explicitly set it to the empty string (PHP's own "scan nothing"). |
 | `PHP_FPM_PM` | `dynamic` | `fpm` flavor only. `pm`. |
@@ -295,11 +295,43 @@ environment:
 The PrestaShop ruleset deliberately leaves `readonly_exec` off — enabling it
 blocks PrestaShop's own cache-rebuild writes.
 
+Snuffleupagus's XXE feature (`sp.xxe_protection`) is not enabled in any of
+them. It turns libxml's entity loader off from an INI handler at startup, which
+does not carry into requests, so `LIBXML_NOENT` still expands `file://`
+entities with it on — and on PHP 7 it also nops the application's own
+`libxml_disable_entity_loader(true)`. libxml2 ≥ 2.9 does not load external
+entities unless the application opts in with `LIBXML_NOENT` / `LIBXML_DTDLOAD`;
+on PHP 7, call `libxml_disable_entity_loader(true)` yourself.
+
 Each ruleset runs its application unmodified: the exemptions it needs over
 upstream's defaults (framework includes, WordPress's own loopback requests,
 Symfony Console's terminal probe) are scoped to the framework file that makes
 the call, not opened up for everyone. Rulesets are for serving; build and
 deploy (Composer included) with `cli-builder` and no ruleset.
+
+#### Custom rulesets
+
+To run your own rules, mount the file read-only into the ruleset directory and
+select it by name:
+
+```yaml
+services:
+  php:
+    image: lotuswebagency/php:8.5-fpm
+    environment:
+      PHP_SNUFFLEUPAGUS: my-site
+    volumes:
+      - ./my-site.rules:/usr/local/etc/php/snuffleupagus/my-site.rules:ro
+```
+
+`PHP_SNUFFLEUPAGUS` is a bare name, never a path: it must match
+`^[a-z0-9][a-z0-9_-]*$` (lowercase letters, digits, `-` and `_`, starting with a
+letter or digit), and the container refuses to start otherwise. A name with no
+matching `.rules` file is refused too.
+
+Start from a copy of `default.rules` (`docker run --rm lotuswebagency/php:8.5-fpm
+cat /usr/local/etc/php/snuffleupagus/default.rules`) rather than an empty file:
+a custom file replaces the baked ruleset instead of adding to it.
 
 **Every setuid/setgid bit the runtime image inherited from the base image is
 stripped** at build time (`find / -perm /6000 -exec chmod a-s`).

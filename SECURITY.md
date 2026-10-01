@@ -63,3 +63,10 @@ upstream PHP security fixes on an end-of-life version tag, which is a
 documented property of that tag (see [SUPPORT.md](SUPPORT.md)), not a defect
 in this repository; and unfixable CVEs already listed in `.trivyignore` with
 a reason.
+
+Not a defect: Snuffleupagus's XXE feature (`sp.xxe_protection`) is not enabled
+in the shipped rulesets, because it does not hold across requests and on PHP 7
+nops the application's own `libxml_disable_entity_loader()`. libxml2 ≥ 2.9
+does not load external entities unless the application opts in
+(`LIBXML_NOENT`, `LIBXML_DTDLOAD`); on PHP 7, apps should call
+`libxml_disable_entity_loader(true)` themselves.
