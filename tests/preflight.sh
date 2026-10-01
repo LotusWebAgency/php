@@ -105,6 +105,34 @@ PYEOF
   fi
 fi
 
+if [ -n "${pr_json:-}" ]; then
+  # The pr group in docker-bake.hcl and the CI matrix (scripts/gen_matrix.py
+  # --github pr, whose legs name every target they bake, riders included) are
+  # two spellings of one list; a target in one and not the other is a PR that
+  # silently stops building something, or a leg bake cannot resolve.
+  pr_json_file="$(mktemp)"
+  printf '%s' "$pr_json" > "$pr_json_file"
+  pr_out="$(python3 scripts/gen_matrix.py --github pr | python3 -c '
+import json, sys
+legs = json.load(sys.stdin)["include"]
+bake = json.load(open(sys.argv[1]))
+ci = {n for leg in legs for n in leg["bake"].split()}
+grp = set(bake["group"]["pr"]["targets"])
+for n in sorted(ci - grp):
+    print(f"PROBLEM: {n} is built by a CI pr leg but is not in the bake pr group")
+for n in sorted(grp - ci):
+    print(f"PROBLEM: {n} is in the bake pr group but no CI pr leg builds it")
+print(f"pr legs: {len(legs)}, targets they bake: {len(ci)}, bake pr group: {len(grp)}")
+' "$pr_json_file")"
+  rm -f "$pr_json_file"
+  echo "$pr_out"
+  if grep -q '^PROBLEM:' <<<"$pr_out"; then
+    fail "the bake pr group and scripts/gen_matrix.py --github pr disagree (see above)"
+  else
+    ok "the bake pr group matches the targets the CI pr legs build"
+  fi
+fi
+
 # ------------------------------------------------------------- 4. shellcheck
 section "4/8 shellcheck on every shell file"
 command -v shellcheck >/dev/null || fail "shellcheck not found on this host"

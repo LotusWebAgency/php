@@ -146,8 +146,14 @@ target "php" {
   # CACHE_WEEK are pure cache disambiguators (see the variables above) with no
   # effect on the image itself. A local build leaves ARCH/CACHE_WEEK empty, so
   # the ref degrades to the same php-uarch-flavor-- CI always sets both.
-  cache-from = CACHE_REGISTRY != "" ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${item.flavor}-${ARCH}-${CACHE_WEEK}"] : []
-  cache-to   = CACHE_REGISTRY != "" ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${item.flavor}-${ARCH}-${CACHE_WEEK},mode=max"] : []
+  #
+  # item.cache_flavor is the flavor whose scope a target shares: ext-builder
+  # is built in the same bake invocation as cli (scripts/gen_matrix.py's
+  # RIDES_WITH), so it reads cli's scope and exports none of its own -- a second
+  # mode=max export of the same php-build layers, written concurrently into a
+  # ref of its own, would only cost registry storage.
+  cache-from = CACHE_REGISTRY != "" ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${item.cache_flavor}-${ARCH}-${CACHE_WEEK}"] : []
+  cache-to   = CACHE_REGISTRY != "" && item.cache_flavor == item.flavor ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${item.flavor}-${ARCH}-${CACHE_WEEK},mode=max"] : []
   output     = [PUSH ? "type=registry" : "type=docker"]
 }
 
@@ -156,10 +162,12 @@ group "default" {
 }
 
 # The PR subset: oldest and newest ends where breakage concentrates,
-# one mid-range version, the heaviest flavor, and ext-builder (whose CI leg
-# also runs tests/test-ext-builder.sh against that version's fpm and cli).
+# one mid-range version, the heaviest flavor, and cli plus ext-builder (one CI
+# leg, one bake invocation, so one php-build; it also runs
+# tests/test-ext-builder.sh against that version's fpm and cli). Mirrors
+# scripts/gen_matrix.py's PR_SUBSET, which tests/preflight.sh cross-checks.
 group "pr" {
-  targets = ["php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm", "php-8_5-cli-builder", "php-8_5-ext-builder"]
+  targets = ["php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm", "php-8_5-cli-builder", "php-8_5-cli", "php-8_5-ext-builder"]
 }
 
 # ------------------------------------------------------------------ bootstrap

@@ -40,7 +40,52 @@ class TestTargets(unittest.TestCase):
                              capture_output=True, text=True, check=True).stdout
         names = {t["name"] for t in json.loads(out)["include"]}
         self.assertEqual(names, {"php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm",
-                                 "php-8_5-cli-builder", "php-8_5-ext-builder"})
+                                 "php-8_5-cli-builder", "php-8_5-cli"})
+        self.assertEqual(len(names), 5, "ext-builder rides with cli, so it adds no leg")
+
+    def run_github(self, which):
+        out = subprocess.run([sys.executable, str(GEN), "--github", which],
+                             capture_output=True, text=True, check=True).stdout
+        return json.loads(out)["include"]
+
+    def test_every_target_is_a_leg_or_exactly_one_riders(self):
+        legs = self.run_github("build")
+        covered = []
+        for leg in legs:
+            covered += leg["bake"].split()
+            self.assertEqual(leg["bake"].split()[0], leg["name"])
+        self.assertEqual(sorted(covered), sorted(t["name"] for t in self.targets))
+        self.assertEqual(len(legs), 50 - len(self.matrix["versions"]))
+
+    def test_ext_builder_rides_with_cli_not_alone(self):
+        legs = self.run_github("build")
+        self.assertNotIn("ext-builder", {leg["flavor"] for leg in legs})
+        riding = [leg for leg in legs if leg["rider_name"]]
+        self.assertEqual({leg["flavor"] for leg in riding}, {"cli"})
+        self.assertEqual({leg["rider_flavor"] for leg in riding}, {"ext-builder"})
+        self.assertEqual(len(riding), len(self.matrix["versions"]))
+        for leg in riding:
+            self.assertEqual(leg["uarch"], "baseline")
+            self.assertEqual(leg["rider_name"], leg["name"].replace("-cli", "-ext-builder"))
+            self.assertEqual(leg["rider_tag"], f"lotuswebagency/php:{leg['php']}-ext-builder")
+            self.assertEqual(leg["bake"], f"{leg['name']} {leg['rider_name']}")
+
+    def test_legs_without_a_rider_carry_empty_rider_strings(self):
+        for leg in self.run_github("build"):
+            if not leg["rider_name"]:
+                self.assertEqual((leg["rider_flavor"], leg["rider_tag"], leg["bake"]),
+                                 ("", "", leg["name"]))
+
+    def test_rider_without_a_host_is_rejected(self):
+        only_ext = [t for t in self.targets if t["name"] == "php-8_5-ext-builder"]
+        with self.assertRaises(SystemExit):
+            gen_matrix.build_legs(only_ext)
+
+    def test_pr_subset_covers_every_flavor_incl_the_ext_builder_rider(self):
+        legs = self.run_github("pr")
+        baked = {n for leg in legs for n in leg["bake"].split()}
+        self.assertIn("php-8_5-ext-builder", baked)
+        self.assertEqual(baked, gen_matrix.PR_SUBSET)
 
     def test_every_version_has_four_flavors(self):
         for ver in self.matrix["versions"]:
