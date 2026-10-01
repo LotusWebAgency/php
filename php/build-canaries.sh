@@ -439,13 +439,18 @@ assert_preserve_none_canary() {
 # the preprocessor evaluates correctly. Run from the PHP source root, after
 # ./configure.
 read_zend_vm_kind() {
-  local n
+  local n pp
   [ -f Zend/zend_vm_opcodes.h ] && [ -f main/php_config.h ] \
     || { echo "FATAL: read_zend_vm_kind needs Zend/zend_vm_opcodes.h and main/php_config.h in $PWD" >&2; return 1; }
+  # 8.5's header includes Zend/zend_portability.h, which pulls the generated
+  # Zend/zend_config.h and computes HAVE_MUSTTAIL itself, so this has to be a
+  # real preprocess of the configured tree. Captured in two steps: through a
+  # pipe, a compiler that failed halfway would still leave a line to parse.
   # shellcheck disable=SC2086  # CFLAGS/CPPFLAGS are flag lists meant to word-split
-  n="$(printf '#include "main/php_config.h"\n#include "Zend/zend_vm_opcodes.h"\nZEND_VM_KIND_IS ZEND_VM_KIND\n' \
-        | "${CC:-cc}" -E -P -x c -I. -IZend -Imain ${CFLAGS:-} ${CPPFLAGS:-} - \
-        | sed -n 's/^ZEND_VM_KIND_IS[[:space:]]*//p' | tail -1 | tr -d '[:space:]')"
+  pp="$(printf '#include "main/php_config.h"\n#include "Zend/zend_vm_opcodes.h"\nZEND_VM_KIND_IS ZEND_VM_KIND\n' \
+        | "${CC:-cc}" -E -P -x c -I. -IZend -Imain ${CFLAGS:-} ${CPPFLAGS:-} -)" \
+    || { echo "FATAL: preprocessing Zend/zend_vm_opcodes.h with ${CC:-cc} failed (diagnostics above)" >&2; return 1; }
+  n="$(sed -n 's/^ZEND_VM_KIND_IS[[:space:]]*//p' <<<"$pp" | tail -1 | tr -d '[:space:]')"
   case "$n" in
     1) echo call ;;
     2) echo switch ;;
