@@ -1,8 +1,9 @@
 # Build -> test -> scan -> publish for lotuswebagency/php.
 #
-# This repo is a docker-bake matrix: 39 published targets (11 PHP versions x
-# 3 flavors, plus an x86-64-v3 / armv8.2-a variant on 8.4 and 8.5), each built
-# with a PGO training corpus that is itself a build input.
+# This repo is a docker-bake matrix: 50 published targets (11 PHP versions x
+# 4 flavors, plus an x86-64-v3 / armv8.2-a variant of fpm/cli/cli-builder on
+# 8.4 and 8.5), each built with a PGO training corpus that is itself a build
+# input.
 #
 # A pull request builds, tests and Trivy-gates a small subset without
 # publishing (pr-build), gated by one aggregate required check (pr-gate) so a
@@ -118,8 +119,9 @@ jobs:
 
   # ------------------------------------------------------------- pr-matrix
   # The bake `pr` subset (php-7_0-fpm, php-8_2-fpm, php-8_5-fpm,
-  # php-8_5-cli-builder -- oldest/newest ends, one mid-range version, the
-  # heaviest flavor), as a GitHub Actions matrix. Same source
+  # php-8_5-cli-builder, php-8_5-ext-builder -- oldest/newest ends, one
+  # mid-range version, the heaviest flavor and the extension build stage), as
+  # a GitHub Actions matrix. Same source
   # scripts/gen_matrix.py --github pr that tests/preflight.sh's bake --print
   # cross-check already trusts, never a second copy of the subset here.
   pr-matrix:
@@ -205,6 +207,23 @@ jobs:
       - name: Smoke test
         run: ./tests/smoke.sh "$TARGET_TAG" "$TARGET_PHP" "$TARGET_FLAVOR"
 
+      # The cross-image half of the ext-builder tests: an extension compiled in
+      # ext-builder, COPYed into fpm and cli of the same version, loaded and
+      # called. Needs all three images, which one matrix leg does not have, so
+      # this leg builds its two siblings too -- same bake invocation shape and
+      # the same corpus context, so the php-build stage it just compiled is a
+      # layer-cache hit and only the thin fpm/cli stages are new work.
+      - name: Build fpm and cli siblings, test an extension end to end (ext-builder)
+        if: matrix.target.flavor == 'ext-builder'
+        run: |
+          set -euo pipefail
+          slug="php-${TARGET_PHP//./_}"
+          docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm" "$slug-cli" \
+            --set '*.platform=linux/amd64' \
+            --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
+            --load
+          ./tests/test-ext-builder.sh "$TARGET_PHP"
+
       # A repo-root .trivyignore, if present, is honored automatically.
       - name: Trivy vulnerability gate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -238,7 +257,7 @@ jobs:
           echo "ok: preflight and every pr-build leg succeeded"
 
   # -------------------------------------------------------- release-matrix
-  # The full 39-target matrix (scripts/gen_matrix.py --github targets), fed
+  # The full 50-target matrix (scripts/gen_matrix.py --github targets), fed
   # to both the build and merge jobs below so neither hand-maintains a
   # second copy of it.
   release-matrix:
@@ -601,7 +620,7 @@ jobs:
   # manifest under it (--recursive, M14).
   #
   # `if: !cancelled()` (I5) instead of the implicit `needs: build` gate: one
-  # failed leg out of 78 must not skip every other target's publish and the
+  # failed leg out of 100 must not skip every other target's publish and the
   # weekly security refresh along with it. Each target's own two-digest check
   # below still fails that target's own merge leg -- fail-fast: false on the
   # matrix means the other 38 are unaffected either way.
