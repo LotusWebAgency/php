@@ -1,0 +1,31 @@
+# Which application release each PHP version is tested against.
+#
+# One row per fixture set. A PHP version resolves, per app, to the one row
+# whose [php-min, php-max] range contains it; ranges for an app must not
+# overlap and must cover every matrix.json version (lib.sh's `sets check`
+# enforces both). The newest release that supports a PHP version wins, so a
+# version is always tested against the application its users would actually
+# run on it, not the oldest one that still happens to boot.
+#
+# php-min is also the PHP the fixture is BUILT on: every set is installed,
+# composer-resolved and populated on the stock image for php-min
+# (APPTEST_BUILDER_REPO, dementev/php-fpm-with-ext by default), so the data
+# the from-source images are tested against was written by a known-good PHP
+# they have to stay compatible with -- serialized sessions, password hashes,
+# cache entries and all.
+#
+# app        set    php-min  php-max
+laravel      5.5    7.0      7.0
+laravel      5.8    7.1      7.1
+laravel      6      7.2      7.2
+laravel      8      7.3      8.0
+laravel      10     8.1      8.1
+laravel      12     8.2      8.2
+laravel      13     8.3      8.5
+wordpress    6.5    7.0      7.1
+wordpress    6.9    7.2      7.3
+wordpress    7.1    7.4      8.5
+prestashop   1.6    7.0      7.0
+prestashop   1.7    7.1      7.1
+prestashop   8.2    7.2      8.0
+prestashop   9.2    8.1      8.5

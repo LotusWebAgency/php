@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1.27
+# Placeholder corpus for the bootstrap cli-builder targets only (task 37c).
+#
+# The main Dockerfile's php-build stage mounts a corpus unconditionally --
+# its own comment says why: "A conditional mount is not expressible here, and
+# the alternative -- a placeholder image for the pgo=false case -- would mean
+# the fallback path and the real path stop being the same code." That
+# reasoning is about the *release* php targets, which always build PGO=true
+# against a real per-tier corpus; it does not cover the bootstrap targets
+# below, which exist only to produce the cli-builder image a tier's real
+# corpus is itself built from (the chicken-and-egg tests/build-corpus.sh's
+# own comment names). A from-zero environment has neither, so the bootstrap
+# targets need something to satisfy that same mount without claiming to be a
+# real training corpus.
+#
+# Empty /corpus and /corpus-src do that: php/build.sh only reads either path
+# when PGO=true (its PGO_CORPUS/PGO_CORPUS_SRC handling is gated on that same
+# flag), and docker-bake.hcl's php-cli-builder-bootstrap target always builds
+# with PGO=false. No release target ever uses this image -- it is wired in
+# only as the bootstrap targets' `corpus` context.
+#
+# Never tagged or labeled as a release image: docker-bake.hcl's
+# php-cli-builder-bootstrap target adds com.lotuswebagency.bootstrap=true and
+# a "-cli-builder-bootstrap" tag suffix on top of what this image carries,
+# and this image itself carries the same label so it cannot be mistaken for
+# one either.
+ARG BASE_IMAGE=debian:trixie-slim
+FROM ${BASE_IMAGE}
+ARG INPUTS_HASH=""
+
+LABEL org.opencontainers.image.source="https://github.com/LotusWebAgency/php" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="Lotus Web Agency" \
+      org.opencontainers.image.authors="Vasilii Dementev https://vasiliidementev.com" \
+      org.opencontainers.image.title="lotuswebagency/php bootstrap placeholder corpus (not a real PGO corpus)" \
+      com.lotuswebagency.bootstrap="true" \
+      com.lotuswebagency.inputs-hash="${INPUTS_HASH}"
+
+RUN mkdir -p /corpus /corpus-src

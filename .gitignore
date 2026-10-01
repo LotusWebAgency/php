@@ -1,0 +1,14 @@
+.DS_Store
+.superpowers/
+*.profraw
+*.profdata
+/spike/build/
+__pycache__/
+
+# Internal process docs -- not part of the public repo (task 38).
+/CLAUDE.md
+/AGENTS.md
+/docs/
+
+# Opt-in local benchmark log (tests/bench.sh --record); never committed.
+/tests/bench/results.tsv

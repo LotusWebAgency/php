@@ -1,0 +1,91 @@
+Prefix ext/intl MessageFormatAdapter methods with php, the way php-src itself
+does from 7.4 on, so a statically-linked ICU does not collide with them.
+
+ext/intl/msgformat/msgformat_helpers.cpp opens U_NAMESPACE_BEGIN and defines
+icu::MessageFormatAdapter::getArgTypeList() -- ICU declares that class a friend
+of MessageFormat, and php-src reuses it as a backdoor to a private method. ICU
+defines the very same symbol in its own umsg.cpp. Against a shared libicui18n
+that never matters: the definition lives inside the .so and the linker never
+sees a second one. deps/build-deps.sh builds ICU --enable-static
+--disable-shared on purpose (no duplicate 30 MB ICU data blob in the image, and
+nothing else in it can dlopen an EOL ICU), so the linker does pull umsg.ao in
+and reports
+
+  multiple definition of icu_67::MessageFormatAdapter::getArgTypeList(
+  icu_67::MessageFormat const&, int&)
+
+at the final link of sapi/cli/php -- after the whole tree has compiled, in a
+file whose name gives no hint that the cause is a linkage choice made in
+deps/build-deps.sh.
+
+php-src fixed this in 7.4 by renaming its own methods to phpGetArgTypeList and
+phpGetMessagePattern, with the comment "Prefix the methods with php to avoid
+clashes with any definitions in ICU." This is that rename, applied to the same
+call sites. The one occurrence deliberately left alone is
+
+  return m.getArgTypeList(count);
+
+which is ICU own real private method being called, not the php-src wrapper.
+
+7.4 and 8.0 carry the rename upstream and need no patch, which is why task 14's
+PHP 8.0 build linked static ICU 70.1 without ever meeting this. 7.0, 7.1, 7.2
+and 7.3 all need it; the php-7.1 and php-7.2 copies are byte-identical, and the
+7.0 and 7.3 ones differ from them only in hunk line numbers (see
+deps/patches/README.md).
+
+--- a/ext/intl/msgformat/msgformat_helpers.cpp
++++ b/ext/intl/msgformat/msgformat_helpers.cpp
+@@ -57,22 +57,22 @@
+  */
+ class MessageFormatAdapter {
+ public:
+-    static const Formattable::Type* getArgTypeList(const MessageFormat& m,
++    static const Formattable::Type* phpGetArgTypeList(const MessageFormat& m,
+                                                    int32_t& count);
+ #ifdef HAS_MESSAGE_PATTERN
+-    static const MessagePattern getMessagePattern(MessageFormat* m);
++    static const MessagePattern phpGetMessagePattern(MessageFormat* m);
+ #endif
+ };
+ 
+ const Formattable::Type*
+-MessageFormatAdapter::getArgTypeList(const MessageFormat& m,
++MessageFormatAdapter::phpGetArgTypeList(const MessageFormat& m,
+                                      int32_t& count) {
+     return m.getArgTypeList(count);
+ }
+ 
+ #ifdef HAS_MESSAGE_PATTERN
+ const MessagePattern
+-MessageFormatAdapter::getMessagePattern(MessageFormat* m) {
++MessageFormatAdapter::phpGetMessagePattern(MessageFormat* m) {
+     return m->msgPattern;
+ }
+ #endif
+@@ -81,7 +81,7 @@
+ U_CFUNC int32_t umsg_format_arg_count(UMessageFormat *fmt)
+ {
+ 	int32_t fmt_count = 0;
+-	MessageFormatAdapter::getArgTypeList(*(const MessageFormat*)fmt, fmt_count);
++	MessageFormatAdapter::phpGetArgTypeList(*(const MessageFormat*)fmt, fmt_count);
+ 	return fmt_count;
+ }
+ 
+@@ -104,7 +104,7 @@
+ 		return mfo->mf_data.arg_types;
+ 	}
+ 
+-	const Formattable::Type *types = MessageFormatAdapter::getArgTypeList(
++	const Formattable::Type *types = MessageFormatAdapter::phpGetArgTypeList(
+ 		*(MessageFormat*)mfo->mf_data.umsgf, parts_count);
+ 
+ 	/* Hash table will store Formattable::Type objects directly,
+@@ -304,7 +304,7 @@
+ 	MessageFormat *mf = (MessageFormat *)mfo->mf_data.umsgf;
+ 
+ #ifdef HAS_MESSAGE_PATTERN
+-	const MessagePattern mp = MessageFormatAdapter::getMessagePattern(mf);
++	const MessagePattern mp = MessageFormatAdapter::phpGetMessagePattern(mf);
+ 
+ 	return umsg_parse_format(mfo, mp, err);
+ #else

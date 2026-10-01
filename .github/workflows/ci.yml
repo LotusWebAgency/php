@@ -1,0 +1,737 @@
+# Build -> test -> scan -> publish for lotuswebagency/php.
+#
+# This repo is a docker-bake matrix: 39 published targets (11 PHP versions x
+# 3 flavors, plus an x86-64-v3 / armv8.2-a variant on 8.4 and 8.5), each built
+# with a PGO training corpus that is itself a build input.
+#
+# A pull request builds, tests and Trivy-gates a small subset without
+# publishing (pr-build), gated by one aggregate required check (pr-gate) so a
+# PHP version bump renaming the per-leg check names can never silently make
+# the branch-protection rule stop covering anything. A push to main, the
+# weekly cron or a manual dispatch on main builds every target natively per
+# architecture (no QEMU) and publishes it with SBOM + max-mode provenance,
+# then signs every manifest (index and per-platform) keylessly with cosign.
+# Every third-party action is pinned to a full commit SHA with a version
+# comment; mutable tags have been hijacked before (GHSA-69fq-xp46-6x23).
+#
+# PGO corpus wiring (task 39 design item, revised task 39b after verification
+# found the corpus job could never succeed -- see git history for the
+# original claim this replaces): each of the 5 corpus tiers
+# (scripts/pgo_tiers.py's REGISTRY) is genuinely architecture-specific, not a
+# portable data image -- php/pgo/Dockerfile.corpus's `corpus` stage installs
+# mariadb-server/mariadb-client via apt directly into the image that gets
+# published (no later minimal stage strips them back out), and it inherits
+# the *entire* cli-builder toolchain image besides. So the corpus job below
+# builds each tier natively per architecture (corpus x {tier, arch} matrix,
+# 5 x 2 = 10 legs) and a corpus-merge job assembles the two per-arch images
+# into one multi-platform index per tier, published under both the floating
+# `php<tier>` ref every build target's `corpus` context names and a
+# `php<tier>-<inputs-hash>` ref -- the same digest-then-merge shape the php
+# build/merge jobs already use for the same reason (two independent
+# single-arch jobs can't push one shared tag without one side clobbering the
+# other). Pulling a multi-platform index through a `docker-image://` extra
+# context resolves to the pulling build's own target platform automatically,
+# which is what makes one ref safe to mount from both an amd64 and an arm64
+# leg of the `build` job below.
+#
+# Every build/pr-build leg mounts its tier's corpus by the hash-pinned ref
+# (`<tag>-<inputs-hash>`), never the floating one, and asserts the pulled
+# image's own inputs-hash label before baking -- the floating tag is only
+# ever re-pointed when a tier's inputs actually changed (see the corpus job's
+# reuse check), so after a revert that restores an old tree hash, trusting
+# the floating tag would silently train against whatever a later commit left
+# there instead of the corpus this tree actually calls for.
+#
+# tests/build-corpus.sh's own from-zero bootstrap fallback (task 37c: build a
+# placeholder-corpus cli-builder when neither a real one nor a bootstrap one
+# exists yet) is reused unmodified in spirit by the corpus job below (one
+# fix: it now detects its own host architecture instead of assuming amd64,
+# so the same fallback works unchanged on the arm64 leg too).
+#
+# The corpus job's `docker/setup-buildx-action` step asks for `driver:
+# docker` rather than the action's own default (`docker-container`):
+# php/pgo/Dockerfile.corpus and the bootstrap cli-builder Dockerfile both
+# have a `FROM` that needs to resolve against images that exist only in this
+# runner's local daemon store (a just-`--load`ed bootstrap image, or a tier's
+# own previous corpus build for the resumability check) -- the isolated
+# BuildKit container the `docker-container` driver runs cannot see that
+# store at all and fails with "pull access denied" trying to resolve it as a
+# registry ref instead (reproduced locally, see the task 39b report's toy
+# proof). The `build`/`pr-build`/`merge` jobs keep the default
+# `docker-container` driver: every context or image they reference there is
+# already a real, previously pushed registry ref, which `docker-container`
+# resolves by pulling from the registry itself -- no local store involved,
+# and no `docker pull` step earns its keep there either (removed; see the
+# corpus-mount steps below, which pull for a different reason: asserting the
+# inputs-hash label before the build, not making the ref resolvable).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Weekly rebuild: fresh base layers and Debian package updates. The bake
+    # cache ref includes an ISO-week component (docker-bake.hcl's CACHE_WEEK)
+    # so this run always starts the runtime-package layer's cache scope
+    # empty instead of replaying last week's apt-get install forever.
+    - cron: "10 4 * * 1"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Deny-by-default; every job below grants back only what its own steps need
+# (id-token: write only for the cosign job, packages: write only for the jobs
+# that push to GHCR).
+permissions: {}
+
+env:
+  GHCR_CORPUS_REGISTRY: ghcr.io/lotuswebagency/php
+
+jobs:
+  # ------------------------------------------------------------- preflight
+  # Everything tests/preflight.sh already checks without building an image:
+  # matrix.gen.hcl drift, PGO tier coverage, bake --print + COMPILER
+  # cross-check, shellcheck, the python unit suite, build-all.sh/bake target
+  # list drift. Runs on every push and PR -- cheap, and it is what catches a
+  # stale generated file or a shellcheck regression in seconds rather than
+  # forty minutes into a from-source PGO build.
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Ensure shellcheck is present
+        run: command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
+
+      - name: tests/preflight.sh
+        run: ./tests/preflight.sh
+
+  # ------------------------------------------------------------- pr-matrix
+  # The bake `pr` subset (php-7_0-fpm, php-8_2-fpm, php-8_5-fpm,
+  # php-8_5-cli-builder -- oldest/newest ends, one mid-range version, the
+  # heaviest flavor), as a GitHub Actions matrix. Same source
+  # scripts/gen_matrix.py --github pr that tests/preflight.sh's bake --print
+  # cross-check already trusts, never a second copy of the subset here.
+  pr-matrix:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      targets: ${{ steps.matrix.outputs.targets }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: matrix
+        run: echo "targets=$(python3 scripts/gen_matrix.py --github pr | jq -c '.include')" >> "$GITHUB_OUTPUT"
+
+  # --------------------------------------------------------------- pr-build
+  # Build the pr subset for linux/amd64 only, --load, smoke.sh, Trivy gate.
+  # No push. Mounts each target's tier corpus by its hash-pinned GHCR ref
+  # (I3) and asserts the pulled image's own inputs-hash label matches --
+  # never the floating ref, which a revert can leave pointed at a stale
+  # corpus with nothing to notice (see the module header). A PR whose own
+  # diff changes the PGO corpus itself is not re-trained by its own gate
+  # (the corpus job only runs on main), so it is graded against the last
+  # published corpus for its tier.
+  pr-build:
+    needs: [preflight, pr-matrix]
+    if: github.event_name == 'pull_request'
+    name: pr-build ${{ matrix.target.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.pr-matrix.outputs.targets) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read # GHCR pull of the published PGO corpus image
+    env:
+      TARGET_NAME: ${{ matrix.target.name }}
+      TARGET_TAG: ${{ matrix.target.tags[0] }}
+      TARGET_PHP: ${{ matrix.target.php }}
+      TARGET_FLAVOR: ${{ matrix.target.flavor }}
+      TARGET_CORPUS: ${{ matrix.target.corpus }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR (corpus pull)
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute inputs hash
+        run: echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)" >> "$GITHUB_ENV"
+
+      - name: Pull and verify this target's hash-pinned PGO corpus (I3)
+        run: |
+          set -euo pipefail
+          corpus_ref="${TARGET_CORPUS}-${INPUTS_HASH}"
+          docker pull "$corpus_ref"
+          label_hash="$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}' "$corpus_ref")"
+          [ "$label_hash" = "$INPUTS_HASH" ] || {
+            echo "FAIL: $corpus_ref carries inputs-hash '$label_hash', expected '$INPUTS_HASH'" >&2
+            exit 1
+          }
+          echo "ok: $corpus_ref inputs-hash matches this tree"
+          echo "CORPUS_REF=$corpus_ref" >> "$GITHUB_ENV"
+
+      - name: Build (load) for test
+        run: |
+          docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$TARGET_NAME" \
+            --set '*.platform=linux/amd64' \
+            --set "$TARGET_NAME.contexts.corpus=docker-image://$CORPUS_REF" \
+            --load
+
+      - name: Smoke test
+        run: ./tests/smoke.sh "$TARGET_TAG" "$TARGET_PHP" "$TARGET_FLAVOR"
+
+      # A repo-root .trivyignore, if present, is honored automatically.
+      - name: Trivy vulnerability gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.TARGET_TAG }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+  # ----------------------------------------------------------------- pr-gate
+  # One aggregate required check (M17) instead of branch protection naming
+  # every pr-build matrix leg by hand: GitHub's per-leg check names include
+  # the matrix values (php version, flavor...), so a version bump renames
+  # them and silently drops coverage from whatever branch-protection rule
+  # names the old ones. pr-gate is the only check the owner has to require
+  # (together with preflight, which it also depends on) and it fails unless
+  # every leg that ran actually succeeded.
+  pr-gate:
+    needs: [preflight, pr-build]
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require preflight and every pr-build leg to have succeeded
+        run: |
+          echo "preflight: ${{ needs.preflight.result }}"
+          echo "pr-build:  ${{ needs.pr-build.result }}"
+          [ "${{ needs.preflight.result }}" = "success" ] || { echo "FAIL: preflight did not succeed" >&2; exit 1; }
+          [ "${{ needs.pr-build.result }}" = "success" ] || { echo "FAIL: at least one pr-build leg did not succeed" >&2; exit 1; }
+          echo "ok: preflight and every pr-build leg succeeded"
+
+  # -------------------------------------------------------- release-matrix
+  # The full 39-target matrix (scripts/gen_matrix.py --github targets), fed
+  # to both the build and merge jobs below so neither hand-maintains a
+  # second copy of it.
+  release-matrix:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      targets: ${{ steps.matrix.outputs.targets }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: matrix
+        run: echo "targets=$(python3 scripts/gen_matrix.py --github targets | jq -c '.include')" >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------ corpus-matrix
+  # The 5 corpus tiers (scripts/pgo_tiers.py list), as a GitHub Actions
+  # matrix, for the corpus and corpus-merge jobs below. Same source
+  # scripts/pgo_tiers.py every other corpus-aware script and job already
+  # reads, never a second copy of the tier list here.
+  corpus-matrix:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      tiers: ${{ steps.matrix.outputs.tiers }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: matrix
+        run: |
+          tiers="$(python3 scripts/pgo_tiers.py list | jq -R -s -c '
+            split("\n") | map(select(length > 0) | split("\t")) |
+            map({floor: .[0], builder: .[2], tag: .[3]})
+          ')"
+          echo "tiers=$tiers" >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------ corpus
+  # One PGO corpus image per {tier, arch} (5 tiers x 2 arches = 10 legs,
+  # M10), rebuilt only when a tier's inputs change and published to GHCR
+  # under a per-arch, hash-suffixed tag. corpus-merge below assembles the
+  # two arches of each tier into one multi-platform index. Runs before
+  # `build` -- every php target's build mounts its tier's corpus
+  # unconditionally.
+  #
+  # Per-tier, per-arch rather than one job building all 5 tiers sequentially
+  # (the original design; M10): a single 4-vCPU runner doing 5 bootstrap PHP
+  # compiles plus 5 PrestaShop/Laravel/Symfony/WordPress corpus builds in a
+  # row was likely to blow past even a 120-minute budget on the first run or
+  # after any shared input changed. One tier on one native runner fits
+  # comfortably inside the timeout below.
+  corpus:
+    needs: [preflight, corpus-matrix]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    name: corpus ${{ matrix.tier.floor }} ${{ matrix.arch.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: ${{ fromJson(needs.corpus-matrix.outputs.tiers) }}
+        arch:
+          - name: amd64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+          - name: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TIER: ${{ matrix.tier.floor }}
+      TIER_BUILDER: ${{ matrix.tier.builder }}
+      TIER_TAG: ${{ matrix.tier.tag }}
+      ARCH_NAME: ${{ matrix.arch.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # docker (not the action default docker-container): Dockerfile.corpus
+      # and the bootstrap cli-builder Dockerfile both FROM an image that may
+      # only exist in this runner's own local daemon store -- see the module
+      # header and the task 39b report's toy proof.
+      - name: Set up Docker Buildx (docker driver -- FROM/inspect need the local image store)
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver: docker
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute inputs hash
+        run: echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)" >> "$GITHUB_ENV"
+
+      - name: Reuse this tier+arch's corpus from GHCR if unchanged
+        id: reuse
+        run: |
+          set -euo pipefail
+          per_arch_ref="${TIER_TAG}-${INPUTS_HASH}-${ARCH_NAME}"
+          if docker manifest inspect "$per_arch_ref" >/dev/null 2>&1; then
+            echo "ok: tier $TIER/$ARCH_NAME unchanged -- $per_arch_ref already in GHCR"
+            echo "reused=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reused=false" >> "$GITHUB_OUTPUT"
+            # Best-effort: makes build-corpus.sh's own release-vs-bootstrap
+            # check below succeed immediately when this tier's *release*
+            # cli-builder has been published already; harmless when it has
+            # not (build-corpus.sh falls back to bootstrapping).
+            if docker pull "$TIER_BUILDER" >/dev/null 2>&1; then
+              echo "note: pulled published release builder $TIER_BUILDER"
+            else
+              echo "note: $TIER_BUILDER not available yet, build-corpus.sh will bootstrap"
+            fi
+          fi
+
+      - name: Build this tier's corpus (skipped if reused)
+        if: steps.reuse.outputs.reused != 'true'
+        run: ./tests/build-corpus.sh "$TIER"
+
+      - name: Publish this tier+arch's corpus (skipped if reused)
+        if: steps.reuse.outputs.reused != 'true'
+        run: |
+          set -euo pipefail
+          label_hash="$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}' "$TIER_TAG" 2>/dev/null || true)"
+          [ "$label_hash" = "$INPUTS_HASH" ] || {
+            echo "FAIL: $TIER_TAG missing or stale after build-corpus.sh (label=$label_hash, want $INPUTS_HASH)" >&2
+            exit 1
+          }
+          per_arch_ref="${TIER_TAG}-${INPUTS_HASH}-${ARCH_NAME}"
+          docker tag "$TIER_TAG" "$per_arch_ref"
+          docker push "$per_arch_ref"
+          echo "ok: pushed $per_arch_ref"
+
+  # ------------------------------------------------------------ corpus-merge
+  # One multi-platform index per tier, assembled from the two per-arch,
+  # hash-suffixed images the corpus job above publishes -- published under
+  # both the floating `php<tier>` ref (what every build/pr-build target's
+  # `contexts.corpus` names) and `php<tier>-<inputs-hash>` (what build/
+  # pr-build actually mount, per I3). `docker-image://` extra contexts
+  # resolve a multi-platform ref against the *building* target's own
+  # platform, which is what lets one ref serve both the amd64 and the arm64
+  # leg of a php build correctly (M12).
+  corpus-merge:
+    needs: [corpus, corpus-matrix]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    name: corpus-merge ${{ matrix.tier.floor }}
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: ${{ fromJson(needs.corpus-matrix.outputs.tiers) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TIER_TAG: ${{ matrix.tier.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute inputs hash
+        run: echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)" >> "$GITHUB_ENV"
+
+      - name: Assemble this tier's multi-platform corpus index
+        run: |
+          set -euo pipefail
+          hash_tag="${TIER_TAG}-${INPUTS_HASH}"
+          amd64_ref="${hash_tag}-amd64"
+          arm64_ref="${hash_tag}-arm64"
+          for ref in "$amd64_ref" "$arm64_ref"; do
+            docker manifest inspect "$ref" >/dev/null 2>&1 || {
+              echo "FAIL: missing $ref -- its corpus leg did not succeed" >&2
+              exit 1
+            }
+          done
+          if docker manifest inspect "$hash_tag" >/dev/null 2>&1; then
+            echo "ok: $hash_tag already published, nothing to assemble"
+          else
+            docker buildx imagetools create -t "$TIER_TAG" -t "$hash_tag" "$amd64_ref" "$arm64_ref"
+            echo "ok: published $TIER_TAG and $hash_tag as a multi-platform index"
+          fi
+
+  # ------------------------------------------------------------------- build
+  # Every target x {amd64 on ubuntu-24.04, arm64 on ubuntu-24.04-arm} --
+  # native, no QEMU. Build and push by digest (no tag), then pull that exact
+  # digest back and smoke/Trivy-test it (I4) -- what gets scanned and merged
+  # is byte-for-byte what was pushed, never a separately-built --load copy
+  # that could drift from it if a base layer refreshed or BuildKit's cache
+  # was GC'd between two builds. The digest push is harmless: it carries no
+  # tag, so nothing is pullable under a real name until the merge job below
+  # assembles the multi-arch manifest and applies one.
+  build:
+    needs: [corpus-merge, release-matrix]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.release-matrix.outputs.targets) }}
+        arch:
+          - name: amd64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+          - name: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    name: build ${{ matrix.target.name }} ${{ matrix.arch.name }}
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write # GHCR: corpus pull + build-cache push
+    env:
+      TARGET_NAME: ${{ matrix.target.name }}
+      TARGET_TAG: ${{ matrix.target.tags[0] }}
+      TARGET_PHP: ${{ matrix.target.php }}
+      TARGET_FLAVOR: ${{ matrix.target.flavor }}
+      TARGET_CORPUS: ${{ matrix.target.corpus }}
+      PLATFORM: ${{ matrix.arch.platform }}
+      ARCH_NAME: ${{ matrix.arch.name }}
+      REVISION: ${{ github.sha }}
+      CACHE_REGISTRY: ghcr.io/lotuswebagency/php
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # M19: matrix.json's "image" field is the one source of truth for the
+      # Docker Hub repository; derived here instead of duplicated as a
+      # workflow-level env so digests and tags can never end up pushed to
+      # two different repositories because only one of the two copies got
+      # updated.
+      - name: Derive Docker Hub image from matrix.json
+        run: echo "DOCKERHUB_IMAGE=docker.io/$(jq -r .image matrix.json)" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute inputs hash and build timestamp
+        run: |
+          {
+            echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)"
+            echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "CACHE_WEEK=$(date -u +%G-W%V)"
+          } >> "$GITHUB_ENV"
+
+      - name: Pull and verify this target's hash-pinned PGO corpus (I3)
+        run: |
+          set -euo pipefail
+          corpus_ref="${TARGET_CORPUS}-${INPUTS_HASH}"
+          docker pull "$corpus_ref"
+          label_hash="$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}' "$corpus_ref")"
+          [ "$label_hash" = "$INPUTS_HASH" ] || {
+            echo "FAIL: $corpus_ref carries inputs-hash '$label_hash', expected '$INPUTS_HASH'" >&2
+            exit 1
+          }
+          echo "ok: $corpus_ref inputs-hash matches this tree"
+          echo "CORPUS_REF=$corpus_ref" >> "$GITHUB_ENV"
+
+      - name: Build and push by digest (SBOM + provenance)
+        id: push
+        env:
+          PUSH: "true"
+          ARCH: ${{ matrix.arch.name }}
+        run: |
+          set -euo pipefail
+          docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$TARGET_NAME" \
+            --set '*.platform='"$PLATFORM" \
+            --set "$TARGET_NAME.contexts.corpus=docker-image://$CORPUS_REF" \
+            --set "*.tags=$DOCKERHUB_IMAGE" \
+            --set "*.output=type=image,name=$DOCKERHUB_IMAGE,push=true,push-by-digest=true,name-canonical=true" \
+            --metadata-file metadata.json
+          digest="$(jq -r ".[\"$TARGET_NAME\"][\"containerimage.digest\"]" metadata.json)"
+          [ -n "$digest" ] && [ "$digest" != "null" ] || {
+            echo "FAIL: no containerimage.digest for $TARGET_NAME in metadata.json" >&2
+            cat metadata.json >&2
+            exit 1
+          }
+          echo "digest: $digest"
+          echo "DIGEST=$digest" >> "$GITHUB_ENV"
+          mkdir -p /tmp/digests
+          echo -n "$digest" > "/tmp/digests/$ARCH_NAME"
+
+      - name: Pull the pushed image back by digest (I4)
+        run: docker pull "${DOCKERHUB_IMAGE}@${DIGEST}"
+
+      - name: Smoke test the pushed digest
+        run: ./tests/smoke.sh "${DOCKERHUB_IMAGE}@${DIGEST}" "$TARGET_PHP" "$TARGET_FLAVOR"
+
+      # A repo-root .trivyignore, if present, is honored automatically. Runs
+      # against the exact digest that was pushed and will be merged, not a
+      # separately-built local copy (I4).
+      - name: Trivy vulnerability gate (pushed digest)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.DOCKERHUB_IMAGE }}@${{ env.DIGEST }}
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+
+      # Full name, no shared prefix pattern on the download side (C1): a
+      # GitHub Actions artifact name is unique per workflow run by
+      # construction (upload-artifact v4 refuses a second upload under a
+      # name already used), so two targets can never collide here even
+      # though several target names share a "-cli"/"-cli-builder" or
+      # "-fpm"/"-fpm-v3" prefix -- the collision the verifier found was in
+      # the merge job's download *pattern*, fixed below by downloading each
+      # arch's artifact by its exact name instead of matching a prefix.
+      - name: Upload digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.target.name }}-${{ matrix.arch.name }}
+          path: /tmp/digests/${{ matrix.arch.name }}
+          if-no-files-found: error
+          retention-days: 1
+
+  # ------------------------------------------------------------------- merge
+  # One job per target: assemble the two per-arch digests into a multi-arch
+  # manifest under this target's real tags (from scripts/gen_matrix.py) plus
+  # the full-version tag X.Y.Z-flavor[-v3], derived from the built image and
+  # required to equal matrix.json's release -- a tag can never claim a
+  # version the image does not contain. org.opencontainers.image.revision/
+  # created are already on every per-arch image from the build job's
+  # REVISION/CREATED bake vars, so the merge only has to add tags, not labels.
+  # Then cosign-signs the resulting manifest list and every per-platform
+  # manifest under it (--recursive, M14).
+  #
+  # `if: !cancelled()` (I5) instead of the implicit `needs: build` gate: one
+  # failed leg out of 78 must not skip every other target's publish and the
+  # weekly security refresh along with it. Each target's own two-digest check
+  # below still fails that target's own merge leg -- fail-fast: false on the
+  # matrix means the other 38 are unaffected either way.
+  merge:
+    needs: [build, release-matrix]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    name: merge ${{ matrix.target.name }}
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(needs.release-matrix.outputs.targets) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read # checkout, to read matrix.json for the image name (M19)
+      id-token: write # cosign keyless OIDC
+    env:
+      TARGET_NAME: ${{ matrix.target.name }}
+      TARGET_PHP: ${{ matrix.target.php }}
+      TARGET_RELEASE: ${{ matrix.target.release }}
+      TARGET_FLAVOR: ${{ matrix.target.flavor }}
+      TARGET_UARCH: ${{ matrix.target.uarch }}
+      TARGET_TAGS: ${{ toJson(matrix.target.tags) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Derive Docker Hub image from matrix.json
+        run: echo "DOCKERHUB_IMAGE=docker.io/$(jq -r .image matrix.json)" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Exact artifact names, one download per arch (C1): the previous
+      # pattern download (`digest-${name}-*` + merge-multiple) also matched
+      # every OTHER target whose name happens to start with this one's name
+      # plus a hyphen (every "X.Y-cli" matches "X.Y-cli-builder", etc. -- 15
+      # of 39 targets collided). Both files this downloads are named exactly
+      # "amd64"/"arm64" (the build job's own upload path), so a plain shared
+      # `path: digests` cannot collide between the two calls either.
+      - name: Download amd64 digest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: digest-${{ matrix.target.name }}-amd64
+          path: digests
+
+      - name: Download arm64 digest
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: digest-${{ matrix.target.name }}-arm64
+          path: digests
+
+      - name: Assemble multi-arch manifest and verify the full-version tag
+        run: |
+          set -euo pipefail
+          amd64_digest="$(cat digests/amd64)"
+          arm64_digest="$(cat digests/arm64)"
+          [ -n "$amd64_digest" ] && [ -n "$arm64_digest" ] || {
+            echo "FAIL: missing a per-arch digest for $TARGET_NAME" >&2
+            exit 1
+          }
+
+          # Read PHP_VERSION back from the built image (arch-invariant: this
+          # is the interpreter's own reported version string, not a compiled
+          # artifact) rather than trusting matrix.json's release field for
+          # the tag: a published version tag can only ever claim what the
+          # image actually contains.
+          actual_version="$(docker run --rm "${DOCKERHUB_IMAGE}@${amd64_digest}" php -r 'echo PHP_VERSION;')"
+          [ "$actual_version" = "$TARGET_RELEASE" ] || {
+            echo "FAIL: $TARGET_NAME built PHP $actual_version, matrix.json says $TARGET_RELEASE" >&2
+            exit 1
+          }
+          echo "ok: built image reports PHP $actual_version, matches matrix.json"
+
+          full_tag="${TARGET_RELEASE}-${TARGET_FLAVOR}"
+          [ "$TARGET_UARCH" = "v3" ] && full_tag="${full_tag}-v3"
+
+          tag_args=(-t "${DOCKERHUB_IMAGE}:${full_tag}")
+          while IFS= read -r t; do tag_args+=(-t "docker.io/${t}"); done < <(jq -r '.[]' <<<"$TARGET_TAGS")
+
+          docker buildx imagetools create "${tag_args[@]}" \
+            "${DOCKERHUB_IMAGE}@${amd64_digest}" "${DOCKERHUB_IMAGE}@${arm64_digest}"
+
+          # The manifest list's own digest is the sha256 of its raw content
+          # as served -- this is how registry digests are computed, so
+          # hashing --raw's output here is equivalent to (and cheaper than)
+          # a second registry round trip to ask for it back.
+          list_digest="sha256:$(docker buildx imagetools inspect "${DOCKERHUB_IMAGE}:${full_tag}" --raw | sha256sum | cut -d' ' -f1)"
+          echo "manifest list digest: $list_digest"
+          echo "LIST_DIGEST=$list_digest" >> "$GITHUB_ENV"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # --recursive (M14): without it, only the index digest gets a
+      # signature and the per-platform manifests underneath stay unsigned,
+      # which is not what SECURITY.md/README/DOCKERHUB.md promise ("every
+      # published digest").
+      - name: Sign the manifest, recursively (keyless)
+        run: cosign sign --yes --recursive "${DOCKERHUB_IMAGE}@${LIST_DIGEST}"
+
+  # ------------------------------------------------------------ sync-description
+  # Pushes DOCKERHUB.md to the Docker Hub page after a successful publish.
+  sync-description:
+    needs: merge
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    environment: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Derive Docker Hub repository from matrix.json
+        run: echo "DOCKERHUB_REPO=$(jq -r .image matrix.json)" >> "$GITHUB_ENV"
+
+      - name: Sync Docker Hub description
+        uses: peter-evans/dockerhub-description@1b9a80c056b620d92cedb9d9b5a223409c68ddfa # v5.0.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKERHUB_REPO }}
+          short-description: "PHP 7.0-8.5 built from source with PGO, hardened, on Debian trixie-slim"
+          readme-filepath: ./DOCKERHUB.md

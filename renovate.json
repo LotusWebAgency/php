@@ -1,0 +1,111 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices"
+  ],
+  "ignorePaths": [
+    "deps/versions.lock",
+    "php/php-src.lock",
+    "php/pgo/corpus.lock",
+    "php/pgo/corpus/**"
+  ],
+  "customManagers": [
+    {
+      "description": "matrix.json's base image is a JSON string, not a Dockerfile ARG -- docker-bake.hcl always overrides the Dockerfile's own ARG BASE_IMAGE from it, so this is the only place a digest pin has any effect",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^matrix\\.json$/"
+      ],
+      "matchStrings": [
+        "\"base\": \"(?<depName>[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[a-f0-9]+)\""
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "loose"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Auto-merge base image digest/patch refreshes once CI is green",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "pin",
+        "patch"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Minor/major base bumps stay as PRs for review",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "major"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Auto-merge the matrix.json base-image digest pin the same way as the Dockerfile bases",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchFileNames": [
+        "matrix.json"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "pin",
+        "patch"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "A new action release (minor/major) stays a PR for review",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "major"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "A mutable action tag can be force-moved to a malicious commit (the 2026-03 trivy-action hijack); require the pin to sit for a week and never auto-merge it, so a hijack has a review window instead of landing on main unattended",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "automerge": false,
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "Auto-merge action version-tag refreshes (the SHA still gets pinned by hand from the new tag) once CI is green",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "pin",
+        "patch"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Never let Renovate pin or bump our own published images -- the corpus job publishes ghcr.io/lotuswebagency/php(/corpus) and the release job publishes lotuswebagency/php, so a PR against either is a self-referential loop: it changes php/pgo/Dockerfile.corpus's ARG BUILDER_IMAGE default (never actually read -- build-corpus.sh always passes --build-arg BUILDER_IMAGE) or matrix.json's own image, invalidates INPUTS_HASH, and triggers a full rebuild that produces a new digest for Renovate to bump again",
+      "matchManagers": [
+        "dockerfile",
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "lotuswebagency/php",
+        "ghcr.io/lotuswebagency/**"
+      ],
+      "enabled": false
+    }
+  ]
+}

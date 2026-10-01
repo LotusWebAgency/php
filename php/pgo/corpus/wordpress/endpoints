@@ -1,0 +1,20 @@
+# See corpus/laravel/endpoints for the format. WordPress has no public/ dir:
+# the docroot is the install root itself.
+docroot .
+version wordpress
+database wp-content/database/.ht.sqlite SELECT COUNT(*) FROM wp_posts WHERE post_status = 'publish'
+path / required 4096 PGO training corpus
+path /wp-login.php required 1024 Log In
+# ?p=1 is the "Hello world!" post wp_install() seeds. Permalinks stay plain --
+# php -S does no rewriting, and the training run is not testing mod_rewrite.
+path /?p=1 required 4096 Hello world!
+# Overrides verify.sh/train.sh's shared negative-control path (task 29e).
+# With plain permalinks (this corpus never enables pretty ones -- see above),
+# a path WordPress cannot resolve, like the shared default, still hits its
+# canonical-redirect logic: a 301 to a trailing-slash form that then renders
+# the *home page*, 200, not a 404 template -- confirmed by hand. ?p=<a post id
+# that does not exist> is WordPress's own, long-standing way of asking for a
+# specific post and getting its real 404 template when there isn't one; it
+# reaches index.php as a query on a real file, not a path WordPress has to
+# guess the shape of, so it doesn't depend on permalink structure either.
+negative-control /?p=999999

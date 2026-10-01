@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# Called by snuffleupagus's upload_validation feature (see
+# conf/snuffleupagus/default.rules) with the temp path of an uploaded file as
+# $1. Per the documented contract (doc/source/config.rst), exit 0 allows the
+# upload, any other exit code rejects it. SP_FILENAME/SP_FILESIZE/
+# SP_REMOTE_ADDR/SP_CURRENT_FILE are also set in the environment but unused
+# here -- content is what matters, not the claimed name or extension.
+#
+# Round-1 review findings fixed here (I-2, I-3):
+#   - Fail-closed. The original version was `head ... | grep ... && exit 1`
+#     as its only branch: under `set -e`, the `&&` exempts a *non-matching*
+#     grep from killing the script (this project's own established
+#     "A && exit N" idiom), which is correct -- but it meant a `head`
+#     failure (unreadable file) also fell through the same way, straight
+#     past `exit 1` to the unconditional `exit 0` at the end. Accept-on-error
+#     is the wrong default for a security check: an operator who believes
+#     uploads are validated is worse off than one who knows they aren't.
+#     Every read below is checked explicitly and rejects on failure.
+#   - `<?=` (the short-echo tag) is now matched alongside `<?php` -- it has
+#     been a live opening tag since PHP 5.4 and a bare `<?= system($_GET[0]); ?>`
+#     is a complete webshell that the old pattern missed entirely.
+#     `<script language="php">` is deliberately NOT matched: confirmed on
+#     this image (every PHP version here is 7.0+) that it prints as inert
+#     literal text, never executes -- PHP 7.0 removed it as an opening tag.
+#   - Archives skip content inspection, but are now verified to actually
+#     BE the archive type their magic bytes claim (round-2 review, T12-G
+#     finding 4) -- WordPress's plugin installer and PrestaShop's module
+#     installer upload zips *by design*, so an opaque, genuinely-valid
+#     archive is accepted without inspection rather than partially and
+#     unreliably content-matched depending on how zip happened to order its
+#     entries (confirmed: a stored hello-dolly-shaped plugin zip rejected
+#     under the old content-sniff-only version). But magic bytes are just
+#     four leading bytes of attacker-controlled upload content: the round-2
+#     review found live that `PK\x03\x04` followed directly by
+#     `<?php system($_GET[0]);` sailed straight through the old
+#     magic-byte-only check -- valid-looking header, no real archive behind
+#     it, content never inspected. Fixed by actually validating the archive
+#     (`unzip -t` / `gzip -t` / `bzip2 -t` / `xz -t`, all already present in
+#     this image's runtime package set -- nothing new installed) before
+#     trusting the magic bytes: a file whose bytes match a format's magic
+#     number but fails that format's own integrity check is rejected, not
+#     silently passed through to the content-sniff below.
+#
+# Round-2 re-review (T12-I item 5) found two more problems with the archive
+# path above, addressed here:
+#   - Unbounded-decompression DoS. `-t` on any of these tools decompresses
+#     the whole payload to verify it -- that's how integrity checking
+#     works, there's no way to validate without doing it -- so a small,
+#     highly-compressed upload can cost seconds of CPU inside one FPM
+#     worker (measured by the reviewer: a 9.4MB gzip of 2GB of zeros costs
+#     4.2s; well within this image's upload_max_filesize, so size alone
+#     doesn't bound it). Every validator call below is wrapped in
+#     `timeout`: a legitimate WordPress plugin or PrestaShop module zip
+#     validates in well under a second, so a generous ceiling costs normal
+#     uploads nothing while capping the worst case per request regardless
+#     of compression ratio -- a bomb that would otherwise run for minutes
+#     now costs at most ARCHIVE_CHECK_TIMEOUT seconds and is rejected, not
+#     silently accepted (timeout's own non-zero exit routes through the
+#     same "failed validation" rejection path as a genuinely corrupt
+#     archive).
+#   - The polyglot class is NOT fully closed, and that needs to be said
+#     plainly rather than implied away: a file that is a genuinely
+#     well-formed, valid zip -- `zip -0` of a file whose content is
+#     `<?php system($_GET[0]); ?>` -- still passes `unzip -t` (it *is* a
+#     real zip) and is accepted here, exactly as any other legitimate
+#     archive would be, one `zip -0` away from a working webshell if
+#     something else on the deployment ever executes that file as PHP
+#     (e.g. a naive extension-based dispatch, or php://filter-style
+#     inclusion). This cannot be closed without re-introducing the exact
+#     bug this file exists to fix -- content-inspecting archives to look
+#     for "<?php" breaks the normal WordPress/PrestaShop plugin/module
+#     upload flow (I-2), since a bundled plugin file's own literal "<?php"
+#     routinely survives inside the raw archive bytes. What this script
+#     defends against is a file *pretending* to be an archive to smuggle
+#     raw PHP past a content-sniff outright (the fixed bug above); it does
+#     not, and structurally cannot without breaking its own purpose,
+#     guarantee that nothing inside a real archive is itself PHP -- that is
+#     what upload_max_filesize, disable_functions and the rest of this
+#     ruleset's actual execution-prevention rules are for, not this script.
+set -euo pipefail
+
+f="${1:?}"
+: "${ARCHIVE_CHECK_TIMEOUT:=5}"
+
+magic="$(head -c 8 -- "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" || {
+  echo "sp-upload-check: could not read ${f}, rejecting" >&2
+  exit 1
+}
+
+# Exits the whole script: 0 if $f genuinely validates as the named archive
+# format within the timeout, 1 (with a diagnostic) if the magic bytes lied
+# or validation didn't finish in time.
+check_archive() {
+  local label="$1"; shift
+  if timeout "$ARCHIVE_CHECK_TIMEOUT" "$@" >/dev/null 2>&1; then
+    exit 0
+  fi
+  echo "sp-upload-check: ${f} has ${label} magic bytes but failed integrity validation (or exceeded ${ARCHIVE_CHECK_TIMEOUT}s), rejecting" >&2
+  exit 1
+}
+
+case "$magic" in
+  504b0304*|504b0506*|504b0708*) check_archive zip unzip -t -- "$f" ;;
+  1f8b*)                         check_archive gzip gzip -t -- "$f" ;;
+  425a68*)                       check_archive bzip2 bzip2 -t -- "$f" ;;
+  fd377a585a00*)                 check_archive xz xz -t -- "$f" ;;
+esac
+
+# Piped directly into grep rather than captured into a variable: `$(...)`
+# truncates at the first embedded NUL byte (bash strings are C strings), so
+# a polyglot upload with a NUL earlier than its "<?php"/"<?=" payload --
+# a real, known technique for defeating "scan the first N bytes" checks --
+# would have silently lost everything after that NUL. A raw pipe to grep
+# has no such limit.
+if head -c 4096 -- "$f" | grep -qiE '<\?php|<\?='; then
+  exit 1
+fi
+[ "${PIPESTATUS[0]}" -eq 0 ] || {
+  echo "sp-upload-check: could not read ${f}, rejecting" >&2
+  exit 1
+}
+exit 0

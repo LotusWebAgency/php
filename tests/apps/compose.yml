@@ -1,0 +1,83 @@
+# One application test stack. run.sh drives it; every value below comes from
+# the environment it exports, so the same file serves every app, set, image
+# and config. By hand, for poking at a live app:
+#
+#   ./tests/apps/run.sh lotuswebagency/php:8.4-fpm --app wordpress --keep
+#
+# prints the URL and the `docker compose` prefix to use against the stack.
+name: ${APPTEST_PROJECT:?set by run.sh}
+
+x-php: &php
+  image: ${PHP_IMAGE:?}
+  env_file:
+    - ${APPTEST_PHP_ENV:?}
+  environment:
+    APPTEST_APP: ${APPTEST_APP:?}
+    APPTEST_SET: ${APPTEST_SET:?}
+    APPTEST_PHP: ${APPTEST_PHP:?}
+    APPTEST_FLAVOR: ${APPTEST_FLAVOR:?}
+    APPTEST_CONFIG: ${APPTEST_CONFIG:?}
+    APPTEST_STOCK: ${APPTEST_STOCK:?}
+    APPTEST_HOST: ${APPTEST_HOST:?}
+  volumes:
+    - app:/srv/app
+    - ${APPTEST_ROOT:?}:/apptest:ro
+    - composer-cache:/composer-cache
+    - ${APPTEST_SP_SRC:?}:${APPTEST_SP_DST:?}:ro
+  working_dir: /srv/app
+  depends_on:
+    db: {condition: service_healthy}
+    redis: {condition: service_started}
+    memcached: {condition: service_started}
+
+services:
+  db:
+    image: ${APPTEST_FIXTURE:?}
+    healthcheck:
+      test: ["CMD", "mariadb", "-h127.0.0.1", "-uroot", "-papptest", "-e", "SELECT 1"]
+      interval: 1s
+      timeout: 3s
+      retries: 120
+
+  # Populates the `app` volume: Docker copies the fixture's /srv/app into an
+  # empty named volume on first mount. Then hands the tree to the image under
+  # test's www-data (33 on ours and Debian stock, 82 on stock Alpine).
+  app:
+    image: ${APPTEST_FIXTURE:?}
+    entrypoint: ["sh", "-c", "chown -R \"$$APP_UID:$$APP_GID\" /srv/app"]
+    environment:
+      APP_UID: ${APP_UID:?}
+      APP_GID: ${APP_GID:?}
+    volumes:
+      - app:/srv/app
+    profiles: [seed]
+
+  redis:
+    image: ${APPTEST_REDIS_IMAGE:?}
+  memcached:
+    image: ${APPTEST_MEMCACHED_IMAGE:?}
+
+  php:
+    <<: *php
+    profiles: [web]
+
+  web:
+    image: ${APPTEST_WEB_IMAGE:?}
+    volumes:
+      - app:/srv/app:ro
+      - ${APPTEST_ROOT}/${APPTEST_APP}/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "127.0.0.1::80"
+    depends_on: [php]
+    profiles: [web]
+
+  cli:
+    <<: *php
+    profiles: [cli]
+
+volumes:
+  app:
+  # Shared by every stack, so cli-builder runs of `composer install` do not
+  # each download the same packages again.
+  composer-cache:
+    name: apptest-composer-cache

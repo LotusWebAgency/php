@@ -1,0 +1,34 @@
+# Libraries php-src can build from a *bundled* copy instead of the system one,
+# and which copy each shipped image is required to link.
+#
+# Why this file exists (T16-G): three times now the build has silently taken a
+# bundled copy and nobody noticed until something broke.
+#   task 14  vendored libxml2   -- dropped; Debian ships the same version, patched
+#   task 15  bundled zstd       -- --with-libzstd ruled, still unimplemented
+#   task 16  bundled libsqlite  -- PHP 7.0 shipped SQLite 3.14.2 (August 2016)
+# Same root cause every time: configure defaults to the bundled copy when no
+# flag says otherwise, and nothing asserted which one came out the other end.
+# tests/smoke.sh reads this file and interrogates the built binary's ELF
+# dynamic section, so the answer comes from the artifact, not from the flags we
+# believe we passed.
+#
+# This list is literal, not derived, and that is deliberate: "php-src can
+# bundle this" is a property of php-src, not of anything in this repo.
+# php/ext.json's `libs` column is the closest thing, but deriving from it would
+# be wrong in both directions -- it names dev packages for libraries that are
+# legitimately *not* dynamically linked (CF-5 requires the vendored OpenSSL to
+# leave no NEEDED entry at all) and for libraries that end up in shared
+# extension .so files rather than in the php binary. A curated list of three,
+# with the reason for each, beats a derivation that would have to be
+# special-cased until it was a list again.
+#
+# expect:
+#   system   the php binary must carry a direct NEEDED entry for it
+#   bundled  it must not -- the copy is compiled in. Every bundled row names
+#            the task that owns removing it; when that lands, this check fails
+#            and the row has to be flipped, which is the point.
+#
+# lib          expect   owner    why
+libsqlite3     system   -        php bundles ext/sqlite3/libsqlite through 7.3; 7.4 removed it, which is why 7.4+ were clean by accident. ext.json pins --with-sqlite3=/usr and --with-pdo-sqlite=/usr for 7.0-7.3.
+libzip         system   -        php bundles ext/zip/lib through 7.2; ext.json pins --with-libzip=/usr for 7.0-7.2. 7.3 dropped the bundle and needs no flag.
+libzstd        system   -        the pecl zstd tarball carries a whole copy of zstd in ext/zstd/zstd/lib and --enable-zstd alone compiles it in. php/ext.json now also passes --with-libzstd (task 17), which routes ext/zstd through pkg-config to debian's libzstd instead. Two reasons beyond CVE reach: the bundled path does PHP_ADD_INCLUDE(ext/zstd/zstd/lib/common), which puts pool.h, debug.h, mem.h and a dozen other generic names on *every* extension's include path; and an untracked zstd compiled into the binary is a library task 26's SBOM would not list.

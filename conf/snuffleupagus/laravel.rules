@@ -1,0 +1,660 @@
+# Laravel ruleset: vendored upstream (see default.rules for the pinning
+# discipline, the DIVERGENCES section directly below, the T12-D/T12-F/
+# T12-G/T12-I project exemptions, and why this is duplicated rather than
+# @include'd -- @include is not real snuffleupagus syntax) plus the
+# Laravel-specific delta at the bottom.
+#
+# ============ DIVERGENCES FROM UPSTREAM v0.14.0 (ruling T12-L) =============
+#
+# 1. ASCII fix, one character (found during T12-C, the original vendoring).
+#    Upstream's own comment on the open_basedir rule (originally:
+#    "chdir('..');<U+2026 HORIZONTAL ELLIPSIS>;chdir('..')") contains one
+#    non-ASCII character. The docs are explicit about the consequence:
+#    "Rules, including comments, needs to be written in ASCII, other
+#    encodings aren't supported and might cause syntax errors and related
+#    issues like making all rules after non-ASCII symbols not considered
+#    for execution and silently discarded" (doc/source/config.rst). That
+#    is exactly what happened, confirmed by bisection: with the ellipsis
+#    intact, every rule *after* that comment -- the entire "Prevent
+#    system-related injections" block (system/exec/shell_exec/proc_open,
+#    the headline protection this ruleset exists for), the full
+#    include/require coverage, the backdoor-recon block, the curl/upload/
+#    logging hardening, the webshell-pattern block -- silently stopped
+#    registering. No parse error, no [config] warning, nothing in
+#    `docker logs`. Verified both ways: reproduced the silent gap with the
+#    ellipsis in place, confirmed every rule downstream of it works the
+#    moment the ellipsis is replaced with three ASCII periods and nothing
+#    else changes. Applied inline, at the `open_basedir` comment, below.
+#
+# 2. move_uploaded_file() destination patterns anchored to the actual file
+#    extension (T12-J, round 6). Upstream's own patterns are `\.ph` /
+#    `\.ht`, unanchored -- they match those letters *anywhere* in the
+#    destination path, not just as the real extension. Demonstrated live
+#    (round-2 re-review): `holiday.photo.jpg`, `my.phone.png`,
+#    `chart.ht.svg` and `summer.photos.zip` all fatal move_uploaded_file()
+#    under the unanchored rule, purely because "pho"/"ht" appears inside
+#    an ordinary word -- and WordPress's own `wp_handle_upload()` puts the
+#    sanitized *user* filename directly into this argument, so any media
+#    upload whose name happens to contain those letters in sequence broke.
+#    Fixed by anchoring to `$` (the real end of the path) with the
+#    character class after "ph"/"ht" widened to any run of letters/digits,
+#    so upstream's original breadth (catch .php, .php3, .phtml, .phar,
+#    .pht, .htaccess, .htpasswd, ...) still holds, case-folded explicitly
+#    since upload filenames aren't guaranteed lowercase.
+#
+#    The anchor itself was then found (same round, second pass) to trade
+#    the false-positive bug for a narrower coverage regression: the
+#    unanchored original blocked `shell.php ` (trailing space), `shell.
+#    php.` (trailing dot) and similar junk-suffixed names by accident, of
+#    matching "ph"/"ht" anywhere; a strict `$` anchor stopped blocking
+#    them, since the trailing byte is no longer part of the letter/digit
+#    run. Practical severity is low on this stack -- nginx's own `\.php$`
+#    routing has the identical limitation, so a file actually named that
+#    way is not straightforwardly served as PHP either -- but it is a real
+#    regression from this file's own prior behavior, not a hypothetical
+#    one. Closed by widening the trailing side of the anchor to also
+#    absorb a run of spaces and/or dots before end-of-string (`[ .]*$`
+#    instead of a bare `$`), so `shell.php`, `shell.php ` (one or more
+#    trailing spaces), `shell.php.` / `shell.php...` (one or more trailing
+#    dots) and any mixed run of the two all still match, while the four
+#    legitimate names above -- none of which end in a run of bare spaces
+#    or dots after their real extension -- are unaffected: the widened
+#    tail only matters once the letter/digit run has already stopped at
+#    the position that would otherwise be the true end of the path, so it
+#    cannot reach back into an earlier "ph"/"ht" occurrence the way the
+#    original unanchored pattern did. A trailing tab was tried and
+#    dropped: the config DSL's string-literal parser does not reliably
+#    pass `\t` through to the regex engine as a tab escape (confirmed by
+#    a live probe: a real 0x09 byte in the destination did not match a
+#    `\t` written into the pattern), and shipping an escape that quietly
+#    doesn't do what its own text claims is worse than not having it --
+#    tab-suffixed filenames are not covered, and this paragraph says so
+#    rather than the pattern implying otherwise.
+#
+#    Demonstrated in full: all four legitimate names save cleanly, plain
+#    and trailing-junk-suffixed shell.php/.PHP/.phtml/.phar/.htaccess/
+#    .htpasswd all still fatal, including multi-character and mixed
+#    trailing runs (`shell.php   `, `shell.php...`, `shell.php. `) and the
+#    double-extension case (`shell.php.php`, blocked on its own real `.php`
+#    ending regardless of the earlier one). Applied inline, at the "File
+#    upload" section, below.
+#
+# 3. move_uploaded_file()'s new_path rules gated >=70000, not upstream's
+#    >=70400. PHP 7.2 and 7.3 name the argument new_path too (their own
+#    arginfo: path, new_path), so under upstream's gate those two versions
+#    got only the "destination" rules -- a name no PHP this image builds
+#    has -- and moved an upload to shell.php without a word. 7.4 and 8.x
+#    already matched >=70400 and see no change.
+#
+# 4. Parameter-name gates of two vendored blocks corrected to PHP's real
+#    arginfo (overturns the T12-K parking; tests/apps finding 5).
+#    move_uploaded_file() is (path, new_path) on 7.x and (from, to) on
+#    8.x; ini_set() is (varname, newvalue) on 7.x and (option, value) on
+#    8.x. Upstream gates the new_path upload rules and the "Logging
+#    lockdown" varname rules >=70000, and adds a "destination" branch no
+#    PHP version has ever used, so every move_uploaded_file() call (all
+#    versions) and every ini_set('error_log' | 'error_reporting' |
+#    'display_errors') call (8.x) raised [config] warnings for a parameter
+#    that does not exist. Those are PHP warnings, not log noise: PrestaShop's
+#    webservice turns any warning into an error response, and POST
+#    /api/images/products/<id> returned 500 under this ruleset on 7.4 and
+#    8.0. The new_path and varname branches are now gated < 80000 and the
+#    "destination" branch is gone; the drops are unchanged and still cover
+#    every version, each under its real argument name. Applied inline at
+#    the "File upload" and "Logging lockdown" sections below.
+# =========== END DIVERGENCES FROM UPSTREAM v0.14.0 (ruling T12-L) ==========
+#
+# ========= BEGIN project exemptions (T12-D / T12-F / T12-G / T12-I) =========
+# Exemptions below are evaluated before "BEGIN upstream" so each wins by
+# file position over the vendored block's own unconditional rule for the
+# same function -- rules for the same function are evaluated top to bottom
+# across the whole file and the first match wins (doc/source/config.rst),
+# confirmed directly (an early .allow(), separated from a later
+# unconditional .drop() by unrelated rules in between, still wins by
+# position, not proximity).
+#
+# T12-G, the reason most of these exist: round-2 review booted this file
+# against real Laravel/WordPress/PrestaShop source (not synthetic probes)
+# and found the vendored rules broke all three frameworks on their very
+# first request -- ini_set('display_errors', ...) in Laravel's own
+# exception bootstrap, function_exists('proc_open') in Symfony Console
+# (loaded by every `php artisan` and by WordPress/PrestaShop's own Symfony
+# Console-based CLI tooling), and eval() in Twig/Smarty template
+# compilation. Synthetic rule-shape tests cannot catch this class of bug --
+# they only test what was thought of; a real, if degenerate, framework
+# codepath is what actually exercises what upstream's rules collide with.
+#
+# T12-I, round-2 re-review: every param-named exemption below MUST be
+# version-split the same way upstream splits its own param-named rules
+# (@condition PHP_VERSION_ID < 80000 / >= 80000). Snuffleupagus matches
+# .param() by the argument's *name*, and PHP 8.0 renamed several of these
+# (ini_set: varname -> option; putenv: setting -> assignment). This
+# project's own ext.json ships snuffleupagus for php>=7.2, so a rule using
+# only the 8.x name is silently inert on 7.2/7.3/7.4 -- confirmed live
+# against a 7.0-era build: a `.param("varname")`-only exemption never
+# matches on 8.5, and (the bug this section fixes) a `.param("option")`-
+# only exemption never matches on 7.x either, while the vendored *drop*
+# rules for the same key -- which upstream did split -- still fire on
+# whichever version the exemption missed. Net effect before this fix: the
+# T12-G Critical was invisible on 8.5 (what every build and test in this
+# task ran against) and still fatal on 7.2-7.4 (what this image also
+# ships). Every exemption below now mirrors upstream's own split exactly.
+#
+# 1. putenv('DYLD_LIBRARY_PATH') -- Composer's Platform::clearEnv() calls
+#    this as part of normal git version-guessing
+#    (composer/src/Composer/Util/Git.php, "clean up env for OSX") --
+#    Symfony components do the same defensive clear, so this is not
+#    Composer-specific. Upstream's putenv hardening blocks any assignment
+#    containing the *substring* "LD_", to stop LD_PRELOAD/LD_LIBRARY_PATH
+#    injection; "DYLD_LIBRARY_PATH" contains that substring but is
+#    macOS-only and inert on this (Linux) image -- there is nothing here
+#    for it to poison. This is a genuine upstream over-match for this
+#    platform: the rule's own justification (stop a real vector) does not
+#    apply to this value, so blocking it protects nothing while
+#    false-positiving any code that defensively clears it. Exempted by the
+#    exact value, not the pattern: LD_PRELOAD, LD_LIBRARY_PATH and every
+#    other real LD_-prefixed vector still matches the substring rule and
+#    stays blocked (confirmed both directions; also confirmed the test that
+#    checks this has teeth: loosened the exact-value match to a catch-all
+#    in a mounted copy, watched LD_PRELOAD get wrongly allowed, restored).
+@condition PHP_VERSION_ID < 80000;
+sp.disable_function.function("putenv").param("setting").value("DYLD_LIBRARY_PATH").allow();
+@condition PHP_VERSION_ID >= 80000;
+sp.disable_function.function("putenv").param("assignment").value("DYLD_LIBRARY_PATH").allow();
+@end_condition;
+
+# 2. ini_set('display_errors' | 'memory_limit', ...) -- both confirmed by
+#    reading the actual framework source, not inferred: Laravel's
+#    HandleExceptions.php calls ini_set('display_errors', 'Off') on every
+#    non-testing request; WordPress's wp_debug_mode() (wp-includes/load.php,
+#    runs on every bootstrap) and its wp_raise_memory_limit() (called from
+#    every wp-admin page, wp-admin/admin.php) call ini_set() on
+#    display_errors and memory_limit respectively; PrestaShop's
+#    config/defines.inc.php calls ini_set('display_errors', ...) on every
+#    request depending on _PS_MODE_DEV_, and its SymfonyCacheClearer admin
+#    operation calls ini_set('memory_limit', '-1').
+#
+#    (A third key, max_execution_time, was exempted here in round 3 on the
+#    strength of a real PrestaShop call site -- but round-2 re-review found
+#    nothing in the *vendored* file ever blocks that key at all: upstream's
+#    complete ini_set drop list is assert.active/zend.assertions/
+#    memory_limit/include_path/open_basedir plus error_log/error_reporting/
+#    display_errors, and max_execution_time is in neither list. That
+#    exemption was a no-op with a comment implying otherwise -- exactly the
+#    false-reassurance shape this task has been eliminating all along.
+#    Removed rather than left as harmless dead weight.)
+#
+#    These are full-key exemptions (any value), not value-scoped the way
+#    the putenv fix above is, for a mechanical reason worth recording:
+#    snuffleupagus's rule grammar allows at most one param/pos selector and
+#    at most one value/value_r matcher per rule -- confirmed empirically,
+#    three ways ("duplicate keyword 'param'" when a second .param() was
+#    added; "duplicate keyword 'value_r'" when a second value matcher was
+#    added even via a different selector; "'.value' and '.value_r' are
+#    mutually exclusive" mixing the two forms) -- and upstream says the same
+#    thing about itself, of a different key: "Since we have no way of
+#    matching on two parameters at the same time, we're blocking calls to
+#    open_basedir altogether" (this file's own open_basedir comment,
+#    below). There is no way to write a single rule matching "option ==
+#    display_errors AND value == off" -- only one of the call's two
+#    arguments can be constrained per rule, so a rule scoped to the option
+#    name necessarily allows every value for it.
+#
+#    For display_errors this does mean the ON direction -- the actual
+#    information-disclosure risk the vendored rule exists to prevent -- is
+#    no longer blocked either (confirmed: ini_set("display_errors","1")
+#    now succeeds). Judged acceptable here: the realistic path to
+#    *attacker-controlled* display_errors=on is a narrow options-injection
+#    bug (user input reaching an ini_set() call directly), not general RCE
+#    -- anyone who already has arbitrary code execution has far better
+#    exfiltration paths than waiting for an error to print -- and the two
+#    keys that would actually let an attacker redirect or silence logging
+#    (error_log, error_reporting) are untouched by this exemption and stay
+#    blocked.
+#
+#    For memory_limit, the DoS shape upstream's rule guards against (a
+#    compromised request holding a worker open fatter than intended) is
+#    NOT bounded the way an earlier draft of this comment claimed. A
+#    container hitting its cgroup memory limit does not degrade one
+#    request -- the kernel OOM-kills the whole container, taking every
+#    FPM worker with it, which is a worse outcome than the per-request
+#    fatal this rule used to produce, not a safety net under it. The
+#    exemption is still the right call (WordPress's own admin dashboard
+#    needs it on every page load, and the realistic path to an
+#    *attacker-controlled* memory_limit value has the same narrow
+#    options-injection precondition as display_errors above), but the
+#    justification is "this protects little on its own merits" plus "a
+#    real framework needs it constantly," not "something else catches the
+#    worst case" -- it does not.
+@condition PHP_VERSION_ID < 80000;
+sp.disable_function.function("ini_set").param("varname").value("display_errors").allow();
+sp.disable_function.function("ini_set").param("varname").value("memory_limit").allow();
+@condition PHP_VERSION_ID >= 80000;
+sp.disable_function.function("ini_set").param("option").value("display_errors").allow();
+sp.disable_function.function("ini_set").param("option").value("memory_limit").allow();
+@end_condition;
+
+# Not exempted, and worth stating plainly rather than leaving implicit:
+# disable_functions, allow_url_include, extension_dir and auto_prepend_file
+# have no ini_set rule anywhere in this file, upstream or otherwise, and
+# need none -- confirmed live (ini_set("disable_functions", "") returns
+# false and changes nothing). They are PHP_INI_SYSTEM/PHP_INI_PERDIR
+# settings: PHP itself refuses to let ini_set() touch them at runtime,
+# regardless of what any snuffleupagus rule says. The protection is real,
+# but it comes from PHP's own ini scoping, not from this ruleset --
+# attributing it to a rule here would leave someone reading this file
+# thinking a rule guards them.
+
+# 3. function_exists() / is_callable() -- removed outright, not narrowed:
+#    introspection is not invocation. Upstream's "backdoor recon" block
+#    treats any function_exists()/is_callable() check on a short list of
+#    dangerous function names (eval, exec, system, shell_exec, proc_open,
+#    passthru) as suspicious, but that is also exactly what well-written
+#    defensive code does before conditionally using one of those functions
+#    -- confirmed live: Symfony Console's Terminal class (loaded by every
+#    `php artisan` command, and by WordPress/PrestaShop's own
+#    Symfony-Console-based CLI tooling) calls
+#    function_exists('proc_open')/is_callable('proc_open') before
+#    attempting to shell out for terminal width. Blocking the capability
+#    check does not add protection the capability block itself doesn't
+#    already provide -- the actual system()/exec()/proc_open() calls stay
+#    covered by the command-injection rules elsewhere in this file,
+#    unaffected by this exemption.
+sp.disable_function.function("function_exists").allow();
+sp.disable_function.function("is_callable").allow();
+#
+# A `require` exemption for Composer's own phar bootstrap
+# (`/usr/local/bin/composer`) was tried and reverted (ruling T12-F). It was
+# real and narrow -- scoped to that one root-owned, unwritable calling file,
+# not to the require target -- but its only justification was making
+# Composer work, and it did not: getting past that one call reaches
+# ini_set('display_errors') and function_exists('proc_open')/
+# is_callable('proc_open') (both exempted above now, but for framework
+# compatibility broadly, not for Composer's benefit specifically -- Symfony
+# Console's Terminal class probes these before shelling out for terminal
+# width; setting COLUMNS/LINES in the environment skips that probe
+# entirely too, no exemption needed for that part), and finally proc_open()
+# itself: Symfony Console's fallback runs `stty -a | grep columns`, and the
+# pipe character matches the exact command-injection filter this ruleset
+# exists to provide -- `proc_open("echo hi")` is allowed, `proc_open("stty
+# -a | grep columns")` is not, and that distinction is the headline
+# protection doing its job, not an incidental false positive like the
+# putenv case above. Composer's real work (git operations, VCS drivers,
+# plugin scripts) would almost certainly surface more of the same if
+# reached. Ruling: this is a property to document, not a bug to engineer
+# around -- rulesets serve runtime request handling; Composer is
+# build/deploy-time tooling, and the intended pattern is build with
+# `cli-builder` and no ruleset, serve with `fpm`/`cli` and one.
+# `PHP_SNUFFLEUPAGUS` and Composer are not meant to run together; do not
+# "fix" this by exempting proc_open's metacharacter class.
+
+# 4. curl_setopt($h, CURLOPT_SSL_VERIFYPEER, true) -- round-2 re-review
+#    found this dropped under wordpress.rules, which breaks every outbound
+#    HTTP call WordPress's own core makes (WP_Http_Curl::request(), used by
+#    the update checks that run on ordinary wp-admin page loads). Root
+#    cause: upstream's own allow rules below (`.param("value").value("1")`
+#    / `.value("2")`) match the *strings* "1"/"2", but WP_Http_Curl passes
+#    the PHP *bool* true -- confirmed live, `true` does not match either
+#    allow rule, so the call falls through to the `option == 64` drop.
+#    That drop rule exists specifically so CURLOPT_SSL_VERIFYPEER can never
+#    be turned off; the WordPress call is the secure direction (enabling
+#    verification, which is also curl's own default), not the dangerous
+#    one, so blocking it is pure false positive, not a narrowing that
+#    trades away real protection. Fixed by adding "true" as a recognized
+#    safe value alongside "1"/"2", ahead of the vendored drop, the same
+#    allow-before-drop shape upstream already uses for this exact rule.
+#    "false" is deliberately not added: confirmed directly that
+#    curl_setopt($h, CURLOPT_SSL_VERIFYPEER, false) still fatals under this
+#    exemption -- disabling verification is the one direction that must
+#    stay blocked, and it does.
+sp.disable_function.function("curl_setopt").param("value").value_r("^(1|true)$").allow();
+
+# 5. ini_get() -- removed outright, same reasoning as 3: reading a setting
+#    is not changing it. Upstream's recon block drops ini_get() of
+#    allow_url_fopen, open_basedir and suhosin.*, and each of those is an
+#    ordinary capability check in the applications these rulesets serve
+#    (tests/apps finding 4): PrestaShop 8's AdminController reads
+#    allow_url_fopen on every back-office page, so the whole back office
+#    fataled; proxy-manager-lts reads suhosin.executor.disable_eval before
+#    generating a proxy; Guzzle reads allow_url_fopen to pick a handler;
+#    WordPress's automatic updater and site health read open_basedir.
+#    Changing them stays covered: open_basedir by the ini_set() drops
+#    below, while allow_url_fopen and suhosin.* are INI_SYSTEM and cannot be
+#    changed at runtime at all.
+sp.disable_function.function("ini_get").allow();
+
+# 6. include of a non-.php path from framework files that do it by design
+#    (tests/apps findings 7, 8 and 9). Scoped by the *calling* file
+#    (.filename_r()), not by the include target, so an include anywhere else
+#    still has to pass the extension allow-list below. Shared by all four
+#    rulesets like the rest of this section; a path that is not in the app
+#    being served never matches.
+#    - Symfony's HtmlErrorRenderer inlines its own CSS/JS/SVG assets with
+#      include; without this every error page Symfony renders (a 405 in
+#      Laravel, any Symfony error page in PrestaShop) became a 500.
+#    - Symfony's PHP-files cache (PhpFilesTrait in 3.4/4.4, PhpFilesAdapter
+#      in 5+) includes its entries, which are written without an extension;
+#      PrestaShop's back office fataled on its first cache read.
+#    - laravel/serializable-closure rebuilds a closure by including its own
+#      laravel-serializable-closure:// stream. `route:cache` stores closure
+#      routes that way, so with a cached route table Laravel 11+'s /up
+#      health route, and every other closure route or queued closure,
+#      fataled.
+sp.disable_function.function("include").filename_r("/(symfony/error-handler|Symfony/Component/ErrorHandler)/ErrorRenderer/HtmlErrorRenderer\\.php$").allow();
+sp.disable_function.function("include").filename_r("/Symfony/Component/Cache/Traits/PhpFilesTrait\\.php$").allow();
+sp.disable_function.function("include").filename_r("/symfony/cache/Adapter/PhpFilesAdapter\\.php$").allow();
+sp.disable_function.function("include").filename_r("/laravel/serializable-closure/src/Serializers/Native\\.php$").allow();
+
+# 7. curl_setopt(CURLOPT_SSL_VERIFYHOST | CURLOPT_SSL_VERIFYPEER, 0) from
+#    WordPress core's own HTTP transport (tests/apps finding 3b). WordPress
+#    turns verification off only when the caller passed sslverify=false,
+#    and core does exactly that for its loopback requests to itself: the
+#    site health checks (a 500 on /wp-admin/site-health.php and its REST
+#    endpoint) and spawn_cron(), which runs on an ordinary page view
+#    whenever an event is due, so with the stock WP-Cron setup a visitor's
+#    request fataled. Scoped to that one calling file and those two options;
+#    a direct curl_setopt() anywhere else still cannot turn verification
+#    off. Code that asks WordPress for sslverify=false gets it, as it does
+#    without this ruleset.
+sp.disable_function.function("curl_setopt").filename_r("/wp-includes/Requests/src/Transport/Curl\\.php$").param("option").value("81").allow();
+sp.disable_function.function("curl_setopt").filename_r("/wp-includes/Requests/src/Transport/Curl\\.php$").param("option").value("64").allow();
+
+# 8. proc_open('stty -a | grep columns') from Symfony Console's Terminal
+#    class -- that one command, byte for byte, from that one file. Symfony
+#    up to 5.x measures the terminal this way whenever COLUMNS is unset, and
+#    a web request gets there too: Laravel's Artisan::call(), PrestaShop 8's
+#    back-office "clear cache" (which runs cache:clear in-process, so the
+#    drop landed after the redirect and the cache silently never cleared).
+#    The T12-F note above still holds -- the metacharacter filter is not
+#    widened, any other piped command stays blocked; this is an exact value.
+#    Owner ruling 2026-09-30: these images are public, so a ruleset has to
+#    run the applications it is named for unmodified, without asking users
+#    to set COLUMNS/LINES or patch vendor code. Symfony 6+ passes an argv
+#    array (['stty', '-a']), which the string filter never matched.
+sp.disable_function.function("proc_open").filename_r("/(symfony/console|Symfony/Component/Console)/Terminal\\.php$").param("command").value("stty -a | grep columns").allow();
+# ========== END project exemptions (T12-D / T12-F / T12-G / T12-I) ==========
+#
+# ============================ BEGIN upstream ============================
+# This is the default configuration file for Snuffleupagus (https://snuffleupagus.rtfd.io).
+# It contains "reasonable" defaults that won't break your websites,
+# and a lot of commented directives that you can enable if you want to 
+# have a better protection.
+
+# Harden the PRNG
+sp.harden_random.enable();
+
+# Enable XXE protection
+@condition extension_loaded("xml");
+sp.xxe_protection.enable();
+@end_condition;
+
+# Global configuration variables
+# sp.global.secret_key("YOU _DO_ NEED TO CHANGE THIS WITH SOME RANDOM CHARACTERS.");
+
+# Globally activate strict mode
+# https://www.php.net/manual/en/language.types.declarations.php#language.types.declarations.strict
+# sp.global_strict.enable();
+
+# Prevent unserialize-related exploits
+# sp.unserialize_hmac.enable();
+
+# Only allow execution of read-only files. This is a low-hanging fruit that you should enable.
+# sp.readonly_exec.enable();
+
+# PHP has a lot of wrappers, most of them aren't usually useful, you should
+# only enable the ones you're using.
+# sp.wrappers_whitelist.list("file,php,phar");
+
+# Prevent sloppy comparisons.
+# sp.sloppy_comparison.enable();
+
+# Use SameSite on session cookie
+# https://snuffleupagus.readthedocs.io/features.html#protection-against-cross-site-request-forgery
+sp.cookie.name("PHPSESSID").samesite("lax");
+
+# Note that an attacker with arbitrary PHP code execution
+# can bypass some virtual-patching, by (as)using PHP feature.
+# A clever example would be to declare a class with a __toString method.
+
+# Harden the `chmod` function (0777 (oct = 511, 0666 = 438)
+@condition PHP_VERSION_ID < 80000;
+    sp.disable_function.function("chmod").param("mode").value("438").drop();
+    sp.disable_function.function("chmod").param("mode").value("511").drop();
+@condition PHP_VERSION_ID >= 80000;
+    sp.disable_function.function("chmod").param("permissions").value("438").drop();
+    sp.disable_function.function("chmod").param("permissions").value("511").drop();
+@end_condition;
+
+# Prevent various `mail`-related vulnerabilities
+@condition PHP_VERSION_ID < 80000;
+    sp.disable_function.function("mail").param("additional_parameters").value_r("\\-").drop();
+    sp.disable_function.function("mb_send_mail").param("additional_parameters").value_r("\\-").drop();
+@condition PHP_VERSION_ID >= 80000;
+    sp.disable_function.function("mail").param("additional_params").value_r("\\-").drop();
+    sp.disable_function.function("mb_send_mail").param("additional_params").value_r("\\-").drop();
+@end_condition;
+
+# Since it's now burned, me might as well mitigate it publicly
+@condition PHP_VERSION_ID < 80000;
+    sp.disable_function.function("putenv").param("setting").value_r("LD_").drop();
+    sp.disable_function.function("putenv").param("setting").value("PATH").drop();
+@condition PHP_VERSION_ID >= 80000;
+    sp.disable_function.function("putenv").param("assignment").value_r("LD_").drop();
+    sp.disable_function.function("putenv").param("assignment").value("PATH").drop();
+@end_condition;
+
+# This one was burned in Nov 2019 - https://gist.github.com/LoadLow/90b60bd5535d6c3927bb24d5f9955b80
+@condition PHP_VERSION_ID < 80000;
+    sp.disable_function.function("putenv").param("setting").value_r("GCONV_").drop()
+@condition PHP_VERSION_ID >= 80000;
+    sp.disable_function.function("putenv").param("assignment").value_r("GCONV_").drop()
+@end_condition;
+
+# https://github.com/php/php-src/issues/22035
+# CURLOPT_SSLENGINE = 10089 
+@condition PHP_VERSION_ID < 80000;
+    sp.disable_function.function("curl_setopt").param("option").value("10089").drop()
+@condition PHP_VERSION_ID >= 80000;
+    sp.disable_function.function("curl_setopt").param("option").value("10089").drop()
+@end_condition;
+
+# Since people are stupid enough to use `extract` on things like $_GET or $_POST, we might as well mitigate this vector
+@condition PHP_VERSION_ID < 80000;
+sp.disable_function.function("extract").pos("0").value_r("^_").drop()
+sp.disable_function.function("extract").pos("1").value("0").drop()
+@condition PHP_VERSION_ID >= 80000;
+sp.disable_function.function("extract").param("array").value_r("^_").drop()
+sp.disable_function.function("extract").param("flags").value("0").drop()
+@end_condition;
+
+# This is also burned:
+# ini_set('open_basedir','..');chdir('..');...;chdir('..');ini_set('open_basedir','/');echo(file_get_contents('/etc/passwd'));
+# Since we have no way of matching on two parameters at the same time, we're
+# blocking calls to open_basedir altogether: nobody is using it via ini_set anyway.
+# Moreover, there are non-public bypasses that are also using this vector ;)
+@condition PHP_VERSION_ID < 80000;
+    sp.disable_function.function("ini_set").param("varname").value_r("open_basedir").drop()
+@condition PHP_VERSION_ID >= 80000;
+    sp.disable_function.function("ini_set").param("option").value_r("open_basedir").drop()
+@end_condition;
+
+# Prevent various `include`-related vulnerabilities
+sp.disable_function.function("require_once").value_r("\.(inc|phtml|php)$").allow();
+sp.disable_function.function("include_once").value_r("\.(inc|phtml|php)$").allow();
+sp.disable_function.function("require").value_r("\.(inc|phtml|php)$").allow();
+sp.disable_function.function("include").value_r("\.(inc|phtml|php)$").allow();
+sp.disable_function.function("require_once").drop();
+sp.disable_function.function("include_once").drop();
+sp.disable_function.function("require").drop();
+sp.disable_function.function("include").drop();
+
+# Prevent `system`-related injections
+sp.disable_function.function("system").param("command").value_r("[$|;&`\\n\\(\\)\\\\]").drop();
+@condition PHP_VERSION_ID < 80000;
+    sp.disable_function.function("shell_exec").pos("0").value_r("[$|;&`\\n\\(\\)\\\\]").drop();
+@condition PHP_VERSION_ID >= 80000;
+    sp.disable_function.function("shell_exec").param("command").value_r("[$|;&`\\n\\(\\)\\\\]").drop();
+@end_condition;
+sp.disable_function.function("exec").param("command").value_r("[$|;&`\\n\\(\\)\\\\]").drop();
+sp.disable_function.function("proc_open").param("command").value_r("[$|;&`\\n\\(\\)\\\\]").drop();
+
+# Prevent runtime modification of interesting things
+@condition PHP_VERSION_ID < 80000;
+sp.disable_function.function("ini_set").param("varname").value("assert.active").drop();
+sp.disable_function.function("ini_set").param("varname").value("zend.assertions").drop();
+sp.disable_function.function("ini_set").param("varname").value("memory_limit").drop();
+sp.disable_function.function("ini_set").param("varname").value("include_path").drop();
+sp.disable_function.function("ini_set").param("varname").value("open_basedir").drop();
+@condition PHP_VERSION_ID >= 80000;
+sp.disable_function.function("ini_set").param("option").value("assert.active").drop();
+sp.disable_function.function("ini_set").param("option").value("zend.assertions").drop();
+sp.disable_function.function("ini_set").param("option").value("memory_limit").drop();
+sp.disable_function.function("ini_set").param("option").value("include_path").drop();
+sp.disable_function.function("ini_set").param("option").value("open_basedir").drop();
+@end_condition;
+
+# Detect some backdoors via environment recon
+@condition PHP_VERSION_ID < 80000;
+sp.disable_function.function("ini_get").param("varname").value("allow_url_fopen").drop();
+sp.disable_function.function("ini_get").param("varname").value("open_basedir").drop();
+sp.disable_function.function("ini_get").param("varname").value_r("suhosin").drop();
+sp.disable_function.function("function_exists").param("function_name").value("eval").drop();
+sp.disable_function.function("function_exists").param("function_name").value("exec").drop();
+sp.disable_function.function("function_exists").param("function_name").value("system").drop();
+sp.disable_function.function("function_exists").param("function_name").value("shell_exec").drop();
+sp.disable_function.function("function_exists").param("function_name").value("proc_open").drop();
+sp.disable_function.function("function_exists").param("function_name").value("passthru").drop();
+sp.disable_function.function("is_callable").param("var").value("eval").drop();
+sp.disable_function.function("is_callable").param("var").value("exec").drop();
+sp.disable_function.function("is_callable").param("var").value("system").drop();
+sp.disable_function.function("is_callable").param("var").value("shell_exec").drop();
+sp.disable_function.function("is_callable").param("var").value("proc_open").drop();
+sp.disable_function.function("is_callable").param("var").value("passthru").drop();
+@condition PHP_VERSION_ID >= 80000;
+sp.disable_function.function("ini_get").param("option").value("allow_url_fopen").drop();
+sp.disable_function.function("ini_get").param("option").value("open_basedir").drop();
+sp.disable_function.function("ini_get").param("option").value_r("suhosin").drop();
+sp.disable_function.function("function_exists").param("function").value("eval").drop();
+sp.disable_function.function("function_exists").param("function").value("exec").drop();
+sp.disable_function.function("function_exists").param("function").value("system").drop();
+sp.disable_function.function("function_exists").param("function").value("shell_exec").drop();
+sp.disable_function.function("function_exists").param("function").value("proc_open").drop();
+sp.disable_function.function("function_exists").param("function").value("passthru").drop();
+sp.disable_function.function("is_callable").param("value").value("eval").drop();
+sp.disable_function.function("is_callable").param("value").value("exec").drop();
+sp.disable_function.function("is_callable").param("value").value("system").drop();
+sp.disable_function.function("is_callable").param("value").value("shell_exec").drop();
+sp.disable_function.function("is_callable").param("value").value("proc_open").drop();
+sp.disable_function.function("is_callable").param("value").value("passthru").drop();
+@end_condition;
+
+
+# Ghetto error-based sqli detection
+# sp.disable_function.function("mysql_query").ret("FALSE").drop();
+# sp.disable_function.function("mysqli_query").ret("FALSE").drop();
+# sp.disable_function.function("PDO::query").ret("FALSE").drop();
+
+# Ensure that certificates are properly verified
+sp.disable_function.function("curl_setopt").param("value").value("1").allow();
+sp.disable_function.function("curl_setopt").param("value").value("2").allow();
+# `81` is SSL_VERIFYHOST and `64` SSL_VERIFYPEER
+sp.disable_function.function("curl_setopt").param("option").value("64").drop().alias("Please don't turn CURLOPT_SSL_VERIFYCLIENT off.");
+sp.disable_function.function("curl_setopt").param("option").value("81").drop().alias("Please don't turn CURLOPT_SSL_VERIFYHOST off.");
+
+# Ensure that file:// protocol is not allowed in CURL
+sp.disable_function.function("curl_setopt").param("value").value_r("file://").drop().alias("file:// protocol is disabled");
+sp.disable_function.function("curl_init").param("url").value_r("file://").drop().alias("file:// protocol is disabled");
+
+# File upload
+#
+# LOCAL CORRECTION (T12-J, see the divergence section near the top of this
+# file): upstream's own patterns here are "\.ph" / "\.ht", unanchored --
+# they match those two letters anywhere in the destination path, not just
+# as the actual extension. Round-2 re-review demonstrated the false
+# positives live: holiday.photo.jpg, my.phone.png, chart.ht.svg and
+# summer.photos.zip all fatal move_uploaded_file() under this rule, purely
+# because "pho"/"ht" appears inside an ordinary word -- and
+# wp_handle_upload() puts the sanitized *user* filename directly into this
+# argument, so any WordPress media upload whose name happens to contain
+# those letters in sequence breaks. Anchored to end-of-path, with the
+# character class after "ph"/"ht" widened from nothing to any run of
+# letters/digits so the same breadth upstream intended (catch .php, .php3,
+# .phtml, .phar, .pht, .htaccess, .htpasswd, ...) still holds -- just
+# anchored to where an extension actually is instead of matching anywhere
+# in the string. Case folded explicitly ([pP][hH], [hH][tT]) since upload
+# filenames are not guaranteed lowercase.
+#
+# The anchor is `[ .]*$`, not a bare `$`: a strict end-of-string anchor
+# stopped blocking `shell.php ` (trailing space) and `shell.php.`
+# (trailing dot), which the old unanchored rule blocked by accident. Low
+# practical severity here (nginx's own `\.php$` routing has the identical
+# limitation), but a real regression from this file's own prior behavior,
+# found and closed in the same round -- see the divergence section. Any
+# run of trailing spaces and/or dots is absorbed before the end anchor;
+# trailing tabs are not (the config DSL does not reliably pass `\t`
+# through to the regex engine as a tab escape) and this is not claimed.
+#
+# Demonstrated both directions: all four legitimate filenames above still
+# save cleanly; shell.php, shell.PHP, shell.phtml, shell.phar, .htaccess
+# and x.htpasswd all still fatal, plain and with trailing spaces/dots
+# (single, repeated and mixed) appended.
+@condition PHP_VERSION_ID >= 80000;
+sp.disable_function.function("move_uploaded_file").param("to").value_r("\\.[pP][hH][a-zA-Z0-9]*[ .]*$").drop();
+sp.disable_function.function("move_uploaded_file").param("to").value_r("\\.[hH][tT][a-zA-Z0-9]*[ .]*$").drop();
+@condition PHP_VERSION_ID < 80000;
+sp.disable_function.function("move_uploaded_file").param("new_path").value_r("\\.[pP][hH][a-zA-Z0-9]*[ .]*$").drop();
+sp.disable_function.function("move_uploaded_file").param("new_path").value_r("\\.[hH][tT][a-zA-Z0-9]*[ .]*$").drop();
+@end_condition;
+
+# Logging lockdown
+@condition PHP_VERSION_ID < 80000;
+sp.disable_function.function("ini_set").param("varname").value_r("error_log").drop();
+sp.disable_function.function("ini_set").param("varname").value_r("error_reporting").drop();
+sp.disable_function.function("ini_set").param("varname").value_r("display_errors").drop();
+@condition PHP_VERSION_ID >= 80000;
+sp.disable_function.function("ini_set").param("option").value_r("error_log").drop();
+sp.disable_function.function("ini_set").param("option").value_r("error_reporting").drop();
+sp.disable_function.function("ini_set").param("option").value_r("display_errors").drop();
+@end_condition;
+
+# Classic webshells patterns
+sp.disable_function.function("system>base64_decode").drop();
+sp.disable_function.function("shell_exec>base64_decode").drop();
+sp.disable_function.function("exec>base64_decode").drop();
+sp.disable_function.function("passthru>base64_decode").drop();
+sp.disable_function.function("proc_open>base64_decode").drop();
+sp.eval_blacklist.list("system,exec,shell_exec,passthru,proc_open");
+# ============================= END upstream ==============================
+
+# ============================ our addition ================================
+# Reject uploads whose content is executable PHP, regardless of extension --
+# not part of upstream's default.rules, this is the sp-upload-check script
+# this project ships (rootfs/usr/local/bin/sp-upload-check). Fixed in the
+# round-1 review (I-2, I-3): it now skips archives by magic byte (WordPress
+# plugin installs and PrestaShop module installs upload zips by design, and
+# a naive content-sniff rejected them depending on how zip happened to store
+# their entries), catches the `<?=` short-echo tag alongside `<?php`, and
+# fails closed (rejects) rather than open when it cannot read the file --
+# see that script's own header for the demonstrated fix of each.
+sp.upload_validation.script("/usr/local/bin/sp-upload-check").enable();
+
+# ============================ Laravel delta ================================
+# Laravel writes compiled views, route caches and config caches at runtime;
+# a readonly_exec block would flag every one of those writes. This is a
+# documentation no-op today -- nothing above ever turns readonly_exec on
+# (upstream ships it commented out too) -- kept explicit so it stays true
+# if a future re-vendor of default.rules ever turns it on.
+sp.readonly_exec.disable();
+
+# The original hand-written draft also had sp.global_strict.enable() here.
+# Not present, and won't be re-added without a demonstration both ways:
+# verified directly that it globally forces strict argument-type checking
+# and throws an uncaught TypeError on ordinary loose-typed calls Laravel and
+# its ecosystem rely on throughout -- confirmed with a minimal repro
+# (function f(int $x) {...}; f("5")) which runs fine unmodified and throws
+# "must be of type int, string given" the moment global_strict is enabled.
+# Numeric strings arrive constantly as route parameters, query strings and
+# form input; enforcing strict typing globally is exactly the "breaks the
+# application in a way that looks like an application bug" failure mode
+# this task is scoped around, for the one ruleset an operator would
+# reasonably expect to be Laravel-safe.

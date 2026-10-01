@@ -1,0 +1,26 @@
+# Copied to /corpus/laravel/.env by Dockerfile.corpus, for both eras.
+#
+# Not .env.example: Laravel 6's ships DB_CONNECTION=mysql, and the corpus has
+# no database server. DB_DATABASE is deliberately absent -- both eras fall
+# back to database_path('database.sqlite'), so the corpus path is not baked
+# into a committed file.
+#
+# APP_ENV/APP_DEBUG are the production pair on purpose: a profile trained
+# against the debug bootstrap optimises code the shipped images never take.
+# Keys are the union of both eras' names (CACHE_DRIVER is Laravel 6,
+# CACHE_STORE is Laravel 11+); an unread key is ignored, not an error.
+APP_NAME=PGOCorpus
+APP_ENV=production
+APP_KEY=
+APP_DEBUG=false
+APP_URL=http://127.0.0.1
+LOG_CHANNEL=stack
+LOG_LEVEL=error
+DB_CONNECTION=sqlite
+BROADCAST_DRIVER=log
+CACHE_DRIVER=file
+CACHE_STORE=file
+FILESYSTEM_DISK=local
+QUEUE_CONNECTION=sync
+SESSION_DRIVER=file
+MAIL_MAILER=log

@@ -1,0 +1,9 @@
+# Build artifacts a developer creates by running composer or the app inside the
+# corpus source tree. Docker does not read .gitignore, so without this they get
+# baked into /corpus-src and into both sides of the tree hash tests/test-corpus.sh
+# compares.
+corpus/symfony/app/var/
+corpus/symfony/app/vendor/
+corpus/symfony/overlay/*/var/
+corpus/symfony/overlay/*/vendor/
+**/.DS_Store

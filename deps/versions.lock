@@ -1,0 +1,20 @@
+# Vendored dependency pins for the legacy (PHP 7.0-8.0) era.
+# Confirmed against PHP 7.0.33 by spike/FINDINGS.md unless noted there.
+#
+# libxml2 is deliberately NOT here (task 14 review, I2). Trixie's own
+# libxml2 package is 2.12.7+dfsg+really2.9.14-2.1+deb13u3 -- Debian reverted
+# to the 2.9.14 series for the same reason this project did (2.12+ broke
+# consumers), but ships it with three security backports upstream's bare
+# 2.9.14 tarball never received. Vendoring the unpatched upstream source to
+# get a version Debian already provides, patched, was a real attack-surface
+# regression with no benefit. deps-legacy installs libxml2-dev from apt
+# instead; LIBXML_DOTTED_VERSION still reports 2.9.14, now from Debian's
+# maintained copy.
+# era     name         version   applies-to   sha256                                                             url
+legacy    openssl      1.1.1w    7.0-8.0      cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8   https://www.openssl.org/source/old/1.1.1/openssl-1.1.1w.tar.gz
+legacy    icu          67.1      7.0-7.3      94a80cd6f251a53bd2a997f6f1b5ac6653fe791dfab66e1eb0227740fb86d5dc   https://github.com/unicode-org/icu/releases/download/release-67-1/icu4c-67_1-src.tgz
+legacy    icu          70.1      7.4-8.0      8d205428c17bf13bb535300669ed28b338a157b1c01ae66d31d0d3e2d47c3fd5   https://github.com/unicode-org/icu/releases/download/release-70-1/icu4c-70_1-src.tgz
+# curl stays on 8.17.x: 8.18.0 raised its OpenSSL floor to 3.0.0 (m4/curl-openssl.m4,
+# "OpenSSL 3.0.0 or upper required"), and this era links the vendored 1.1.1w above.
+legacy    curl         8.17.0    7.0-7.2      955f6e729ad6b3566260e8fef68620e76ba3c31acf0a18524416a185acf77992   https://curl.se/download/curl-8.17.0.tar.xz
+both      imagemagick  7.1.2-32  all          940e349f0ef394e658fd57400b83d1d7a81b954f6e7bdbfbfad31b2718c10add   https://github.com/ImageMagick/ImageMagick/archive/refs/tags/7.1.2-32.tar.gz

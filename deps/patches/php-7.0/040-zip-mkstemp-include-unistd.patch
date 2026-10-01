@@ -1,0 +1,31 @@
+Include <unistd.h> in the bundled libzip mkstemp, the way php-src does from 7.2.
+
+ext/zip/lib/mkstemp.c calls getpid() with no declaration in scope. clang 16 and
+newer make -Wimplicit-function-declaration an error by default, so the bundled
+libzip that --enable-zip builds on these branches does not compile:
+
+  error: call to undeclared function 'getpid'; ISO C99 and later do not support
+  implicit function declarations
+
+php-src added the include in 7.2 (guarded for Windows, which has no unistd.h);
+7.2 and 7.3 already carry it. This is that guard, in the same place, with the
+same shape.
+
+This is exactly the diagnostic php/build.sh deliberately re-promotes to an
+error for `make` after demoting it for `./configure` -- and it is the reason
+that split is worth having. An implicitly declared getpid() returns int, which
+on LP64 truncates nothing here only because pid_t is int; the same silence
+applied to a function returning a pointer is a real bug. The right answer is
+the missing include, not a wider suppression.
+--- a/ext/zip/lib/mkstemp.c
++++ b/ext/zip/lib/mkstemp.c
+@@ -43,6 +43,9 @@
+ #endif
+ #include <stdio.h>
+ #include <stdlib.h>
++#ifndef _WIN32
++#include <unistd.h>
++#endif
+ 
+ #ifndef O_BINARY
+ #define O_BINARY 0

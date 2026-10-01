@@ -1,0 +1,28 @@
+# sha256 pins for the php.net release tarball + its detached signature, one
+# row per PHP_RELEASE in matrix.json (task 31). php.net publishes no
+# .sha256/.sha512 sidecar for distributions/ (only the GPG signature this
+# project already verifies via php/release-keys.asc), so these are computed
+# locally against a tarball whose signature was verified good against that
+# same keyring before its hash was ever recorded here -- same discipline as
+# every other lock file in this repo, just derived from a signature instead
+# of trusting an upstream-published digest.
+#
+# This is additive, not a replacement for the GPG check in the Dockerfile:
+# it exists so deps/fetch-verified.sh has a hash to key the shared
+# /var/cache/src cache on (every other fetch in this project already had
+# one), and it isn't the only bit standing in front of a tampered tarball
+# reaching this build -- gpg --verify still runs, and still fails the build
+# on its own if it ever disagrees with a hash below.
+#
+# release     sha256 (php-<release>.tar.xz)                                     sha256 (.tar.xz.asc)
+7.0.33        ab8c5be6e32b1f8d032909dedaaaa4bbb1a209e519abb01a52ce3914f9a13d96   fec8faab3f097e5e1436d3facf14459dd078e536e24946277acb39f5825ec884
+7.1.33        bd7c0a9bd5433289ee01fd440af3715309faf583f75832b64fe169c100d52968   459414321323770fe59b288f4db43291d6c79ee016f58b9e68c4e7afbfa0c559
+7.2.34        409e11bc6a2c18707dfc44bc61c820ddfd81e17481470f3405ee7822d8379903   b2c1d941709c27fa5b12ea4b03a8fffb5422147eb249a3b5ef65832f50a216c6
+7.3.33        166eaccde933381da9516a2b70ad0f447d7cec4b603d07b9a916032b215b90cc   3d15cc09b4c35343ad15fd80b681f126a8efec8efde757e21c04fd54a56ba8d4
+7.4.33        924846abf93bc613815c55dd3f5809377813ac62a9ec4eb3778675b82a27b927   569a01c7c605a4571fdf7dfadfff4215cc4a63ea5d474c7ec92bd7b4fecfffcb
+8.0.30        216ab305737a5d392107112d618a755dc5df42058226f1670e9db90e77d777d9   e344925525577dede041e33636c842b8a8b0b84b3e8f40535e3d25dfc8a1313a
+8.1.34        ffa9e0982e82eeaea848f57687b425ed173aa278fe563001310ae2638db5c251   b567611a7e9bf3fee2e365c0f93054c2696f7fcaa67162fa69b1161490817816
+8.2.34        5351330c54de240f54f7527c26ef292e239749e6fe11db0330acb5317e02bb39   3d21b026166a703a797b83301d833b9ba16ee315faecc81c40327eb5a81bde5b
+8.3.35        ff4630fbbbd94359134b7d3c223db59329905bdc4f5a9ef93d257b48e358619a   6970f029918e3186eb402f093fd60014a1a794194e431ceffebaf0cfd70e88d8
+8.4.26        32a2de53862ad44ed4a5005244ce4f1b50c271e74dced215449a4443b40569f1   60e78a39e9a22abbb21b60817cd5c9591d0fe208e398207d2d2cc8d0b7892fb5
+8.5.11        d9be75c08e8c316f4c8f4194d8fbe1750a15f6a6d9d4e3fe72082abeeb800360   129bdc610d10f883e0a0127b0688dff98473e410469364414960d1d859451b32

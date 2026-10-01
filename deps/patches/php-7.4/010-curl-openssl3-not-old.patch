@@ -1,0 +1,78 @@
+Fix a version-string bug in ext/curl's "old openssl" probe that makes the
+legacy era link two different OpenSSLs into one process.
+
+ext/curl/config.m4's AC_RUN_IFELSE probe reads curl_version_info()->ssl_version
+and only recognises the literal prefix "OpenSSL/1.1" as a "new" OpenSSL.
+Trixie's system libcurl reports "OpenSSL/3.5.6", which starts with "OpenSSL"
+but not "OpenSSL/1.1", so the probe falls through to its old-OpenSSL branch.
+The probe predates OpenSSL 3 and never anticipated a version string that is
+neither "1.1" nor actually old.
+
+WHAT THE OLD BRANCH DOES, AND WHAT IT DOES NOT DO
+
+That branch does two things. Only the second one matters here, and an earlier
+version of this header named the wrong one:
+
+  AC_DEFINE([HAVE_CURL_OLD_OPENSSL], ...)          <- inert in this build
+  PKG_CHECK_MODULES([OPENSSL], [openssl], [
+    PHP_EVAL_LIBLINE($OPENSSL_LIBS, CURL_SHARED_LIBADD)   <- this is the bug
+    PHP_EVAL_INCLINE($OPENSSL_CFLAGS)
+    AC_CHECK_HEADERS([openssl/crypto.h])
+  ], [])
+
+HAVE_CURL_OLD_OPENSSL has exactly one consumer in php-src -- interface.c's
+`#if defined(ZTS) && defined(HAVE_CURL_OLD_OPENSSL)` locking shim (checked in
+both 7.4.33 and 8.0.30: one AC_DEFINE, one guarded use). These images are NTS
+("Thread Safety => disabled"), so that code is compiled out and the macro on
+its own changes nothing.
+
+The damage is PHP_EVAL_LIBLINE: it appends OpenSSL to ext/curl's link line. On
+the legacy era php/build.sh puts the vendored prefix first in
+PKG_CONFIG_LIBDIR, so `openssl.pc` resolves to the *vendored, static 1.1.1w* --
+while the libcurl.so.4 this same extension calls into is dynamically bound to
+the system libssl.so.3. That is two OpenSSL implementations, with incompatible
+SSL/SSL_CTX layouts (3.x made almost everything opaque), in one address space,
+reachable from the same call. Task 14 reproduced the result on 8.0 before this
+patch existed: plain HTTP curl_exec() works, HTTPS curl_exec() segfaults,
+reproducibly. php/ldflags.sh's --exclude-libs=ALL comment describes the same
+collision from the other direction.
+
+APPLIES TO 7.4 AND 8.0, AND ONLY THOSE
+
+  7.4, 8.0  probe present, and these link the *system* libcurl while vendoring
+            their own OpenSSL -- the mismatch. Patched, configure now answers
+            "checking for libcurl linked against old openssl... no".
+  7.0-7.3   the probe does not exist in their ext/curl/config.m4 at all.
+  8.1-8.3   probe present, and it still answers *yes* -- measured, not assumed:
+            their build logs say so, and HAVE_CURL_OLD_OPENSSL really is
+            defined there. It is harmless because the modern era has no
+            vendored OpenSSL, so PKG_CHECK_MODULES resolves to the very
+            OpenSSL 3 that libcurl is already linked against. One OpenSSL, no
+            collision. This is why 8.1-8.3 need no patch -- not because the
+            probe passes there.
+  8.4, 8.5  php-src removed the probe.
+
+THE FIX
+
+Treat "OpenSSL/3" the same as "OpenSSL/1.1": both have opaque structs and
+neither needs the compat path. Not a blanket disable -- a genuine pre-1.1
+OpenSSL, if one ever reappeared, still takes the old branch. This only closes
+the version gap the 2020-era probe left open.
+
+Not fixed upstream: both branches are EOL and will get no further releases.
+The php-7.4 and php-8.0 copies of this patch are byte-identical (see
+deps/patches/README.md); the probe region is unchanged between 7.4.33 and
+8.0.30.
+
+--- a/ext/curl/config.m4
++++ b/ext/curl/config.m4
+@@ -39,7 +39,8 @@
+     const char *ptr = data->ssl_version;
+
+     while(*ptr == ' ') ++ptr;
+-    if (strncasecmp(ptr, "OpenSSL/1.1", sizeof("OpenSSL/1.1")-1) == 0) {
++    if (strncasecmp(ptr, "OpenSSL/1.1", sizeof("OpenSSL/1.1")-1) == 0 ||
++        strncasecmp(ptr, "OpenSSL/3", sizeof("OpenSSL/3")-1) == 0) {
+       /* New OpenSSL version */
+       return 3;
+     }
