@@ -30,10 +30,10 @@ CLI="$PHP_IMAGE:$VERSION-cli"
 DERIVED_REPO="lotuswebagency/php-ext-hello-test"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
-# Every container: no leftovers, signal-forwarding init, label for the adhoc
-# sweep, and the time limit inside it (a host-side `timeout docker run` only
+# Every container: removed on exit, signal-forwarding init, and the time limit
+# inside it (a host-side `timeout docker run` only
 # kills the client, not PID 1).
-run() { docker run --rm --init --label claude.adhoc=1 "$@"; }
+run() { docker run --rm --init "$@"; }
 
 for img in "$EXT" "$FPM" "$CLI"; do
   docker image inspect "$img" >/dev/null 2>&1 \

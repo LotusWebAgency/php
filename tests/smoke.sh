@@ -1026,7 +1026,7 @@ case "$FLAVOR" in
     # into this image's own php. The cross-image half (copy into fpm and cli,
     # PHP_EXT_ENABLE) is tests/test-ext-builder.sh, which needs all three
     # images of a version and so cannot run from one build leg.
-    hello_out=$(docker run --rm --init --label claude.adhoc=1 -v "$HERE/fixtures/ext-hello":/src:ro "$IMAGE" \
+    hello_out=$(docker run --rm --init -v "$HERE/fixtures/ext-hello":/src:ro "$IMAGE" \
       timeout 600 sh -c '/src/build.sh /out >/tmp/build.log 2>&1 || { cat /tmp/build.log; exit 1; }
         so=$(find /out -name hello.so); test -n "$so" || exit 1
         php -d "extension=$so" -r "echo hello_world(), \"|\", hello_api();"') \

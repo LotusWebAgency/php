@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Test-only: tests/test-ext-builder.sh builds the fpm and cli targets from the
 # context of this directory. Mirrors the multi-stage example in the README --
 # ext-builder compiles, the runtime flavor of the same PHP version gets the .so.
