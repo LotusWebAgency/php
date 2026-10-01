@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Build the PGO corpus tiers, then every bake target in matrix.gen.hcl (all
-# 39: 3 flavors x 11 versions + v3 for 8.4/8.5), and run tests/smoke.sh
-# against each image with the flavor-correct invocation
+# 50: 4 flavors x 11 versions + v3 of fpm/cli/cli-builder for 8.4/8.5), and run
+# tests/smoke.sh against each image with the flavor-correct invocation
 # (test-pgo.sh/test-fpm-health.sh/test-entrypoint.sh/test-snuffleupagus.sh are
-# all reached through it).
+# all reached through it). Phase 3 then runs tests/test-ext-builder.sh for
+# every version whose ext-builder, fpm and cli images all built and passed.
 #
 #   ./tests/build-all.sh                              every target, amd64
 #   ./tests/build-all.sh --only 8.5                    one version, every flavor
@@ -28,8 +29,8 @@
 # neither the tier floor's release cli-builder nor a bootstrap one exists yet
 # -- the only reason a from-zero daemon can reach phase 1 at all.
 #
-# Deliberately does not stop at the first failure, in either phase. With up
-# to 39 targets the useful output is the full list of which ones broke and
+# Deliberately does not stop at the first failure, in any phase. With up
+# to 50 targets the useful output is the full list of which ones broke and
 # how, not the first one -- a run that dies on 7.0 tells you nothing about
 # 7.1-8.5, and each build is expensive enough that finding out one target per
 # run is not workable.
@@ -49,7 +50,7 @@ usage() {
 usage: build-all.sh [--only V[,V...]] [--flavor F[,F...]] [--platform P[,P...]] [--dry-run]
 
   --only V[,V...]      only these matrix.json versions, e.g. --only 8.4,8.5 (repeatable)
-  --flavor F[,F...]    only these flavors: fpm, cli, cli-builder (repeatable)
+  --flavor F[,F...]    only these flavors: fpm, cli, cli-builder, ext-builder (repeatable)
   --platform P[,P...]  bake platform(s) to build for, default linux/amd64 (arm64 is opt-in)
   --dry-run            print the ordered plan (corpus tiers -> images) and build nothing
 EOF
@@ -104,7 +105,7 @@ FLAVOR_CSV="$(IFS=,; echo "${FLAVORS[*]:-}")"
 FULL_RUN=0
 [ -z "$ONLY_CSV" ] && [ -z "$FLAVOR_CSV" ] && FULL_RUN=1
 
-# scripts/gen_matrix.py --github targets is the same 39-entry list that feeds
+# scripts/gen_matrix.py --github targets is the same 50-entry list that feeds
 # matrix.gen.hcl's TARGETS variable -- never a second copy of it here. See
 # tests/preflight.sh's check that this list and `bake --print`'s target list
 # can never drift apart.
@@ -127,6 +128,24 @@ for t in data["include"]:
     print("\t".join([t["name"], t["flavor"], t["php"], t["tags"][0]]))
 ' "$TARGETS_JSON" "$ONLY_CSV" "$FLAVOR_CSV")
 [ "${#SELECTED[@]}" -gt 0 ] || { echo "FAIL: no target matched --only/--flavor"; exit 1; }
+
+# ext_versions_selected -> the versions (one per line) whose baseline
+# ext-builder, fpm and cli targets are all in SELECTED. tests/test-ext-builder.sh
+# copies an extension built in the first into the other two, so it needs all
+# three images of one version; a --flavor filter that drops one skips it.
+ext_versions_selected() {
+  local row name flavor php tag
+  declare -A have=()
+  for row in "${SELECTED[@]}"; do
+    IFS=$'\t' read -r name flavor php tag <<<"$row"
+    case "$name" in *-v3) continue ;; esac
+    have["$php/$flavor"]=1
+  done
+  for php in "${ALL_VERSIONS[@]}"; do
+    [ -n "${have["$php/ext-builder"]:-}" ] && [ -n "${have["$php/fpm"]:-}" ] && [ -n "${have["$php/cli"]:-}" ] && echo "$php"
+  done
+  return 0
+}
 
 # CF-47/T15-P: bake the current tree's content hash into every image built
 # here as a label, so tests/smoke.sh can tell "built from this tree" from
@@ -194,6 +213,12 @@ if [ "$DRY_RUN" -eq 1 ]; then
       echo "  $name ($tag): would build (docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl $name --set '*.platform=$PLATFORMS' --load) then: ./tests/smoke.sh $tag $php $flavor"
     fi
   done
+
+  echo
+  echo "-- phase 3: ext-builder end to end (tests/test-ext-builder.sh) --"
+  for php in $(ext_versions_selected); do
+    echo "  $php: would run ./tests/test-ext-builder.sh $php once its ext-builder, fpm and cli images are built and smoke-tested"
+  done
   exit 0
 fi
 
@@ -260,6 +285,37 @@ for row in "${SELECTED[@]}"; do
   ELAPSED[$name]=$(( $(date +%s) - t0 ))
 done
 
+# ----------------------------------------------- phase 3: ext-builder end to end
+echo
+echo "=== phase 3: ext-builder end to end"
+declare -A EXT_STATUS
+ext_failed=0
+for php in $(ext_versions_selected); do
+  e="php-${php//./_}"
+  blocked=""
+  for flavor in ext-builder fpm cli; do
+    case "${BUILD_STATUS[$e-$flavor]:-FAIL}${SMOKE_STATUS[$e-$flavor]:-FAIL}" in
+      *FAIL*) blocked="$blocked $e-$flavor" ;;
+    esac
+  done
+  if [ -n "$blocked" ]; then
+    EXT_STATUS[$php]="FAIL"
+    ext_failed=$((ext_failed + 1))
+    echo "    $php: not run, a prerequisite build or smoke failed:$blocked"
+    continue
+  fi
+  if ./tests/test-ext-builder.sh "$php" > "$LOG_DIR/ext-builder-$php.log" 2>&1; then
+    EXT_STATUS[$php]="ok"
+    echo "    $php: ok"
+  else
+    EXT_STATUS[$php]="FAIL"
+    ext_failed=$((ext_failed + 1))
+    echo "    $php: FAILED -- $LOG_DIR/ext-builder-$php.log"
+    tail -20 "$LOG_DIR/ext-builder-$php.log"
+  fi
+done
+[ "${#EXT_STATUS[@]}" -gt 0 ] || echo "    nothing to run: no selected version has ext-builder, fpm and cli together"
+
 echo
 echo "=== summary"
 printf '%-28s %-6s %-6s %-8s %-8s %s\n' TARGET VERSION BUILD SMOKE WALL NOTE
@@ -276,7 +332,8 @@ for row in "${SELECTED[@]}"; do
 done
 
 echo
-if [ "$corpus_failed" -eq 0 ] && [ "$image_failed" -eq 0 ]; then
+for php in "${!EXT_STATUS[@]}"; do echo "ext-builder end to end, php $php: ${EXT_STATUS[$php]}"; done
+if [ "$corpus_failed" -eq 0 ] && [ "$image_failed" -eq 0 ] && [ "$ext_failed" -eq 0 ]; then
   # Only a full, unfiltered run may claim the headline. A filtered run that
   # printed it would be the same vacuous pass this script exists to avoid.
   if [ "$FULL_RUN" -eq 1 ] && [ "${#SELECTED[@]}" -eq "$ALL_TARGET_COUNT" ]; then
@@ -287,5 +344,6 @@ if [ "$corpus_failed" -eq 0 ] && [ "$image_failed" -eq 0 ]; then
 else
   [ "$corpus_failed" -eq 0 ] || echo "corpus: FAILED (see $LOG_DIR/corpus.log)"
   [ "$image_failed" -eq 0 ] || echo "images: $image_failed target(s) FAILED (see table above)"
+  [ "$ext_failed" -eq 0 ] || echo "ext-builder end to end: $ext_failed version(s) FAILED (see phase 3 above)"
   exit 1
 fi

@@ -5,7 +5,7 @@
 #
 # <php-version> is a matrix.json key ("8.5", "7.0", ...); every era-specific
 # expectation below (release string, era, pgo, icu) is derived from it, never
-# a literal. <flavor> is fpm, cli or cli-builder -- also asserted against,
+# a literal. <flavor> is fpm, cli, cli-builder or ext-builder -- also asserted against,
 # never inferred from the image tag, which a caller could always get wrong or
 # rename.
 set -euo pipefail
@@ -13,8 +13,8 @@ IMAGE="${1:?usage: smoke.sh <image> <php-version> <flavor>}"
 EXPECT="${2:?usage: smoke.sh <image> <php-version> <flavor>}"
 FLAVOR="${3:?usage: smoke.sh <image> <php-version> <flavor>}"
 case "$FLAVOR" in
-  fpm|cli|cli-builder) ;;
-  *) echo "FAIL: flavor '$FLAVOR' is not one of fpm, cli, cli-builder"; exit 1 ;;
+  fpm|cli|cli-builder|ext-builder) ;;
+  *) echo "FAIL: flavor '$FLAVOR' is not one of fpm, cli, cli-builder, ext-builder"; exit 1 ;;
 esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -149,9 +149,13 @@ ver=$(docker run --rm "$IMAGE" php -r 'echo PHP_VERSION;')
 [ "$ver" = "$RELEASE" ] || { echo "FAIL: expected exactly $RELEASE (matrix.json), got $ver"; exit 1; }
 echo "ok: php $ver"
 
+# ext-builder is a build stage and runs as root (make install writes into the
+# extension dir); every other flavor drops to www-data.
+want_uid=33
+[ "$FLAVOR" != ext-builder ] || want_uid=0
 uid=$(docker run --rm "$IMAGE" id -u)
-[[ "$uid" == "33" ]] || { echo "FAIL: running as uid $uid, expected 33"; exit 1; }
-echo "ok: uid 33"
+[[ "$uid" == "$want_uid" ]] || { echo "FAIL: running as uid $uid, expected $want_uid"; exit 1; }
+echo "ok: uid $want_uid"
 
 # CF-12: uncompressed image size against spec section 13's per-flavor budget.
 # "Uncompressed" and which docker command actually reports it (`docker image
@@ -163,7 +167,7 @@ echo "ok: uid 33"
 # and this becomes a hard failure then -- not raised now to paper over the
 # miss, and not enforced now against images whose contents are still moving.
 # tests/image-size.sh --breakdown names where the bytes are going.
-declare -A SIZE_BUDGET_MB=( [fpm]=280 [cli]=270 [cli-builder]=550 )
+declare -A SIZE_BUDGET_MB=( [fpm]=280 [cli]=270 [cli-builder]=550 [ext-builder]=420 )
 budget_mb="${SIZE_BUDGET_MB[$FLAVOR]}"
 actual_bytes=$(docker image inspect "$IMAGE" --format '{{.Size}}')
 budget_bytes=$(( budget_mb * 1000 * 1000 ))
@@ -733,11 +737,11 @@ case "$FLAVOR" in
     [[ -z "$dis_b" ]] || { echo "FAIL: builder disable_functions is '$dis_b', expected empty"; exit 1; }
     echo "ok: builder ini (unbounded memory, no disable_functions)"
     ;;
-  cli)
-    [[ "$mem" == "512M" ]] || { echo "FAIL: cli memory_limit is '$mem', expected 512M"; exit 1; }
+  cli|ext-builder)
+    [[ "$mem" == "512M" ]] || { echo "FAIL: $FLAVOR memory_limit is '$mem', expected 512M"; exit 1; }
     met=$(docker run --rm "$IMAGE" php -r "echo ini_get('max_execution_time');")
-    [[ "$met" == "0" ]] || { echo "FAIL: cli max_execution_time is '$met', expected 0"; exit 1; }
-    echo "ok: cli ini (512M memory, unbounded execution time)"
+    [[ "$met" == "0" ]] || { echo "FAIL: $FLAVOR max_execution_time is '$met', expected 0"; exit 1; }
+    echo "ok: $FLAVOR ini (512M memory, unbounded execution time)"
     ;;
   fpm)
     [[ "$mem" == "256M" ]] || { echo "FAIL: fpm memory_limit is '$mem', expected 256M"; exit 1; }
@@ -980,25 +984,75 @@ echo $b === false ? "FAIL" : "OK:" . strlen($b);
 echo "ok: negative control confirms the ext/curl check has discriminating power"
 
 # Flavor shape, checked against what the Dockerfile's own stages actually
-# build rather than assumed: `FROM cli AS cli-builder` adds gcc, libc6-dev,
-# autoconf, make, git, composer and the PHP headers/phpize/php-config so an
-# extension can genuinely be compiled against this image. fpm and cli derive
-# from runtime-base directly and see none of that -- a compiler sitting in a
-# shipped fpm or cli image is CVE surface and attack surface bought for
-# nothing (an attacker who can write a .c file and already has a shell has
-# one less step to a native payload).
+# build rather than assumed. Only ext-builder carries a compiler, g++, autoconf
+# and the PHP headers/phpize/php-config, so an extension can genuinely be
+# compiled against it. cli-builder (composer, node, deploy tooling), cli and
+# fpm see none of that -- a compiler sitting in a shipped image is CVE surface
+# and attack surface bought for nothing (an attacker who can write a .c file
+# and already has a shell has one less step to a native payload).
+no_toolchain() {  # no_toolchain <flavor> -- no compiler, no autoconf, no phpize, no PHP headers
+  if docker run --rm "$IMAGE" sh -c 'command -v gcc || command -v g++ || command -v cc || command -v clang || command -v autoconf || command -v phpize || command -v php-config || test -e /usr/local/include/php' >/dev/null 2>&1; then
+    echo "FAIL: $1 carries a compiler, autoconf, phpize/php-config or the PHP headers -- expected only in ext-builder"; exit 1
+  fi
+}
 case "$FLAVOR" in
-  cli-builder)
-    for tool in gcc phpize php-config composer autoconf; do
+  ext-builder)
+    for tool in gcc g++ make autoconf pkg-config phpize php-config; do
       docker run --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
-        || { echo "FAIL: cli-builder is missing $tool (Dockerfile's cli-builder stage should install it)"; exit 1; }
+        || { echo "FAIL: ext-builder is missing $tool (Dockerfile's ext-builder stage should provide it)"; exit 1; }
     done
-    echo "ok: cli-builder carries a compiler, phpize/php-config and composer"
+    docker run --rm "$IMAGE" test -f /usr/local/include/php/main/php.h \
+      || { echo "FAIL: ext-builder has no PHP headers under /usr/local/include/php"; exit 1; }
+    for tool in composer node npm; do
+      if docker run --rm "$IMAGE" sh -c "command -v $tool" >/dev/null 2>&1; then
+        echo "FAIL: ext-builder carries $tool -- it is a compile stage, composer and node belong to cli-builder"; exit 1
+      fi
+    done
+    echo "ok: ext-builder carries a compiler, g++, make, autoconf, pkg-config, phpize/php-config and the PHP headers, and no composer/node"
+
+    # php-config has to describe the runtime it sits in: the extension dir
+    # names the Zend module API, so equal dirs mean an extension built here
+    # loads in the fpm/cli image of the same version.
+    pc_dir=$(docker run --rm "$IMAGE" php-config --extension-dir)
+    rt_dir=$(docker run --rm "$IMAGE" php -r 'echo ini_get("extension_dir");')
+    [ -n "$pc_dir" ] && [ "$pc_dir" = "$rt_dir" ] \
+      || { echo "FAIL: php-config --extension-dir ('$pc_dir') != the runtime's extension_dir ('$rt_dir')"; exit 1; }
+    pc_ver=$(docker run --rm "$IMAGE" php-config --version)
+    [ "$pc_ver" = "$RELEASE" ] || { echo "FAIL: php-config --version is '$pc_ver', expected $RELEASE"; exit 1; }
+    echo "ok: php-config matches the runtime ($pc_ver, extension_dir $pc_dir)"
+
+    # The real thing, small: compile tests/fixtures/ext-hello with
+    # phpize/configure/make, install it under a scratch root and load that .so
+    # into this image's own php. The cross-image half (copy into fpm and cli,
+    # PHP_EXT_ENABLE) is tests/test-ext-builder.sh, which needs all three
+    # images of a version and so cannot run from one build leg.
+    hello_out=$(docker run --rm --init --label claude.adhoc=1 -v "$HERE/fixtures/ext-hello":/src:ro "$IMAGE" \
+      timeout 600 sh -c '/src/build.sh /out >/tmp/build.log 2>&1 || { cat /tmp/build.log; exit 1; }
+        so=$(find /out -name hello.so); test -n "$so" || exit 1
+        php -d "extension=$so" -r "echo hello_world(), \"|\", hello_api();"') \
+      || { echo "FAIL: the ext-hello fixture did not build or load in ext-builder: $hello_out"; exit 1; }
+    [ "${hello_out%%|*}" = "hello from ext-builder" ] \
+      || { echo "FAIL: hello_world() returned '$hello_out'"; exit 1; }
+    echo "ok: ext-builder compiles an extension with phpize/configure/make and its php loads it ($hello_out)"
+    ;;
+  cli-builder)
+    no_toolchain cli-builder
+    echo "ok: cli-builder carries no compiler, autoconf, phpize/php-config or PHP headers"
+
+    for tool in git rsync patch make brotli sqlite3 jq less nano ps unzip zip zstd composer node npm npx corepack semantic-release mariadb mariadb-dump; do
+      docker run --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
+        || { echo "FAIL: cli-builder is missing $tool (Dockerfile's cli-builder stage should provide it)"; exit 1; }
+    done
+    node_major=$(docker run --rm "$IMAGE" node -p 'process.versions.node.split(".")[0]')
+    [ "$node_major" = "24" ] || { echo "FAIL: cli-builder's node major is '$node_major', expected 24 (copied from the node:24 image)"; exit 1; }
+    for cmd in "npm --version" "npx --version" "corepack --version" "composer --version" "semantic-release --version"; do
+      docker run --rm "$IMAGE" sh -c "$cmd" >/dev/null 2>&1 \
+        || { echo "FAIL: cli-builder: '$cmd' does not run as the image user"; exit 1; }
+    done
+    echo "ok: cli-builder carries node $node_major, npm, npx, corepack, composer, semantic-release, git, rsync, patch, make, brotli, sqlite3, jq, less, nano, procps, unzip, zip, zstd and the mariadb client"
     ;;
   cli|fpm)
-    if docker run --rm "$IMAGE" sh -c 'command -v gcc || command -v cc || command -v clang' >/dev/null 2>&1; then
-      echo "FAIL: $FLAVOR carries a compiler -- expected only in cli-builder"; exit 1
-    fi
+    no_toolchain "$FLAVOR"
     echo "ok: $FLAVOR carries no compiler"
     ;;
 esac
@@ -1085,7 +1139,14 @@ echo "ok: mariadb-server binaries (mariadbd, mysqld, mariadb-install-db, mysql_i
 # fpm-only, unchanged -- out of T19-I's scope, and its own probes already
 # branch on the image's flavor (cli-builder-only system()/eval_blacklist
 # cases) when it is called directly for those.
-bash "$HERE/test-entrypoint.sh" "$IMAGE" "$FLAVOR"
+if [ "$FLAVOR" = ext-builder ]; then
+  # Same entrypoint and same cli ini as the cli flavor, which test-entrypoint.sh
+  # already covers; its assertions are written for the uid-33 runtime flavors
+  # and ext-builder runs as root, so they are not repeated here.
+  echo "ok: test-entrypoint.sh skipped for ext-builder (identical entrypoint to cli, runs as root)"
+else
+  bash "$HERE/test-entrypoint.sh" "$IMAGE" "$FLAVOR"
+fi
 # Only where the registry builds it at all (ext.json: php >=7.2) -- 7.0 and
 # 7.1 ship without it, so there is nothing to exercise there.
 if [ "$FLAVOR" = fpm ] && grep -qw snuffleupagus <<<"$SHARED_EXTS"; then

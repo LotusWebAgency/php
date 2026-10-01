@@ -142,10 +142,10 @@ done
 official_flavor_of() {  # official_flavor_of <our-image-ref> -> fpm|cli
   # a -v3 variant compares against the same official flavor as its baseline
   case "${1%-v3}" in
-    *-cli-builder) echo cli ;;   # no official cli-builder image exists
+    *-cli-builder|*-ext-builder) echo cli ;;   # no official cli-builder or ext-builder image exists
     *-fpm) echo fpm ;;
     *-cli) echo cli ;;
-    *) fail "cannot derive a flavor from '$1' -- expected it to end in -fpm, -cli or -cli-builder, optionally followed by -v3" ;;
+    *) fail "cannot derive a flavor from '$1' -- expected it to end in -fpm, -cli, -cli-builder or -ext-builder, optionally followed by -v3" ;;
   esac
 }
 
