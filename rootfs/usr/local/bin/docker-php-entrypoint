@@ -129,6 +129,19 @@ if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
   done < <(disable_functions_split "$PHP_DISABLE_FUNCTIONS")
 fi
 
+# PHP_SNUFFLEUPAGUS names a file under /usr/local/etc/php/snuffleupagus/, so it
+# is a bare name -- never a path. Without this, PHP_SNUFFLEUPAGUS=../x resolves
+# outside that directory. Lowercase letters, digits, '-' and '_', and it has to
+# start with a letter or digit; the empty value is already refused above.
+if [ -n "${PHP_SNUFFLEUPAGUS:-}" ]; then
+  case "$PHP_SNUFFLEUPAGUS" in
+    [!a-z0-9]*|*[!a-z0-9_-]*)
+      echo "docker-php-entrypoint: refusing PHP_SNUFFLEUPAGUS=${PHP_SNUFFLEUPAGUS}: a ruleset name is lowercase letters, digits, '-' and '_' only, starting with a letter or digit (^[a-z0-9][a-z0-9_-]*\$) -- it selects /usr/local/etc/php/snuffleupagus/<name>.rules, it is not a path." >&2
+      exit 1
+      ;;
+  esac
+fi
+
 # ------------------------------------------ internal (computed) variables
 # The four PHP_FPM_*_EFFECTIVE names are what conf/www.conf actually reads,
 # which makes them the only pool variables `docker image inspect` shows --
