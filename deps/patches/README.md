@@ -64,8 +64,7 @@ Four of the five distinct php-src patches (the six less the 8.1-8.3 xxhash one,
 now upstream) are backports of fixes php-src made itself on
 a later branch; the curl one is ours, because upstream deleted the offending
 probe in 8.4 rather than fixing it on the EOL branches. None changes behaviour
-upstream did not also change in effect (the snuffleupagus patch further down
-does, and says so). Per version the counts are 7.0: 4, 7.1: 3,
+upstream did not also change in effect. Per version the counts are 7.0: 4, 7.1: 3,
 7.2: 2, 7.3: 2, 7.4: 1, 8.0: 1. 7.0 sits exactly at the
 four-patch ceiling this project set for a single version, which is worth
 knowing when the question of retiring 7.0 next comes up.
@@ -84,9 +83,11 @@ it descends into `subdir`, and echoes the count. Keying by tag is deliberate: a
 version bump in `ext.json` finds no directory, applies nothing, says so, and
 the patch has to be re-reviewed against the new release to come back.
 
-| extension | patch | fixes | upstream |
-|---|---|---|---|
-| snuffleupagus v0.14.0 | `010-xxe-quiet-disable-entity-loader.patch` | The xxe hook logs an E_WARNING on every nopped `libxml_disable_entity_loader()` call. Symfony makes that call on every XSD validation on PHP 7, so PrestaShop 8.2 on 7.2-7.4 logged over a thousand per app-suite run, and PrestaShop's webservice turns a warning into an error response. Only the log line goes; the call stays a nop. | Not fixed upstream. Ours, and a behaviour change rather than a backport -- the exception to this file's policy, taken because no rule or config reaches that log line. |
+No extension is patched at the moment. The only one that was, snuffleupagus
+v0.14.0, carried a patch for its xxe hook; the rulesets no longer enable that
+hook (`conf/snuffleupagus/*.rules` say why), so the patch was dropped rather
+than kept for code that never runs. With no directory for a tag the build
+applies nothing and says so ("applied 0 patch(es)").
 
 ### Byte-identical copies
 
