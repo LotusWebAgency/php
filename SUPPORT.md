@@ -2,16 +2,17 @@
 
 ## Tags
 
-Every PHP version ships all three flavors:
+Every PHP version ships all four flavors:
 
 | Flavor | What it is |
 |---|---|
 | `fpm` | PHP-FPM listening on `:9000`, with a FastCGI-native `HEALTHCHECK` and the PrestaShop `chmod(0)` shim available via `PHP_CHMOD_SHIM`. |
 | `cli` | PHP CLI for workers, cron jobs and one-shot commands. |
-| `cli-builder` | The CLI image plus Composer, git and the build tools a `composer install` needs. Meant for a build stage, not for runtime. |
+| `cli-builder` | The CLI image plus Composer, git, Node.js 24 LTS and the tools a build or deploy stage needs. No compiler. Meant for a build stage, not for runtime. |
+| `ext-builder` | The CLI image plus a C/C++ toolchain, the PHP headers, `phpize` and `php-config`, for compiling your own extension in a build stage and copying the `.so` into `fpm`/`cli` of the same version. Runs as root. Not for runtime. |
 
 Tag shapes: `{version}-{flavor}` (every image), `{version}-{flavor}-v3`
-(PHP 8.4/8.5 only, compiled for `x86-64-v3`/`armv8.2-a+crypto`), and
+(PHP 8.4/8.5 only, compiled for `x86-64-v3`/`armv8.2-a+crypto`; not for `ext-builder`), and
 `{version}`/`latest` for the default version's `fpm` image. Version tags are
 read out of the built image after tests and the Trivy gate, so a tag can
 never claim a version the image does not actually run.

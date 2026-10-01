@@ -61,8 +61,8 @@ image compiles PHP itself, per version:
 
 ## Tags
 
-Every one of the 11 PHP versions ships all three flavors — `fpm`, `cli`,
-`cli-builder` — for `linux/amd64` and `linux/arm64`:
+Every one of the 11 PHP versions ships all four flavors — `fpm`, `cli`,
+`cli-builder`, `ext-builder` — for `linux/amd64` and `linux/arm64`:
 
 | PHP | Release | Era | Compiler | `-v3` variant | Support | EOL date |
 |---|---|---|---|---|---|---|
@@ -90,16 +90,16 @@ Tag scheme (`scripts/gen_matrix.py`):
 | Tag shape | Example | Meaning |
 |---|---|---|
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
-| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Compiled for `x86-64-v3` / `armv8.2-a+crypto` instead of the `x86-64`/`armv8-a` baseline — 8.4 and 8.5 only. Newer instruction set, older CPUs (pre-Haswell/Excavator on amd64) can't run it. |
+| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Compiled for `x86-64-v3` / `armv8.2-a+crypto` instead of the `x86-64`/`armv8-a` baseline — 8.4 and 8.5 only, and not for `ext-builder` (an extension built against baseline headers loads on the v3 runtime). Newer instruction set, older CPUs (pre-Haswell/Excavator on amd64) can't run it. |
 | `{version}` and `latest` | `8.5`, `latest` | The default version's (`matrix.json`'s `default_version`, currently 8.5) `fpm` image only. |
-| `{release}-{flavor}[-v3]` | `8.5.11-fpm`, `8.4.26-cli-v3` | Full patch version, pinned. Read from the built image (`PHP_VERSION`) and required to match `matrix.json`, so the tag can't claim a version the image doesn't contain. |
+| `{release}-{flavor}[-v3]` | `8.5.11-fpm`, `8.5.11-ext-builder`, `8.4.26-cli-v3` | Full patch version, pinned. Read from the built image (`PHP_VERSION`) and required to match `matrix.json`, so the tag can't claim a version the image doesn't contain. |
 
 Version tags are read out of the built image after tests and the Trivy gate,
 never out of the Dockerfile — see [SUPPORT.md](SUPPORT.md) for the full
 lifecycle policy and what "supported" means for the end-of-life tags below.
 
-39 images ship in total: 11 versions × 3 flavors, +6 for the two `-v3`
-variants (2 versions × 3 flavors).
+50 images ship in total: 11 versions × 4 flavors, +6 for the two `-v3`
+variants (2 versions × 3 flavors; `ext-builder` has none).
 
 ## Flavors
 
@@ -107,7 +107,8 @@ variants (2 versions × 3 flavors).
 |---|---|
 | `fpm` | PHP-FPM on `:9000`, behind nginx / Angie / another reverse proxy speaking FastCGI. `CMD php-fpm -F`, `STOPSIGNAL SIGQUIT` for a graceful worker drain, a FastCGI-native `HEALTHCHECK` (`php-fpm-healthcheck`, no front web server needed). |
 | `cli` | `php -a` by default — one-shot scripts, cron jobs, queue workers. |
-| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, Node.js/npm, gcc + build tools, and [Composer](https://getcomposer.org/) (installed with the vendor's own signature verification). Meant for a build stage, not for runtime. |
+| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, the MariaDB client (`mariadb`, `mariadb-dump`), Node.js 24 LTS with npm and corepack, [semantic-release](https://github.com/semantic-release/semantic-release), and [Composer](https://getcomposer.org/) (installed with the vendor's own signature verification). No compiler and no `phpize`: it is the asset/test/deploy stage. Meant for a build stage, not for runtime. |
+| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, libc6-dev and the PHP headers with `phpize`/`php-config`, for compiling your own extension and copying the `.so` into `fpm`/`cli` of the same PHP version — see [Adding your own extension](#adding-your-own-extension). Runs as root; no Composer, no Node.js. Meant for a build stage, not for runtime. |
 
 ## Quick start
 
@@ -156,8 +157,8 @@ reason rather than silently falling back to the image default.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PHP_MEMORY_LIMIT` | fpm `256M` · cli `512M` · cli-builder `-1` | `memory_limit`. Unset keeps the flavor's baked value. |
-| `PHP_MAX_EXECUTION_TIME` | fpm `300` · cli and cli-builder `0` (no limit) | `max_execution_time`. |
+| `PHP_MEMORY_LIMIT` | fpm `256M` · cli and ext-builder `512M` · cli-builder `-1` | `memory_limit`. Unset keeps the flavor's baked value. |
+| `PHP_MAX_EXECUTION_TIME` | fpm `300` · cli, cli-builder and ext-builder `0` (no limit) | `max_execution_time`. |
 | `PHP_MAX_INPUT_TIME` | `120` | `max_input_time`. |
 | `PHP_MAX_INPUT_VARS` | `10000` | `max_input_vars`. |
 | `PHP_UPLOAD_MAX_FILESIZE` | `128M` | `upload_max_filesize`. |
@@ -260,6 +261,65 @@ A handful of extensions are version-gated because upstream itself gates
 them (`imap` left core in 8.4, `xmlrpc` in 8.0, `mongodb`/`swoole`/`protobuf`
 refuse to build below their stated floor) — `php-ext-enable` on an
 unavailable name fails with the same "no such extension" message as a typo.
+
+### Adding your own extension
+
+The images carry no `pecl`, `pear` or `docker-php-ext-install`. An extension
+that is not in the table above is compiled in a build stage with `ext-builder`
+— `cli` plus gcc, g++, make, autoconf, pkg-config, libc6-dev and the PHP headers
+with `phpize`/`php-config` — and only the resulting `.so` is copied into the
+`fpm` or `cli` image:
+
+```dockerfile
+# 1. Compile. Same PHP version tag as the runtime stage below.
+FROM lotuswebagency/php:8.5-ext-builder AS ext
+ARG MYEXT_VERSION=1.2.3
+ARG MYEXT_SHA256=<sha256 of the tarball>
+# -dev packages the extension needs at build time go in this stage (root here).
+RUN apt-get update && apt-get install -y --no-install-recommends libmyext-dev
+RUN set -eux; \
+    curl -fsSLo /tmp/myext.tgz "https://example.com/myext-${MYEXT_VERSION}.tgz"; \
+    echo "${MYEXT_SHA256}  /tmp/myext.tgz" | sha256sum -c -; \
+    mkdir /src; \
+    tar -xzf /tmp/myext.tgz -C /src --strip-components=1; \
+    cd /src; \
+    phpize; \
+    ./configure; \
+    make -j"$(nproc)"; \
+    make install INSTALL_ROOT=/out
+
+# 2. Ship. Copy the .so (installed under /out at its real extension_dir path),
+#    add the runtime libraries it links against, switch it on.
+FROM lotuswebagency/php:8.5-fpm
+COPY --from=ext /out/ /
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libmyext1 \
+    && rm -rf /var/lib/apt/lists/*
+USER www-data
+ENV PHP_EXT_ENABLE=myext
+```
+
+- **One PHP version tag for both stages**, ideally pinned by digest
+  (`lotuswebagency/php:8.5-ext-builder@sha256:…` and the same for `8.5-fpm`).
+  The extension directory is named after the Zend module API number, and an
+  extension compiled against one PHP minor does not load in another.
+  `php-config --extension-dir` in `ext-builder` is the directory the `fpm`/`cli`
+  image of that version loads from; `make install INSTALL_ROOT=/out` plus
+  `COPY --from=ext /out/ /` puts the `.so` there without you spelling it out.
+- **Fetch a source tarball and verify its checksum**, as above — there is no
+  `pecl install` to do it for you.
+- **Runtime libraries are yours to install.** The runtime images run as UID 33,
+  so the final stage needs `USER root` for `apt-get install` and a `USER www-data`
+  after it. Install the shared libraries (`libmyext1`), not the `-dev` packages.
+- **`PHP_EXT_ENABLE=myext`** works for any `myext.so` in the extension
+  directory. Only `xdebug`, `opcache` and `snuffleupagus` are known to be Zend
+  extensions; for another `zend_extension`, drop a `zend_extension=myext.so`
+  ini file into `/usr/local/etc/php/conf.d/` instead.
+- `ext-builder` runs as root (it is a build stage; `make install` writes into
+  the extension directory), has no Composer and no Node.js, and has no `-v3`
+  variant: an extension built against the baseline headers loads in the `-v3`
+  runtime too. The repository's own end-to-end test for this flow is
+  `tests/test-ext-builder.sh` with the fixture in `tests/fixtures/ext-hello`.
 
 ## Hardening
 
@@ -476,6 +536,8 @@ done
 ./tests/build-all.sh          # every fpm target, resumable, --only/--flavor/
                                # --platform/--dry-run to narrow it
 ./tests/smoke.sh lotuswebagency/php:8.5-fpm 8.5 fpm   # one already-built image
+./tests/test-ext-builder.sh 8.5   # ext-builder end to end; needs that version's
+                                   # ext-builder, fpm and cli images built
 ```
 
 `tests/smoke.sh` fails an image whose `com.lotuswebagency.inputs-hash` label

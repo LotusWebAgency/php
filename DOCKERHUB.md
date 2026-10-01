@@ -46,10 +46,10 @@ services:
 
 | Tag shape | Example | Meaning |
 |---|---|---|
-| `{version}-{flavor}` | `8.5-fpm` | Every published image (`fpm`, `cli`, `cli-builder`). |
-| `{version}-{flavor}-v3` | `8.4-fpm-v3` | `x86-64-v3` / `armv8.2-a+crypto`, 8.4 and 8.5 only. Older CPUs can't run it. |
+| `{version}-{flavor}` | `8.5-fpm` | Every published image (`fpm`, `cli`, `cli-builder`, `ext-builder`). |
+| `{version}-{flavor}-v3` | `8.4-fpm-v3` | `x86-64-v3` / `armv8.2-a+crypto`, 8.4 and 8.5 only, not for `ext-builder`. Older CPUs can't run it. |
 | `{version}` and `latest` | `8.5`, `latest` | The default version's `fpm` image only. |
-| `{release}-{flavor}[-v3]` | `8.5.11-fpm`, `8.4.26-cli-v3` | Full patch version, pinned. Read from the built image (`PHP_VERSION`) and required to match `matrix.json`, so the tag can't claim a version the image doesn't contain. |
+| `{release}-{flavor}[-v3]` | `8.5.11-fpm`, `8.5.11-ext-builder`, `8.4.26-cli-v3` | Full patch version, pinned. Read from the built image (`PHP_VERSION`) and required to match `matrix.json`, so the tag can't claim a version the image doesn't contain. |
 
 Version tags are read out of the built image after tests and the Trivy gate,
 never out of the Dockerfile. `linux/amd64` and `linux/arm64`, SBOM, max-mode
@@ -61,7 +61,8 @@ build provenance and a keyless Cosign signature on every published digest.
 |---|---|
 | `fpm` | PHP-FPM on `:9000`, behind nginx / Angie / any FastCGI-speaking proxy. `STOPSIGNAL SIGQUIT`, a FastCGI-native `HEALTHCHECK`. |
 | `cli` | `php -a` by default — one-shot scripts, cron jobs, queue workers. |
-| `cli-builder` | `cli` plus git, Node.js/npm, a build toolchain and Composer. Meant for a build stage, not for runtime. |
+| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, the MariaDB client, Node.js 24 LTS with npm/corepack, semantic-release and Composer. No compiler. Meant for a build stage, not for runtime. |
+| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, libc6-dev and the PHP headers with `phpize`/`php-config`, for compiling your own extension and copying the `.so` into `fpm`/`cli` of the same version — see [Adding your own extension](#adding-your-own-extension). Runs as root; no Composer, no Node.js. Meant for a build stage, not for runtime. |
 
 ## Quick start
 
@@ -97,8 +98,8 @@ set-but-empty value, refuses to start with a named reason.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PHP_MEMORY_LIMIT` | fpm `256M` · cli `512M` · cli-builder `-1` | `memory_limit`; unset keeps the flavor's baked value. |
-| `PHP_MAX_EXECUTION_TIME` / `PHP_MAX_INPUT_TIME` / `PHP_MAX_INPUT_VARS` | `300` (cli, cli-builder: `0`) / `120` / `10000` | Execution limits. |
+| `PHP_MEMORY_LIMIT` | fpm `256M` · cli, ext-builder `512M` · cli-builder `-1` | `memory_limit`; unset keeps the flavor's baked value. |
+| `PHP_MAX_EXECUTION_TIME` / `PHP_MAX_INPUT_TIME` / `PHP_MAX_INPUT_VARS` | `300` (cli, cli-builder, ext-builder: `0`) / `120` / `10000` | Execution limits. |
 | `PHP_UPLOAD_MAX_FILESIZE` / `PHP_POST_MAX_SIZE` | `128M` / `128M` | Upload limits. |
 | `PHP_TIMEZONE` | _(unset)_ | `date.timezone`. |
 | `PHP_DISPLAY_ERRORS` | `Off` | Errors always go to stderr regardless. |
@@ -126,6 +127,50 @@ soap, sodium, zip, and more — full list in the source repo's README).
 `protobuf` (≥8.2), `snmp`, `snuffleupagus`, `ssh2`, `swoole` (≥8.2), `tidy`,
 `uuid`, `xdebug` (always available), `xmlrpc` (removed from core in 8.0),
 `yaml`.
+
+### Adding your own extension
+
+No `pecl`, `pear` or `docker-php-ext-install` in the images. Compile in an
+`ext-builder` stage (`cli` plus gcc, g++, make, autoconf, pkg-config, libc6-dev,
+the PHP headers, `phpize` and `php-config`) and copy only the `.so` into `fpm`
+or `cli`:
+
+```dockerfile
+FROM lotuswebagency/php:8.5-ext-builder AS ext
+ARG MYEXT_VERSION=1.2.3
+ARG MYEXT_SHA256=<sha256 of the tarball>
+RUN apt-get update && apt-get install -y --no-install-recommends libmyext-dev
+RUN set -eux; \
+    curl -fsSLo /tmp/myext.tgz "https://example.com/myext-${MYEXT_VERSION}.tgz"; \
+    echo "${MYEXT_SHA256}  /tmp/myext.tgz" | sha256sum -c -; \
+    mkdir /src; \
+    tar -xzf /tmp/myext.tgz -C /src --strip-components=1; \
+    cd /src; \
+    phpize; \
+    ./configure; \
+    make -j"$(nproc)"; \
+    make install INSTALL_ROOT=/out
+
+FROM lotuswebagency/php:8.5-fpm
+COPY --from=ext /out/ /
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libmyext1 \
+    && rm -rf /var/lib/apt/lists/*
+USER www-data
+ENV PHP_EXT_ENABLE=myext
+```
+
+- Use the **same PHP version tag** (ideally the same digest) for `ext-builder`
+  and the runtime stage: the extension directory carries the Zend module API
+  number, and an extension built for one PHP minor does not load in another.
+- Fetch a source tarball and verify its checksum; there is no `pecl install`.
+- Runtime libraries must be `apt-get install`ed in the final stage **as root**
+  (the images run as UID 33) — the shared libraries, not the `-dev` packages.
+- `PHP_EXT_ENABLE` works for any `.so` in the extension directory; for a
+  `zend_extension` other than xdebug/opcache/snuffleupagus, drop a
+  `zend_extension=myext.so` ini file into `/usr/local/etc/php/conf.d/`.
+- `ext-builder` runs as root, has no Composer or Node.js, and has no `-v3`
+  variant (an extension built against baseline headers loads in `-v3` too).
 
 ## Hardening
 
