@@ -59,17 +59,18 @@ else audits, and the only one whose breakage mode is silent.
 | 7.1 | `040-zip-mkstemp-include-unistd.patch` | same | same |
 | 7.4 | `010-curl-openssl3-not-old.patch` | `ext/curl/config.m4`'s "is libcurl linked against an old OpenSSL" probe only recognises `OpenSSL/1.1` as new. Trixie's libcurl reports `OpenSSL/3.5.x`, so the probe takes its old-OpenSSL branch — and that branch runs `PKG_CHECK_MODULES([OPENSSL])` + `PHP_EVAL_LIBLINE`, which links OpenSSL into `ext/curl`. On the legacy era pkg-config resolves that to the **vendored static 1.1.1w**, while the `libcurl.so.4` the extension calls is bound to the system `libssl.so.3`: two OpenSSLs, incompatible struct layouts, one address space. HTTPS `curl_exec()` segfaults; plain HTTP works. (The `HAVE_CURL_OLD_OPENSSL` macro the same branch defines is **not** the mechanism — its only consumer is ZTS-guarded and these images are NTS.) | Not fixed upstream on these branches (both EOL); the probe predates OpenSSL 3. Adds `OpenSSL/3` to the same branch as `OpenSSL/1.1`. |
 | 8.0 | `010-curl-openssl3-not-old.patch` | same | same |
+| 8.5 | `010-preserve-none-probe-clobbers.patch` | `Zend/Zend.m4`'s `preserve_none` run-probe writes `x20` in its aarch64 inline asm but lists `x0, x21, x22, x30` as clobbers, so the compiler may keep an input operand in `x20` and the first `eor` overwrites it. Debian's clang 19 with this build's flags (ThinLTO, lld) does exactly that: the probe prints `arg2 mismatch`, `HAVE_PRESERVE_NONE` stays undefined, and arm64 silently gets the CALL VM instead of TAILCALL (`php/build.sh` fails the build on it). amd64 is unaffected; its hunk only adds `memory`/`cc`. | php-src **a1cb5a37c0** ("fix aarch64 gcc preserve_none detection", #23883, master 2026-09-24, not yet on PHP-8.5); this is that commit, verbatim. Drop it once an 8.5 release carries it -- `patch --forward` fails the build when it is applied twice. |
 
-Four of the five distinct php-src patches (the six less the 8.1-8.3 xxhash one,
+Five of the six distinct php-src patches (the seven less the 8.1-8.3 xxhash one,
 now upstream) are backports of fixes php-src made itself on
 a later branch; the curl one is ours, because upstream deleted the offending
 probe in 8.4 rather than fixing it on the EOL branches. None changes behaviour
 upstream did not also change in effect. Per version the counts are 7.0: 4, 7.1: 3,
-7.2: 2, 7.3: 2, 7.4: 1, 8.0: 1. 7.0 sits exactly at the
+7.2: 2, 7.3: 2, 7.4: 1, 8.0: 1, 8.5: 1. 7.0 sits exactly at the
 four-patch ceiling this project set for a single version, which is worth
 knowing when the question of retiring 7.0 next comes up.
 
-**No patches needed:** 8.1–8.5. 8.1–8.3 carried a backport of php-src's
+**No patches needed:** 8.1–8.4. 8.1–8.3 carried a backport of php-src's
 `"xxhash/xxhash.h"` qualified include (the bundled zstd in the statically built
 `ext/zstd` shadowed `ext/hash`'s `xxhash.h`) until 8.1.34 / 8.2.34 / 8.3.35 shipped
 the same change upstream; with it applied twice `patch --forward` fails the build.
