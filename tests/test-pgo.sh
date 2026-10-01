@@ -135,12 +135,26 @@ echo "ok: build record is consistent with matrix.json (pgo=$expect_pgo, thinlto,
 # assertion therefore runs in the php-build stage against the unstripped
 # binary and fails the build; what is checkable here is that it ran and what it
 # concluded.
+#
+# Which assertion ran depends on the image's architecture (php/build.sh: x86
+# target-attributed implementations on amd64, the NEON base64 loops on arm64),
+# so the recorded result has to be the one for this image's arch -- an amd64
+# record claiming NEON, or an arm64 one claiming x86 vector instructions, is a
+# mislabelled or mixed-up build.
 simd="$(field simd_php_src)"
+image_arch="$(docker image inspect --format '{{.Architecture}}' "$IMAGE")"
+case "$simd" in
+  neon:*)  [ "$image_arch" = arm64 ] || fail "the build record reports an aarch64 NEON result ('$simd') on a $image_arch image" ;;
+  */*)     [ "$image_arch" = amd64 ] || fail "the build record reports an x86 target-attributed SIMD result ('$simd') on a $image_arch image" ;;
+esac
 case "$simd" in
   '')                     fail "the build record has no simd_php_src line -- this image predates the SIMD assertion and there is no evidence php-src's vector implementations survived the build" ;;
   unchecked)              fail "the build record says simd_php_src=unchecked -- the build-stage assertion did not run" ;;
-  none-in-this-branch)    echo "ok: php $VERSION declares no target-attributed SIMD, asserted at build time against its own configure probes" ;;
-  skipped-non-x86_64)     echo "ok: SIMD check recorded as skipped (non-x86_64 build)" ;;
+  none-in-this-branch)    if [ "$image_arch" = arm64 ]; then
+                            echo "ok: php $VERSION has no aarch64 NEON code in ext/standard/base64.c (7.4+), asserted at build time against its own source tree"
+                          else
+                            echo "ok: php $VERSION declares no target-attributed SIMD, asserted at build time against its own configure probes"
+                          fi ;;
   *)                      [ "$(field simd_php_src_functions)" -gt 0 ] 2>/dev/null \
                             || fail "the build record reports simd_php_src='$simd' but simd_php_src_functions='$(field simd_php_src_functions)'"
                           echo "ok: build asserted php-src's own SIMD implementations in the unstripped binary ($simd)" ;;

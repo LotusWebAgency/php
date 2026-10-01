@@ -606,9 +606,9 @@ assert_simd_dispatch_present() {
 
   case "$(uname -m)" in
     x86_64) ;;
-    *) SIMD_CHECK_RESULT="skipped-non-x86_64"
-       echo "note: php-src's target-attributed implementations are x86-only; nothing to check on $(uname -m)"
-       return 0 ;;
+    aarch64) assert_neon_base64_present "$src" "$@"; return 0 ;;
+    *) echo "FATAL: no SIMD assertion is defined for $(uname -m) -- add one before building here" >&2
+       exit 1 ;;
   esac
 
   names="$(bash "$HERE/simd-symbols.sh" "$src")"
@@ -665,6 +665,70 @@ assert_simd_dispatch_present() {
   SIMD_FOUND="$found"
 }
 
+# assert_neon_base64_present <php-src-dir> <unstripped-binary> [<binary>...]
+#
+# The aarch64 counterpart of the x86 check above. php-src has no
+# target-attributed code for aarch64 and nothing a configure probe can switch
+# off: from 7.4 on, ext/standard/base64.c carries NEON encode/decode loops
+# (neon_base64_encode/neon_base64_decode, plus strrev/addslashes in string.c)
+# behind a plain #if __aarch64__, always_inline'd into the exported
+# php_base64_encode[_ex]/php_base64_decode_ex. So the failure mode the x86
+# check guards cannot happen here, but the result is still asserted rather
+# than assumed: the NEON loops are the only code in those functions that uses
+# de-interleaving structure loads/stores (vld3q_u8/vst4q_u8 to encode,
+# vld4q_u8/vst3q_u8 to decode), and they must be there.
+#
+# Per symbol, never whole-binary -- vendored OpenSSL carries NEON of its own on
+# the legacy era, the same attribution problem as on x86. A function's
+# ".cold"/".part" pieces are read with it, since -freorder-blocks-and-partition
+# under a profile that never ran base64 is free to move the vector loop there.
+assert_neon_base64_present() {
+  local src="$1"; shift
+  local bin base syms parts dis enc_ok dec_ok
+
+  if ! grep -q 'neon_base64_decode' "$src/ext/standard/base64.c" 2>/dev/null; then
+    SIMD_CHECK_RESULT="none-in-this-branch"
+    echo "note: php ${PHP_VERSION} has no aarch64 NEON code in ext/standard/base64.c (added in 7.4) and no target-attributed SIMD on this arch -- nothing to check"
+    return 0
+  fi
+
+  for bin in "$@"; do
+    syms="$(nm "$bin" 2>/dev/null)" \
+      || { echo "FATAL: nm could not read $bin" >&2; exit 1; }
+    [ "$(wc -l <<<"$syms")" -gt 100 ] \
+      || { echo "FATAL: $bin has almost no symbols -- it is stripped, and the check below would" \
+                "report the NEON loops missing regardless of the truth" >&2; exit 1; }
+
+    enc_ok=0; dec_ok=0
+    for base in php_base64_encode php_base64_encode_ex; do
+      parts="$(awk -v b="$base" '$3 == b || index($3, b ".") == 1 { print $3 }' <<<"$syms" | sort -u)"
+      [ -n "$parts" ] || continue
+      dis="$(for p in $parts; do objdump -d --disassemble="$p" "$bin" 2>/dev/null || true; done)"
+      if grep -qE '[[:space:]]ld3[[:space:]]+\{v' <<<"$dis" && grep -qE '[[:space:]]st4[[:space:]]+\{v' <<<"$dis"; then
+        enc_ok=1
+      fi
+    done
+    parts="$(awk '$3 == "php_base64_decode_ex" || index($3, "php_base64_decode_ex.") == 1 { print $3 }' <<<"$syms" | sort -u)"
+    [ -n "$parts" ] || {
+      echo "FATAL: $bin defines no php_base64_decode_ex -- the anchor this check reads is gone, so" \
+           "it would measure nothing" >&2; exit 1; }
+    dis="$(for p in $parts; do objdump -d --disassemble="$p" "$bin" 2>/dev/null || true; done)"
+    if grep -qE '[[:space:]]ld4[[:space:]]+\{v' <<<"$dis" && grep -qE '[[:space:]]st3[[:space:]]+\{v' <<<"$dis"; then
+      dec_ok=1
+    fi
+
+    [ "$enc_ok" -eq 1 ] || {
+      echo "FATAL: no php_base64_encode[_ex] in $bin carries the ld3/st4 of neon_base64_encode --" \
+           "ext/standard/base64.c's aarch64 NEON loop did not reach the binary" >&2; exit 1; }
+    [ "$dec_ok" -eq 1 ] || {
+      echo "FATAL: php_base64_decode_ex in $bin does not carry the ld4/st3 of neon_base64_decode --" \
+           "ext/standard/base64.c's aarch64 NEON loop did not reach the binary" >&2; exit 1; }
+    echo "ok: $(basename "$bin") -- php_base64_encode/decode carry php-src's NEON loops (ld3/st4, ld4/st3)"
+  done
+  SIMD_CHECK_RESULT="neon: 2/2 php-src base64 functions carry NEON structure loads/stores"
+  SIMD_FOUND=2
+}
+
 # assert_php_src_hardening <unstripped-binary> [<binary>...]
 #
 # tests/assert-elf-hardening.sh asserts PIE, full RELRO and a non-executable
@@ -697,7 +761,7 @@ assert_simd_dispatch_present() {
 # One objdump pass, attributed by enclosing symbol, because thirty
 # --disassemble= invocations each re-parse the whole binary.
 assert_php_src_hardening() {
-  local bin out total endbr chk pct
+  local bin out total endbr chk bti pct
 
   for bin in "$@"; do
     out="$(objdump -d "$bin" 2>/dev/null | awk '
@@ -707,16 +771,24 @@ assert_php_src_hardening() {
         first = 1;
         next
       }
-      php && first && /\t/ { total++; if ($0 ~ /endbr64/) endbr++; first = 0 }
+      # aarch64 (-mbranch-protection=standard): a function entry is a BTI
+      # landing pad when it starts with "bti c"/"bti jc", or with paciasp/
+      # pacibsp, which BTI also accepts as one -- gcc and clang emit the PAC
+      # form instead of a separate bti on every function that saves LR
+      # (checked on the trixie gcc 14 and clang 19 under this cflags.sh output).
+      # Neither mnemonic exists on x86_64, so this counter stays 0 there.
+      php && first && /\t/ { total++; if ($0 ~ /endbr64/) endbr++; if ($0 ~ /\t(bti|paciasp|pacibsp)(\t|$)/) bti++; first = 0 }
       # The call target has to *end* at _chk. Unanchored, this matched inside
       # __stack_chk_fail, which -fstack-protector-strong emits in most
       # functions -- so the counter was measuring the stack protector and
       # stayed non-zero with _FORTIFY_SOURCE=0. Caught by the negative control,
       # which is the only reason it is not still wrong.
+      # "call" is x86_64; aarch64 spells a direct call "bl".
       php && /call/ && /__[a-z0-9_]+_chk(@plt)?>/ { chk++ }
-      END { printf "%d %d %d", total+0, endbr+0, chk+0 }')" \
+      php && /\tbl\t/ && /__[a-z0-9_]+_chk(@plt)?>/ { chk++ }
+      END { printf "%d %d %d %d", total+0, endbr+0, chk+0, bti+0 }')" \
       || { echo "FATAL: objdump could not disassemble $bin" >&2; exit 1; }
-    read -r total endbr chk <<<"$out"
+    read -r total endbr chk bti <<<"$out"
 
     # Positive control for both assertions below: if no php-src function was
     # found at all -- a stripped binary, a changed objdump format, a prefix that
@@ -745,6 +817,21 @@ assert_php_src_hardening() {
                "see this on the legacy era -- the vendored static archives supply thousands." >&2
           exit 1; }
         ;;
+      aarch64)
+        # The same assertion for -mbranch-protection=standard, and the same
+        # 50% for the same reason: the gap that matters is "most entries"
+        # against "none" -- neither trixie's gcc nor the gcc:16 image enables
+        # branch protection by default, so php-src compiled without the flag
+        # has no bti/paciasp entry at all. Like CET's IBT/SHSTK note on x86,
+        # the GNU_PROPERTY_AARCH64_FEATURE_1 BTI/PAC note is not asserted: it
+        # is the AND over every input object, gold (the gcc path's linker)
+        # does not emit it, and its absence is not a property of php-src.
+        pct=$((100 * bti / total))
+        [ "$pct" -ge 50 ] || {
+          echo "FATAL: only $bti of $total php-src functions in $bin start with a BTI landing pad" \
+               "(bti/paciasp, ${pct}%). -mbranch-protection did not reach php-src's own compiles." >&2
+          exit 1; }
+        ;;
       *) pct=-1 ;;
     esac
 
@@ -754,13 +841,16 @@ assert_php_src_hardening() {
            "vendored dependencies'." >&2
       exit 1; }
 
-    if [ "$pct" -ge 0 ]; then
+    if [ "$(uname -m)" = aarch64 ]; then
+      echo "ok: $(basename "$bin") -- $bti/$total php-src functions start with bti/paciasp (${pct}%), $chk php-src __*_chk call sites"
+    elif [ "$pct" -ge 0 ]; then
       echo "ok: $(basename "$bin") -- $endbr/$total php-src functions carry endbr64 (${pct}%), $chk php-src __*_chk call sites"
     else
       echo "ok: $(basename "$bin") -- $chk php-src __*_chk call sites (endbr64 is x86_64-only, skipped on $(uname -m))"
     fi
   done
   HARDENING_PHP_SRC="endbr64 ${endbr}/${total} php-src functions, ${chk} __*_chk call sites"
+  [ "$(uname -m)" != aarch64 ] || HARDENING_PHP_SRC="bti/paciasp ${bti}/${total} php-src functions, ${chk} __*_chk call sites"
   [ "$pct" -ge 0 ] || HARDENING_PHP_SRC="${chk} __*_chk call sites (endbr64 skipped on $(uname -m))"
 }
 
