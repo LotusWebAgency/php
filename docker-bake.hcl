@@ -49,6 +49,13 @@ variable "CREATED" { default = "" }
 #     first build each week starts that scope cache-empty and picks up
 #     whatever apt-get install resolves to that day.
 variable "ARCH" { default = "" }
+
+# false makes CACHE_REGISTRY read-only: cache-from stays, cache-to is dropped.
+# CI's verify job (PR and develop builds that never publish) sets it so that
+# only the publishing build job on main ever writes a cache ref -- a mode=max
+# export is a full replace of the ref, and a second writer on the same scope is
+# exactly the clobber ARCH exists to prevent.
+variable "CACHE_PUSH" { default = true }
 variable "CACHE_WEEK" { default = "" }
 
 target "_common" {
@@ -153,7 +160,7 @@ target "php" {
   # mode=max export of the same php-build layers, written concurrently into a
   # ref of its own, would only cost registry storage.
   cache-from = CACHE_REGISTRY != "" ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${item.cache_flavor}-${ARCH}-${CACHE_WEEK}"] : []
-  cache-to   = CACHE_REGISTRY != "" && item.cache_flavor == item.flavor ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${item.flavor}-${ARCH}-${CACHE_WEEK},mode=max"] : []
+  cache-to   = CACHE_REGISTRY != "" && CACHE_PUSH && item.cache_flavor == item.flavor ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${item.flavor}-${ARCH}-${CACHE_WEEK},mode=max"] : []
   output     = [PUSH ? "type=registry" : "type=docker"]
 }
 
