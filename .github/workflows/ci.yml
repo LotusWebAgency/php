@@ -259,6 +259,9 @@ jobs:
             exit 1
           }
           echo "ok: $corpus_ref inputs-hash matches this tree"
+          # test-pgo.sh (via smoke.sh) reads the tier's MANIFEST by its floating
+          # tag; point that tag at the corpus just verified, never a pulled one.
+          docker tag "$corpus_ref" "$TARGET_CORPUS"
           echo "CORPUS_REF=$corpus_ref" >> "$GITHUB_ENV"
 
       # One invocation for the whole leg (the target, plus ext-builder when it
@@ -643,6 +646,9 @@ jobs:
             exit 1
           }
           echo "ok: $corpus_ref inputs-hash matches this tree"
+          # test-pgo.sh (via smoke.sh) reads the tier's MANIFEST by its floating
+          # tag; point that tag at the corpus just verified, never a pulled one.
+          docker tag "$corpus_ref" "$TARGET_CORPUS"
           echo "CORPUS_REF=$corpus_ref" >> "$GITHUB_ENV"
 
       - name: Build and push by digest (SBOM + provenance)
