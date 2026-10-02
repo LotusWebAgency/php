@@ -649,7 +649,8 @@ if grep -qw snmp <<<"$SHARED_EXTS"; then
   echo "ok: /opt/net-snmp ships the library and MIB files only"
 
   # Works with no network. Output is compared exactly, stderr included: a wrong
-  # compiled-in MIB directory or an unresolvable libnetsnmp prints noise on load.
+  # compiled-in MIB directory or an unresolvable libnetsnmp prints noise on load
+  # (the fpm entrypoint's own memory-limit notice is the one line filtered out).
   #   - snmp_read_mib on a shipped MIB succeeds; on a missing file it fails (control).
   #   - SNMPv3 authPriv key generation (SHA + AES) is local, so success means the
   #     OpenSSL-backed USM crypto is really there.
@@ -657,7 +658,7 @@ if grep -qw snmp <<<"$SHARED_EXTS"; then
   #     MIBS set: the request then fails on the network, not on the name. The
   #     control name, from a module that does not exist, must fail on the name --
   #     otherwise the resolution check cannot tell the two failures apart.
-  snmp_out=$(docker run --rm -i "$IMAGE" sh -c 'php-ext-enable snmp >/dev/null && php' 2>&1 <<'PHP' || true
+  snmp_out=$(docker run --rm -i "$IMAGE" sh -c 'php-ext-enable snmp >/dev/null && php' 2>&1 <<'PHP' | grep -v '^docker-php-entrypoint:' || true
 <?php
 $fail = function ($m) { echo "FAIL: $m\n"; exit(1); };
 (extension_loaded("snmp") && class_exists("SNMP")) || $fail("snmp extension or SNMP class missing");
