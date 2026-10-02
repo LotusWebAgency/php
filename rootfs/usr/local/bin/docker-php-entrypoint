@@ -643,7 +643,9 @@ enable_extensions() {
     echo "docker-php-entrypoint: PHP_EXT_ENABLE=\"$raw\" contains no extension names after splitting on commas" >&2
     exit 1
   fi
-  php-ext-enable "$@"
+  # stderr: the container's stdout belongs to the command it runs, and an
+  # "enabled <name>" line there corrupts `php script.php > out.json`.
+  php-ext-enable "$@" >&2
 }
 
 if [ -n "${PHP_EXT_ENABLE:-}" ]; then
@@ -682,7 +684,7 @@ if [ -n "${PHP_SNUFFLEUPAGUS:-}" ]; then
   fi
   ruleset="${sp_dir}/${PHP_SNUFFLEUPAGUS}.rules"
   [ -f "$ruleset" ] || { echo "no such snuffleupagus ruleset: ${PHP_SNUFFLEUPAGUS}" >&2; exit 1; }
-  php-ext-enable snuffleupagus
+  php-ext-enable snuffleupagus >&2
   {
     echo "sp.configuration_file=${ruleset}"
   } >> "${CONF_DIR}/20-snuffleupagus.ini"
