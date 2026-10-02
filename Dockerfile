@@ -587,8 +587,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
 
 COPY --from=php-build /tmp/runtime-packages.txt /tmp/runtime-packages.txt
+# upgrade: BASE_IMAGE is digest-pinned, so without it a Debian security fix
+# to a package the base already ships (libpcre2-8-0 on the legacy era, which
+# bundles its own pcre and never names it) waits for the next digest bump
+# instead of landing in the weekly rebuild.
 RUN set -eux; \
     apt-get update; \
+    apt-get upgrade -y; \
     apt-get install -y --no-install-recommends \
       ca-certificates curl tzdata tini less nano procps \
       tar gzip bzip2 zip unzip zstd xz-utils \
