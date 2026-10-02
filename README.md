@@ -247,7 +247,7 @@ zlib, igbinary, redis, imagick, memcached, apcu, zstd
 | `msgpack` | ≥7.0 | Compact queue serialization. |
 | `pcov` | ≥7.1 | PHPUnit coverage driver. |
 | `protobuf` | ≥8.2 | gRPC clients; pinned build refuses below 8.2. |
-| `snmp` | ≥7.0 | Legacy server monitoring. |
+| `snmp` | ≥7.0 | Legacy server monitoring. Links a vendored, client-only net-snmp (`/opt/net-snmp`) instead of Debian's `libsnmp40t64`, which hard-depends on perl (~49 MB). The MIB files ship in `/opt/net-snmp/share/snmp/mibs` but none load automatically, as on Debian; set `MIBS=ALL` or `mibs +ALL` in `/etc/snmp/snmp.conf` to load them. |
 | `snuffleupagus` | ≥7.2 | Virtual patching — see [Hardening](#hardening). |
 | `ssh2` | ≥7.0 | Deployment tooling SFTP/SSH. |
 | `swoole` | ≥8.2 | Laravel Octane's async server; needs PHP Fibers. |

@@ -628,9 +628,9 @@
       "source": "core",
       "linkage": "shared",
       "php": ">=7.0",
-      "configure": "--with-snmp",
-      "libs": ["libsnmp-dev"],
-      "why": "Legacy PrestaShop server-monitoring modules polling network devices"
+      "configure": "--with-snmp=/opt/net-snmp",
+      "libs": [],
+      "why": "Legacy PrestaShop server-monitoring modules polling network devices. Links the vendored client-only net-snmp (deps/build-netsnmp.sh), not Debian's libsnmp40t64, which hard-depends on libperl5.40"
     },
     {
       "name": "ssh2",

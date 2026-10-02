@@ -150,6 +150,24 @@ RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
 # lint on a variable this stage never declared as an ARG.
 ENV PKG_CONFIG_PATH=/opt/imagemagick/lib/pkgconfig
 
+# ------------------------------------------------------------- net-snmp
+# net-snmp's client library, vendored for the same reason as ImageMagick: the
+# distro copy (libsnmp40t64) hard-depends on libperl5.40, which puts ~49 MB of
+# perl in every runtime image and cannot be purged away. Built once for both
+# eras (it links Debian's libssl3 -- libssl-dev is installed here for that --
+# never the legacy era's vendored, static-only 1.1.1w), in its own stage so it
+# neither invalidates nor waits for ImageMagick. The deps stages below COPY the whole prefix (ext-snmp needs bin/net-snmp-config and
+# the headers at build time); php/build.sh's stage_runtime_deps ships only the
+# library and the MIB files.
+FROM toolchain AS net-snmp
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends libssl-dev
+COPY deps/build-netsnmp.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
+COPY php/cflags.sh php/ldflags.sh /build/php/
+RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
+    bash /build/deps/build-netsnmp.sh /opt/net-snmp
+
 # ------------------------------------------------------------- deps: modern
 # PHP 8.1+ links against what trixie ships; base rebuilds carry the CVE fixes.
 FROM imagemagick AS deps-modern
@@ -177,8 +195,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # and trixie ships the pcre2 runtime lib but not the -dev package/pcre2-config
 # binary anywhere else in this image.
       librabbitmq-dev libbz2-dev libffi-dev libldap2-dev liblz4-dev \
-      libmcrypt-dev libsnmp-dev libssh2-1-dev libtidy-dev uuid-dev \
+      libmcrypt-dev libssh2-1-dev libtidy-dev uuid-dev \
       libyaml-dev libevent-dev libpcre2-dev
+# ext-snmp links this instead of libsnmp-dev (see the net-snmp stage above).
+COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 ENV PHP_DEPS_PREFIX=""
 
 # ------------------------------------------------------------- deps: legacy
@@ -240,7 +260,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       libbrotli-dev \
       libsodium-dev libargon2-dev libgmp-dev libreadline-dev libmemcached-dev \
       librabbitmq-dev libbz2-dev libffi-dev libldap2-dev liblz4-dev \
-      libmcrypt-dev libsnmp-dev libssh2-1-dev libtidy-dev uuid-dev \
+      libmcrypt-dev libssh2-1-dev libtidy-dev uuid-dev \
       libyaml-dev libevent-dev libpcre2-dev
 COPY deps/build-deps.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
 COPY php/cflags.sh php/ldflags.sh /build/php/
@@ -295,6 +315,8 @@ RUN set -eu; \
         ;; \
       *) : ;; \
     esac
+# ext-snmp links this instead of libsnmp-dev (see the net-snmp stage above).
+COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 # PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR (the latter set in php/build.sh) is what
 # actually makes PHP's ./configure find the vendored openssl/icu -- both
 # PHP_SETUP_OPENSSL and PHP_SETUP_ICU are PKG_CHECK_MODULES-based, and
@@ -530,7 +552,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     set -eux; \
     export CFLAGS="$(bash /build/php/cflags.sh "$UARCH")"; \
     export CXXFLAGS="$CFLAGS -std=c++17"; \
-    export LDFLAGS="$(bash /build/php/ldflags.sh)"; \
+    export LDFLAGS="$(bash /build/php/ldflags.sh /opt/net-snmp)"; \
     export PHP_ERA="$PHP_ERA"; \
     bash /build/php/build-shared-ext.sh "$PHP_VERSION" "$PWD"; \
     find /usr/local/lib/php/extensions -name '*.so' -exec strip --strip-unneeded {} +
@@ -609,7 +631,10 @@ RUN set -eux; \
 # real client binaries, drop the wrapper machinery. postgresql-client-N Depends on
 # postgresql-client-common, so the package cannot outlive the purge: the binaries
 # have to be copied out first. Naming only `perl` lets apt take libperl/perl-modules
-# with it, which keeps this working across the next perl major.
+# with it, which keeps this working across the next perl major. That only works
+# because nothing else Depends on libperl: Debian's libsnmp40t64 does, which is why
+# ext-snmp links the vendored client-only net-snmp (deps/build-netsnmp.sh) and no
+# libsnmp* package is ever installed. tests/smoke.sh asserts libperl is gone.
 #
 # This does not remove the perl interpreter: /usr/bin/perl belongs to perl-base,
 # which is Essential, which dpkg needs, and which debian:trixie-slim already ships.
@@ -625,11 +650,11 @@ RUN set -eux; \
     [ -z "$audit" ] || { echo "$audit" >&2; echo "FATAL: inconsistent dpkg state after purge" >&2; exit 1; }; \
     rm -rf /var/lib/apt/lists/* /tmp/runtime-packages.txt
 
-# Vendored libraries (ImageMagick in every era, plus the legacy era's vendored
-# openssl/icu/curl -- libxml2 is NOT vendored, task 14 review I2), at the absolute path their
-# binaries' rpath names (php/build.sh stages them). Empty of the legacy tree,
-# but not of ImageMagick, in the modern era -- either way one unconditional
-# COPY is enough.
+# Vendored libraries (ImageMagick and net-snmp in every era, plus the legacy era's
+# vendored openssl/icu/curl -- libxml2 is NOT vendored, task 14 review I2), at the
+# absolute path their binaries' rpath names (php/build.sh stages them). Empty of
+# the legacy tree, but not of ImageMagick and net-snmp, in the modern era -- either
+# way one unconditional COPY is enough.
 COPY --from=php-build /deps-stage/ /
 
 COPY --from=php-build /usr/local/bin/php /usr/local/bin/php
