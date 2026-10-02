@@ -602,6 +602,84 @@ fi
 grep -qi "no such extension" /tmp/php-ext-enable.err || { echo "FAIL: unknown extension did not fail loudly"; exit 1; }
 echo "ok: php-ext-enable refuses unknown names"
 
+# net-snmp (deps/build-netsnmp.sh): Debian's libsnmp40t64 hard-depends on
+# libperl5.40, and a package another package Depends on cannot be purged, so
+# the only way to ship no libperl/perl-modules (~49 MB) is to link ext-snmp
+# against a vendored client-only build. These assertions are what keeps that
+# true: a regression to libsnmp-dev brings libperl back silently, with every
+# functional check still green.
+#
+# dpkg-query takes package names and globs, which `dpkg -s` does not. It exits
+# non-zero when nothing matches, which for an absence assertion is the answer
+# rather than an error, so the exit status is deliberately ignored and the
+# Status column is what is read. The control proves the query can see an
+# installed package at all -- an empty result is otherwise indistinguishable
+# from a dpkg-query that cannot run.
+dpkg_installed() {  # dpkg_installed <name-or-glob>... -> the installed packages matching, one per line
+  docker run --rm "$IMAGE" dpkg-query -W -f='${Package} ${Status}\n' "$@" 2>/dev/null \
+    | sed -n 's/ install ok installed$//p' || true
+}
+[ "$(dpkg_installed libc6)" = "libc6" ] \
+  || { echo "FAIL: dpkg-query could not see libc6 as installed -- the libperl/libsnmp absence check below would prove nothing"; exit 1; }
+stray_pkgs=$(dpkg_installed 'libperl*' 'perl-modules*' 'libsnmp*' 'libnetsnmp*' | tr '\n' ' ')
+[ -z "$stray_pkgs" ] || { echo "FAIL: the runtime image carries Debian perl/snmp library packages ($stray_pkgs) -- ext-snmp is meant to link the vendored /opt/net-snmp, and libsnmp40t64 pulls in libperl5.40"; exit 1; }
+echo "ok: no libperl*, perl-modules*, libsnmp* or libnetsnmp* Debian package in the image (control: libc6 is visible to the same query)"
+
+if grep -qw snmp <<<"$SHARED_EXTS"; then
+  snmp_ldd=$(docker run --rm "$IMAGE" ldd "$extdir/snmp.so" 2>&1 || true)
+  grep -qE '^[[:space:]]*libnetsnmp\.so\.[0-9]+ => /opt/net-snmp/lib/libnetsnmp\.so\.[0-9]+' <<<"$snmp_ldd" \
+    || { echo "FAIL: snmp.so does not resolve libnetsnmp from /opt/net-snmp/lib: $snmp_ldd"; exit 1; }
+  ! grep -q 'not found' <<<"$snmp_ldd" || { echo "FAIL: snmp.so has an unresolved NEEDED entry: $snmp_ldd"; exit 1; }
+  nsnmp_ldd=$(docker run --rm "$IMAGE" sh -c 'ldd /opt/net-snmp/lib/libnetsnmp.so.*[0-9]' 2>&1 || true)
+  # USM auth/priv crypto goes through Debian's supported libssl3, from the system
+  # path -- not a vendored copy, and (CF-9) never an EOL one.
+  grep -qE 'libcrypto\.so\.3 => /(usr/)?lib/' <<<"$nsnmp_ldd" \
+    || { echo "FAIL: libnetsnmp does not link the system libcrypto.so.3: $nsnmp_ldd"; exit 1; }
+  ! grep -qE 'libperl|libwrap|libsensors|libpci|not found' <<<"$nsnmp_ldd" \
+    || { echo "FAIL: libnetsnmp links something it is built without, or has an unresolved entry: $nsnmp_ldd"; exit 1; }
+  echo "ok: snmp.so resolves libnetsnmp from /opt/net-snmp/lib, which links only the system libssl3 (no perl/wrap/sensors/pci)"
+
+  # Only the library and the MIB files ship; the prefix's bin/include/pkgconfig
+  # were build-time inputs for ext-snmp. Control: the same find sees the library.
+  nsnmp_files=$(docker run --rm "$IMAGE" find /opt/net-snmp \( -type f -o -type l \))
+  grep -q '/lib/libnetsnmp\.so\.' <<<"$nsnmp_files" \
+    || { echo "FAIL: find /opt/net-snmp did not list the library -- the dev-file absence check below would prove nothing"; exit 1; }
+  nsnmp_dev=$(grep -E '\.(a|la|pc|h)$|/(bin|include)/' <<<"$nsnmp_files" || true)
+  [ -z "$nsnmp_dev" ] || { echo "FAIL: build-time files shipped under /opt/net-snmp: $nsnmp_dev"; exit 1; }
+  echo "ok: /opt/net-snmp ships the library and MIB files only"
+
+  # Works with no network. Output is compared exactly, stderr included: a wrong
+  # compiled-in MIB directory or an unresolvable libnetsnmp prints noise on load.
+  #   - snmp_read_mib on a shipped MIB succeeds; on a missing file it fails (control).
+  #   - SNMPv3 authPriv key generation (SHA + AES) is local, so success means the
+  #     OpenSSL-backed USM crypto is really there.
+  #   - A MIB-qualified name resolves from the compiled-in MIB directory with no
+  #     MIBS set: the request then fails on the network, not on the name. The
+  #     control name, from a module that does not exist, must fail on the name --
+  #     otherwise the resolution check cannot tell the two failures apart.
+  snmp_out=$(docker run --rm -i "$IMAGE" sh -c 'php-ext-enable snmp >/dev/null && php' 2>&1 <<'PHP' || true
+<?php
+$fail = function ($m) { echo "FAIL: $m\n"; exit(1); };
+(extension_loaded("snmp") && class_exists("SNMP")) || $fail("snmp extension or SNMP class missing");
+is_int(snmp_get_valueretrieval()) || $fail("snmp_get_valueretrieval() did not return an int");
+snmp_read_mib("/opt/net-snmp/share/snmp/mibs/SNMPv2-MIB.txt") === true || $fail("snmp_read_mib failed on a shipped MIB");
+@snmp_read_mib("/nonexistent/NO-SUCH-MIB.txt") === false || $fail("snmp_read_mib accepted a missing file");
+$s = new SNMP(SNMP::VERSION_3, "127.0.0.1", "smokeuser");
+$s->setSecurity("authPriv", "SHA", "12345678", "AES", "12345678") === true || $fail("USM authPriv SHA/AES setup failed");
+$last = "";
+set_error_handler(function ($no, $str) use (&$last) { $last = $str; return true; });
+snmpget("127.0.0.1:1", "public", "SNMPv2-MIB::sysDescr.0", 100000, 0);
+stripos($last, "Invalid object identifier") === false || $fail("SNMPv2-MIB::sysDescr.0 did not resolve from the default MIB directory: $last");
+$last = "";
+snmpget("127.0.0.1:1", "public", "NO-SUCH-MIB::nothing.0", 100000, 0);
+stripos($last, "Invalid object identifier") !== false || $fail("control: an unknown MIB name did not fail on the name ($last), so the resolution check above proves nothing");
+echo "snmp-ok";
+PHP
+)
+  [ "$snmp_out" = "snmp-ok" ] || { echo "FAIL: ext-snmp functional check printed: $snmp_out"; exit 1; }
+  echo "ok: ext-snmp loads clean and works offline (snmp_read_mib, USM SHA/AES keys, MIB name resolution, negative controls)"
+fi
+
 # Baseline php.ini (task 10): expose_php/display_errors/allow_url_include off.
 for pair in "expose_php:" "display_errors:" "allow_url_include:"; do
   key="${pair%%:*}"
@@ -770,6 +848,9 @@ docker cp "$hcid:$extdir/." "$hard_dir/ext" >/dev/null
 # ldflags.sh path and pass; including them is coverage that costs nothing.
 mkdir -p "$hard_dir/im"
 docker cp "$hcid:/opt/imagemagick/lib/." "$hard_dir/im" >/dev/null 2>&1 || true
+# Same for the vendored net-snmp client library.
+mkdir -p "$hard_dir/nsnmp"
+docker cp "$hcid:/opt/net-snmp/lib/." "$hard_dir/nsnmp" >/dev/null 2>&1 || true
 case "$FLAVOR" in
   fpm) docker cp "$hcid:/usr/local/sbin/php-fpm" "$hard_dir/php-fpm" >/dev/null ;;
 esac
@@ -830,10 +911,13 @@ assert_compiler_comment "php-$EXPECT" "$hard_dir/php"
 # shellcheck disable=SC2046  # the .so list is meant to word-split
 im_libs=$(find "$hard_dir/im" -maxdepth 1 -type f -name '*.so.*' 2>/dev/null | tr '\n' ' ')
 [ -n "$im_libs" ] || { echo "FAIL: no ImageMagick libraries extracted -- they ship in every flavor, so an empty set means the copy failed"; exit 1; }
+# shellcheck disable=SC2046  # the .so list is meant to word-split
+nsnmp_libs=$(find "$hard_dir/nsnmp" -maxdepth 1 -type f -name '*.so.*' 2>/dev/null | tr '\n' ' ')
+[ -n "$nsnmp_libs" ] || { echo "FAIL: no net-snmp library extracted -- it ships in every flavor, so an empty set means the copy failed"; exit 1; }
 module_files=("$hard_dir/php-chmod-sanitize.so")
 [ -f "$hard_dir/php-fpm" ] && module_files+=("$hard_dir/php-fpm")
 # shellcheck disable=SC2206  # both are deliberate globs/word-splits
-module_files+=("$hard_dir"/ext/*.so $im_libs)
+module_files+=("$hard_dir"/ext/*.so $im_libs $nsnmp_libs)
 bash "$HERE/assert-elf-hardening.sh" "modules-$EXPECT" "${module_files[@]}" || exit 1
 
 # intl, against the ICU this version is supposed to have. Both of these came
