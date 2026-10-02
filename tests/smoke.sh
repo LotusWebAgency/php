@@ -302,10 +302,11 @@ rm -f "$tmp_php"
 # NEEDED at all, direct or transitive. A shared *extension* was never held to
 # that same bar in practice, and measurement (L-1) showed why the original
 # "any NEEDED at all" version of this check was the wrong instrument: on
-# 7.4-8.0, event.so and snmp.so directly NEED libssl.so.3/libcrypto.so.3 --
-# Debian's supported, dynamically-patched OpenSSL 3, pulled in by libevent
-# and libsnmp -- and bind to it cleanly (LD_DEBUG=bindings confirmed
-# SSL_CTX_new et al. resolve to /lib/.../libssl.so.3, never to php's static
+# 7.4-8.0, event.so NEEDs libssl.so.3/libcrypto.so.3 directly, and snmp.so
+# reaches them too (directly on clang builds, transitively through the vendored
+# libnetsnmp on gcc builds) -- Debian's supported, dynamically-patched
+# OpenSSL 3, which libevent and libnetsnmp link -- and bind to it cleanly
+# (LD_DEBUG=bindings confirmed SSL_CTX_new et al. resolve to /lib/.../libssl.so.3, never to php's static
 # 1.1). That is two independent OpenSSL stacks in one process, not the EOL
 # vendored one escaping. CF-5's actual purpose is narrower: the legacy era's
 # *EOL, vendored* OpenSSL (1.1.1, built --no-shared) must never ship as a
@@ -377,7 +378,7 @@ echo "ok: CF-9 -- inspected the php binary and $n_ext_files shared extension .so
 # earlier build stage, a vendored copy nothing links against yet). Narrowed
 # by the same T19-T ruling as the NEEDED scan above: Debian's libssl.so.3/
 # libcrypto.so.3 is expected and allowed anywhere in a legacy image (curl,
-# psql, the mariadb client and libsnmp all pull it in) -- what must never
+# psql, the mariadb client and the vendored libnetsnmp all pull it in) -- what must never
 # exist is a file that could only be the vendored, EOL build: a
 # libssl.so.1*/libcrypto.so.1* file anywhere, or a libssl.so*/libcrypto.so*
 # file under a vendored prefix (/opt/php-deps, or anywhere under /opt) --
@@ -634,6 +635,23 @@ fi
 grep -qi "no such extension" /tmp/php-ext-enable.err || { echo "FAIL: unknown extension did not fail loudly"; exit 1; }
 echo "ok: php-ext-enable refuses unknown names"
 
+# COPY from a scratch stage stamps its own directory metadata onto directories
+# that already exist in the image, so runtime-base re-asserts the one that
+# matters after its payload COPYs: conf.d is where php-ext-enable and the
+# entrypoint write as the image user. ext-builder runs as root but inherits the
+# same runtime-base; measured www-data:www-data on every flavor.
+conf_d_owner=$(docker run --rm --entrypoint stat "$IMAGE" -c '%U:%G' /usr/local/etc/php/conf.d)
+[ "$conf_d_owner" = "www-data:www-data" ] \
+  || { echo "FAIL: /usr/local/etc/php/conf.d is owned by $conf_d_owner, expected www-data:www-data (a payload COPY reset it)"; exit 1; }
+echo "ok: /usr/local/etc/php/conf.d is owned by www-data"
+
+# Root has to start php without a word on stderr too (the entrypoint's own
+# notices aside): anything a library creates or logs on first use as root would
+# show up in every `docker run -u 0` and in every CI job that runs as root.
+root_err=$(docker run --rm -u 0 "$IMAGE" php -r 'echo 1;' 2>&1 >/dev/null | grep -v '^docker-php-entrypoint:' || true)
+[ -z "$root_err" ] || { echo "FAIL: php -r as root wrote to stderr: $root_err"; exit 1; }
+echo "ok: php starts silent as root"
+
 # net-snmp (deps/build-netsnmp.sh): Debian's libsnmp40t64 hard-depends on
 # libperl5.40, and a package another package Depends on cannot be purged, so
 # the only way to ship no libperl/perl-modules (~49 MB) is to link ext-snmp
@@ -711,6 +729,47 @@ PHP
 )
   [ "$snmp_out" = "snmp-ok" ] || { echo "FAIL: ext-snmp functional check printed: $snmp_out"; exit 1; }
   echo "ok: ext-snmp loads clean and works offline (snmp_read_mib, USM SHA/AES keys, MIB name resolution, negative controls)"
+
+  # net-snmp creates /var/lib/snmp and /var/lib/snmp/cert_indexes the first time
+  # the extension loads and logs "Created directory: ..." to stderr when it does;
+  # runtime-base pre-creates both, owned by www-data, so neither root nor www-data
+  # prints anything. The control removes them and requires the notice to come
+  # back, otherwise a clean stderr below would only prove the notice is gone from
+  # this net-snmp build, not that the directories are what silenced it. -d
+  # extension=snmp.so rather than php-ext-enable: the entrypoint is bypassed so
+  # stderr holds php's and net-snmp's output only.
+  for snmp_uid in 0 33; do
+    snmp_err=$(docker run --rm -u "$snmp_uid" --entrypoint php "$IMAGE" -d extension=snmp.so -r 'echo extension_loaded("snmp") ? "" : "snmp not loaded";' 2>&1 >/dev/null || true)
+    [ -z "$snmp_err" ] || { echo "FAIL: loading snmp.so as uid $snmp_uid wrote to stderr: $snmp_err"; exit 1; }
+  done
+  snmp_ctl=$(docker run --rm -u 0 --entrypoint sh "$IMAGE" -c 'rm -rf /var/lib/snmp; exec php -d extension=snmp.so -r "echo 1;"' 2>&1 >/dev/null || true)
+  grep -q 'Created directory: /var/lib/snmp' <<<"$snmp_ctl" \
+    || { echo "FAIL: control: with /var/lib/snmp removed, loading snmp.so as root did not log its directory creation ($snmp_ctl), so the clean-stderr check above proves nothing"; exit 1; }
+  echo "ok: loading snmp.so is silent as root and as uid 33 (control: without /var/lib/snmp net-snmp logs 'Created directory')"
+
+  # MIBs mounted where a Debian host keeps them are found without MIBDIRS: the
+  # compiled-in search path is Debian's plus /opt/net-snmp's. A renamed copy of
+  # IF-MIB in /usr/share/snmp/mibs/ietf (a directory net-snmp does not search
+  # recursively, so it has to be named in the path) resolves a qualified name;
+  # the same name before the copy exists must fail on the name (control).
+  # shellcheck disable=SC2016  # the script is for the container's shell
+  snmp_mibdir=$(docker run --rm -u 0 -i --entrypoint sh "$IMAGE" -c '
+    set -eu
+    cat > /tmp/probe.php <<"PHP"
+<?php
+$last = "";
+set_error_handler(function ($no, $str) use (&$last) { $last = $str; return true; });
+snmpget("127.0.0.1:1", "public", "ZZ-SMOKE-MIB::ifNumber.0", 100000, 0);
+echo stripos($last, "Invalid object identifier") === false ? "resolved" : "unresolved";
+PHP
+    before=$(php -d extension=snmp.so /tmp/probe.php)
+    mkdir -p /usr/share/snmp/mibs/ietf
+    sed s/IF-MIB/ZZ-SMOKE-MIB/g /opt/net-snmp/share/snmp/mibs/IF-MIB.txt > /usr/share/snmp/mibs/ietf/ZZ-SMOKE-MIB.txt
+    after=$(php -d extension=snmp.so /tmp/probe.php)
+    echo "$before $after"' 2>&1 || true)
+  [ "$snmp_mibdir" = "unresolved resolved" ] \
+    || { echo "FAIL: MIB lookup in the Debian directories: expected 'unresolved resolved' (before/after a MIB appears in /usr/share/snmp/mibs/ietf), got: $snmp_mibdir"; exit 1; }
+  echo "ok: a MIB placed in /usr/share/snmp/mibs/ietf is found without MIBDIRS (control: unknown before it exists)"
 fi
 
 # Baseline php.ini (task 10): expose_php/display_errors/allow_url_include off.
@@ -884,6 +943,12 @@ docker cp "$hcid:/opt/imagemagick/lib/." "$hard_dir/im" >/dev/null 2>&1 || true
 # Same for the vendored net-snmp client library.
 mkdir -p "$hard_dir/nsnmp"
 docker cp "$hcid:/opt/net-snmp/lib/." "$hard_dir/nsnmp" >/dev/null 2>&1 || true
+# Everything under /opt, for the RPATH scan below: the vendored libraries'
+# plugins (ImageMagick's coder modules) and the legacy era's vendored tree are
+# ELF files nothing above names. docker cp keeps symlinks as symlinks, so each
+# file is seen once, under its real name.
+mkdir -p "$hard_dir/opt"
+docker cp "$hcid:/opt/." "$hard_dir/opt" >/dev/null
 case "$FLAVOR" in
   fpm) docker cp "$hcid:/usr/local/sbin/php-fpm" "$hard_dir/php-fpm" >/dev/null ;;
 esac
@@ -967,16 +1032,46 @@ bash "$HERE/assert-elf-hardening.sh" "modules-$EXPECT" "${module_files[@]}" || e
 # extensions -- a directory only the build stage has. Harmless until someone
 # creates it, and then that someone's libstdc++ wins over Debian's. Same
 # extraction as the hardening check above, one container for the whole set.
-rpath_hits=$(mktemp)
-for f in "${module_files[@]}" "$hard_dir/php"; do
-  dyn_out=$(readelf -dW "$f") || { echo "FAIL: readelf could not read the dynamic section of $(basename "$f")"; exit 1; }
+# Inside $hard_dir so the EXIT trap removes it however this script ends.
+rpath_hits="$hard_dir/rpath_hits"
+: > "$rpath_hits"
+scan_rpath() {  # scan_rpath <label> <file>: append "<label> <dir>" per RPATH/RUNPATH entry
+  local dyn_out
+  dyn_out=$(readelf -dW "$2") || { echo "FAIL: readelf could not read the dynamic section of $1"; exit 1; }
   sed -n -E 's/.*\((RPATH|RUNPATH)\)[^[]*\[(.*)\].*/\2/p' <<<"$dyn_out" | tr ':' '\n' | grep -v '^$' \
-    | sed "s|^|$(basename "$f") |" >> "$rpath_hits" || true
+    | sed "s|^|$1 |" >> "$rpath_hits" || true
+}
+for f in "${module_files[@]}" "$hard_dir/php"; do
+  scan_rpath "$(basename "$f")" "$f"
 done
-# Positive control: php carries /opt/imagemagick/lib on purpose (ldflags.sh), so
+# Every ELF under /opt, picked by magic number rather than by name: the vendored
+# trees hold versioned libraries (*.so.1.2), plugin modules and, on the legacy
+# era, whatever the dependency builds installed. Labelled by path so a hit in
+# a plugin does not read as one of php's own extensions. The legacy tree may be
+# empty of ELF files (static-only openssl/icu, .a files deleted) -- that is fine,
+# but the ImageMagick libraries are in every image, so zero ELF files means the
+# extraction or the magic test is broken.
+opt_elf=0
+while IFS= read -r -d '' f; do
+  [ "$(head -c4 "$f" | od -An -c | tr -d ' ')" = '177ELF' ] || continue
+  opt_elf=$((opt_elf + 1))
+  scan_rpath "opt/${f#"$hard_dir"/opt/}" "$f"
+done < <(find "$hard_dir/opt" -type f -print0)
+[ "$opt_elf" -ge 1 ] || { echo "FAIL: no ELF file found under the extracted /opt -- the RPATH scan of vendored libraries saw nothing"; exit 1; }
+# Positive controls: php carries /opt/imagemagick/lib on purpose (ldflags.sh), so
 # a parser that found nothing would pass the check below by being blind.
 grep -qx 'php /opt/imagemagick/lib' "$rpath_hits" \
   || { echo "FAIL: the RPATH scan did not see php's /opt/imagemagick/lib entry -- it would not see a bad one either: $(cat "$rpath_hits")"; exit 1; }
+if grep -qw snmp <<<"$SHARED_EXTS"; then
+  # snmp.so is the one shared extension that names /opt/net-snmp/lib (from its own
+  # link line), and it has to: nothing else tells the loader where libnetsnmp is.
+  grep -qx 'snmp.so /opt/net-snmp/lib' "$rpath_hits" \
+    || { echo "FAIL: snmp.so has no /opt/net-snmp/lib RUNPATH, so libnetsnmp cannot be found: $(grep '^snmp.so ' "$rpath_hits" || echo 'no entries at all')"; exit 1; }
+  # ... and no other extension should: that prefix on ldflags.sh also switches on
+  # --exclude-libs=ALL, which has no business in twenty unrelated modules.
+  stray_nsnmp=$(grep -E '^[^/ ]+\.so /opt/net-snmp/lib$' "$rpath_hits" | grep -v '^snmp\.so ' || true)
+  [ -z "$stray_nsnmp" ] || { echo "FAIL: shared extensions other than snmp.so carry the net-snmp RUNPATH: $stray_nsnmp"; exit 1; }
+fi
 # $ORIGIN-relative entries resolve per file and are not a fixed directory.
 rpath_dirs=$(awk '{ print $2 }' "$rpath_hits" | grep -v '^\$ORIGIN' | sort -u)
 # shellcheck disable=SC2086  # the dir list is meant to word-split into arguments
@@ -986,8 +1081,7 @@ if [ -n "$rpath_missing" ]; then
   while IFS= read -r d; do grep -F " $d" "$rpath_hits" | sed 's/^/  /'; done <<<"$rpath_missing"
   exit 1
 fi
-echo "ok: every RPATH/RUNPATH entry of php, php-fpm, the shared extensions and the vendored libraries names a directory present in the image ($(wc -l < "$rpath_hits") entries, $(wc -l <<<"$rpath_dirs") distinct dirs)"
-rm -f "$rpath_hits"
+echo "ok: every RPATH/RUNPATH entry of php, php-fpm, the shared extensions and the $opt_elf ELF files under /opt names a directory present in the image ($(wc -l < "$rpath_hits") entries, $(wc -l <<<"$rpath_dirs") distinct dirs)"
 
 # The objects are built with GCC 16 (7.0-8.4) or clang 19 but run on Debian's
 # libstdc++/libgcc_s, so a GLIBCXX_/CXXABI_/GCC_ version they need that the
@@ -1226,6 +1320,23 @@ case "$FLAVOR" in
         || { echo "FAIL: cli-builder: $cache_dir ('$probe') is not writable as the image user (uid $(docker run --rm "$IMAGE" id -u))"; exit 1; }
     done
     echo "ok: cli-builder's npm and corepack caches are writable as the image user"
+    # npm is pinned to 11.21.0 in the node-tools stage (the node image bundles
+    # an older one with a vulnerable tar/ip-address). The finished tree must hold
+    # exactly one npm of its own: a second copy left under node_modules is the
+    # 11.19 tree an in-place upgrade used to strand underneath the new one. The
+    # copy semantic-release carries for @semantic-release/npm is a dependency of
+    # that package and expected; the pattern is the exact node_modules/npm path,
+    # so @semantic-release/npm/package.json is not a match.
+    npm_version=$(docker run --rm "$IMAGE" npm --version)
+    [ "$npm_version" = "11.21.0" ] || { echo "FAIL: cli-builder: npm --version is '$npm_version', expected 11.21.0"; exit 1; }
+    npm_pkgs=$(docker run --rm "$IMAGE" find /usr/local/lib/node_modules -path '*/node_modules/npm/package.json' -not -path '/usr/local/lib/node_modules/semantic-release/*')
+    [ "$npm_pkgs" = "/usr/local/lib/node_modules/npm/package.json" ] \
+      || { echo "FAIL: cli-builder: expected exactly one npm outside semantic-release's own tree, found: $npm_pkgs"; exit 1; }
+    npm_pkg_version=$(docker run --rm "$IMAGE" node -p 'require("/usr/local/lib/node_modules/npm/package.json").version')
+    [ "$npm_pkg_version" = "11.21.0" ] || { echo "FAIL: cli-builder: the installed npm package.json says $npm_pkg_version, expected 11.21.0"; exit 1; }
+    sr_npm=$(docker run --rm "$IMAGE" find /usr/local/lib/node_modules/semantic-release -path '*/node_modules/npm/package.json')
+    [ -n "$sr_npm" ] || { echo "FAIL: cli-builder: the control find saw no npm inside semantic-release's tree -- the exclusion above is untested, so its result proves nothing"; exit 1; }
+    echo "ok: cli-builder's npm is 11.21.0 and the only npm outside semantic-release's tree (control: its own nested copy is found)"
     echo "ok: cli-builder carries node $node_major, npm, npx, corepack, composer, semantic-release, git, rsync, patch, make, brotli, sqlite3, jq, less, nano, procps, unzip, zip, zstd and the mariadb client"
     ;;
   cli|fpm)
