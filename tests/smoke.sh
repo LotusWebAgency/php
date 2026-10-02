@@ -166,18 +166,21 @@ uid=$(docker run --rm "$IMAGE" id -u)
 echo "ok: uid $want_uid"
 
 # CF-12: uncompressed image size against spec section 13's per-flavor budget.
-# "Uncompressed" and which docker command actually reports it (`docker image
-# inspect --format '{{.Size}}'`, not `docker images`' compressed CONTENT SIZE
-# column) is documented once, in tests/image-size.sh -- not re-derived here,
-# so the two scripts can't drift on what "size" means. task 21 measured every
-# flavor well over budget (up to ~2x for cli-builder). Report-only until the
-# image contents are final: budgets are set once, against the finished images,
-# and this becomes a hard failure then -- not raised now to paper over the
-# miss, and not enforced now against images whose contents are still moving.
-# tests/image-size.sh --breakdown names where the bytes are going.
+# The measurement (the sum of `docker history` layer sizes -- NOT `docker image
+# inspect .Size`, which under the containerd store adds the compressed blobs
+# and overstates by 100-200 MB) lives once, in tests/image-size.sh, so the two
+# scripts can't drift on what "size" means.
+#
+# Budgets are the measured real size of the finished image + ~3%, in decimal MB
+# (fpm 8.2 and 7.4 -- the larger, vendored-library era -- cli, cli-builder and
+# ext-builder 8.2; see the commit that set them for the numbers). That is one
+# number per flavor, so it is only as tight as the largest version measured:
+# 8.5 (clang) and 7.0-7.3 were not rebuilt for it. Still report-only for that
+# reason -- it becomes a hard failure once every version has a measured size
+# to budget against. tests/image-size.sh --breakdown names where the bytes are.
 declare -A SIZE_BUDGET_MB=( [fpm]=280 [cli]=270 [cli-builder]=550 [ext-builder]=420 )
 budget_mb="${SIZE_BUDGET_MB[$FLAVOR]}"
-actual_bytes=$(docker image inspect "$IMAGE" --format '{{.Size}}')
+actual_bytes=$(bash "$HERE/image-size.sh" --bytes "$IMAGE")
 budget_bytes=$(( budget_mb * 1000 * 1000 ))
 actual_mb=$(awk -v b="$actual_bytes" 'BEGIN { printf "%.1f", b / 1000 / 1000 }')
 if [ "$actual_bytes" -le "$budget_bytes" ]; then
@@ -798,6 +801,14 @@ docker cp "$hcid:/opt/imagemagick/lib/." "$hard_dir/im" >/dev/null 2>&1 || true
 case "$FLAVOR" in
   fpm) docker cp "$hcid:/usr/local/sbin/php-fpm" "$hard_dir/php-fpm" >/dev/null ;;
 esac
+# The image's own C++ runtime, for the symbol-version check below: the GCC 16
+# built objects are linked against GCC 16's libstdc++ headers but run against
+# Debian's libstdc++6/libgcc-s1, resolved the way ldd resolved them for php.
+for rt_lib in libstdc++.so.6 libgcc_s.so.1; do
+  rt_path=$(awk -v l="$rt_lib" '$1 == l { print $3; exit }' <<<"$linkage")
+  [ -n "$rt_path" ] || { echo "FAIL: ldd of /usr/local/bin/php lists no $rt_lib -- cannot check the GLIBCXX/GCC symbol versions against the image's own copy"; exit 1; }
+  docker cp -L "$hcid:$rt_path" "$hard_dir/$rt_lib" >/dev/null
+done
 docker rm -f "$hcid" >/dev/null
 
 # The extraction is itself a measurement, so check it landed before trusting
@@ -860,6 +871,54 @@ module_files=("$hard_dir/php-chmod-sanitize.so")
 # shellcheck disable=SC2206  # both are deliberate globs/word-splits
 module_files+=("$hard_dir"/ext/*.so $im_libs)
 bash "$HERE/assert-elf-hardening.sh" "modules-$EXPECT" "${module_files[@]}" || exit 1
+
+# RPATH/RUNPATH hygiene: every directory a shipped ELF names must exist in the
+# image. libtool used to hardcode the GCC 16 toolchain's own lib dir
+# (/opt/gcc16/lib64, via the stale libstdc++.la) into php, php-fpm and the C++
+# extensions -- a directory only the build stage has. Harmless until someone
+# creates it, and then that someone's libstdc++ wins over Debian's. Same
+# extraction as the hardening check above, one container for the whole set.
+rpath_hits=$(mktemp)
+for f in "${module_files[@]}" "$hard_dir/php"; do
+  dyn_out=$(readelf -dW "$f") || { echo "FAIL: readelf could not read the dynamic section of $(basename "$f")"; exit 1; }
+  sed -n -E 's/.*\((RPATH|RUNPATH)\)[^[]*\[(.*)\].*/\2/p' <<<"$dyn_out" | tr ':' '\n' | grep -v '^$' \
+    | sed "s|^|$(basename "$f") |" >> "$rpath_hits" || true
+done
+# Positive control: php carries /opt/imagemagick/lib on purpose (ldflags.sh), so
+# a parser that found nothing would pass the check below by being blind.
+grep -qx 'php /opt/imagemagick/lib' "$rpath_hits" \
+  || { echo "FAIL: the RPATH scan did not see php's /opt/imagemagick/lib entry -- it would not see a bad one either: $(cat "$rpath_hits")"; exit 1; }
+# $ORIGIN-relative entries resolve per file and are not a fixed directory.
+rpath_dirs=$(awk '{ print $2 }' "$rpath_hits" | grep -v '^\$ORIGIN' | sort -u)
+# shellcheck disable=SC2086  # the dir list is meant to word-split into arguments
+rpath_missing=$(docker run --rm "$IMAGE" sh -c 'for d in "$@"; do [ -d "$d" ] || echo "$d"; done' sh $rpath_dirs)
+if [ -n "$rpath_missing" ]; then
+  echo "FAIL: RPATH/RUNPATH entries name directories that do not exist in the image:"
+  while IFS= read -r d; do grep -F " $d" "$rpath_hits" | sed 's/^/  /'; done <<<"$rpath_missing"
+  exit 1
+fi
+echo "ok: every RPATH/RUNPATH entry of php, php-fpm, the shared extensions and the vendored libraries names a directory present in the image ($(wc -l < "$rpath_hits") entries, $(wc -l <<<"$rpath_dirs") distinct dirs)"
+rm -f "$rpath_hits"
+
+# The objects are built with GCC 16 (7.0-8.4) or clang 19 but run on Debian's
+# libstdc++/libgcc_s, so a GLIBCXX_/CXXABI_/GCC_ version they need that the
+# image's own copies do not define is a dlopen failure at the first request
+# that reaches it -- swoole.so, the one big C++ object, is the likeliest.
+elf_versions() {  # elf_versions defs|needs <file> -> GLIBCXX_/CXXABI_/GCC_ version names, one per line
+  readelf -VW "$2" | awk -v want="$1" '
+    /^Version definition section/ { in_sec = (want == "defs"); next }
+    /^Version needs section/      { in_sec = (want == "needs"); next }
+    /^Version symbols section/    { in_sec = 0; next }
+    in_sec { for (i = 1; i < NF; i++) if ($i == "Name:" && $(i+1) ~ /^(GLIBCXX|CXXABI|GCC)_/) print $(i+1) }'
+}
+provided_versions=$( { elf_versions defs "$hard_dir/libstdc++.so.6"; elf_versions defs "$hard_dir/libgcc_s.so.1"; } | sort -u)
+grep -q '^GLIBCXX_3\.4$' <<<"$provided_versions" \
+  || { echo "FAIL: the image's libstdc++.so.6 defines no GLIBCXX_3.4 -- the symbol-version scan is not reading it"; exit 1; }
+for f in "${module_files[@]}" "$hard_dir/php"; do
+  unmet=$(comm -23 <(elf_versions needs "$f" | sort -u) <(printf '%s\n' "$provided_versions"))
+  [ -z "$unmet" ] || { echo "FAIL: $(basename "$f") needs symbol versions the image's libstdc++/libgcc_s do not define: $(tr '\n' ' ' <<<"$unmet")"; exit 1; }
+done
+echo "ok: every GLIBCXX_/CXXABI_/GCC_ version the shipped ELF files need is defined by the image's own libstdc++/libgcc_s ($(grep -c '^GLIBCXX_' <<<"$provided_versions") GLIBCXX versions available)"
 
 # intl, against the ICU this version is supposed to have. Both of these came
 # back from spike/verify.sh, which was deleted with the rest of spike/ -- and
@@ -992,10 +1051,25 @@ echo "ok: negative control confirms the ext/curl check has discriminating power"
 # fpm see none of that -- a compiler sitting in a shipped image is CVE surface
 # and attack surface bought for nothing (an attacker who can write a .c file
 # and already has a shell has one less step to a native payload).
-no_toolchain() {  # no_toolchain <flavor> -- no compiler, no autoconf, no phpize, no PHP headers
-  if docker run --rm "$IMAGE" sh -c 'command -v gcc || command -v g++ || command -v cc || command -v clang || command -v autoconf || command -v phpize || command -v php-config || test -e /usr/local/include/php' >/dev/null 2>&1; then
-    echo "FAIL: $1 carries a compiler, autoconf, phpize/php-config or the PHP headers -- expected only in ext-builder"; exit 1
-  fi
+no_toolchain() {  # no_toolchain <flavor> -- no compiler, assembler, linker, autoconf, phpize, PHP headers
+  # Explicit names, not a `ld*` glob: that would also match ldd and ldconfig,
+  # which every image has. The triplet forms are what a cross/multiarch
+  # binutils installs. Fail-closed control first: if the probe shell cannot
+  # run at all, "found nothing" below would be a pass on a dead container.
+  docker run --rm "$IMAGE" sh -c 'command -v sh' >/dev/null 2>&1 \
+    || { echo "FAIL: $1: the toolchain probe cannot run a shell in the image, so its absence checks would prove nothing"; exit 1; }
+  local found
+  found=$(docker run --rm "$IMAGE" sh -c '
+    for t in gcc g++ cc c++ cpp clang clang++ as ld ld.bfd ld.gold ld.lld lld gold \
+             x86_64-linux-gnu-gcc x86_64-linux-gnu-g++ x86_64-linux-gnu-as x86_64-linux-gnu-ld \
+             aarch64-linux-gnu-gcc aarch64-linux-gnu-g++ aarch64-linux-gnu-as aarch64-linux-gnu-ld \
+             autoconf phpize php-config; do
+      command -v "$t"
+    done
+    for p in /usr/local/include/php /usr/include/php; do test -e "$p" && echo "$p"; done
+    exit 0' 2>&1) || { echo "FAIL: $1: the toolchain probe did not run: $found"; exit 1; }
+  [ -z "$found" ] \
+    || { echo "FAIL: $1 carries a compiler, assembler, linker, autoconf, phpize/php-config or the PHP headers (expected only in ext-builder): $(tr '\n' ' ' <<<"$found")"; exit 1; }
 }
 case "$FLAVOR" in
   ext-builder)
