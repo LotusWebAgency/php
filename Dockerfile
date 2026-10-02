@@ -908,8 +908,13 @@ RUN set -eux; \
     php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer; \
     rm -f /tmp/composer-setup.php /tmp/composer-setup.sig; \
     composer --version
+# npm itself is moved past the 11.19.0 the node image bundles: 11.21.0 ships
+# the fixed tar and ip-address. Its bundled brace-expansion and undici are
+# still behind their fixes in every npm release (see .trivyignore).
 RUN set -eux; \
     node -v; \
+    npm install -g npm@11.21.0; \
+    npm -v; \
     npm install -g semantic-release; \
     npm cache clean --force; \
     semantic-release --version
