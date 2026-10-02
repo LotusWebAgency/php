@@ -145,7 +145,7 @@ FROM toolchain-select-${COMPILER} AS toolchain
 # workers. Built once here rather than once per era: both eras need the exact
 # same library at the exact same prefix, so this stage is what deps-modern
 # and deps-legacy both derive FROM, not something either one repeats. That
-# also means it builds once per (arch, uarch) instead of twice.
+# also means it builds once per (arch, uarch, COMPILER) instead of twice.
 FROM toolchain AS imagemagick
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -164,11 +164,13 @@ ENV PKG_CONFIG_PATH=/opt/imagemagick/lib/pkgconfig
 # ------------------------------------------------------------- net-snmp
 # net-snmp's client library, vendored for the same reason as ImageMagick: the
 # distro copy (libsnmp40t64) hard-depends on libperl5.40, which puts ~49 MB of
-# perl in every runtime image and cannot be purged away. Built once for both
-# eras (it links Debian's libssl3 -- libssl-dev is installed here for that --
-# never the legacy era's vendored, static-only 1.1.1w), in its own stage so it
-# neither invalidates nor waits for ImageMagick. The deps stages below COPY the whole prefix (ext-snmp needs bin/net-snmp-config and
-# the headers at build time); php/build.sh's stage_runtime_deps ships only the
+# perl in every runtime image and cannot be purged away. Its own stage, so it
+# neither invalidates nor waits for ImageMagick, and it builds once per
+# (arch, uarch, COMPILER) like every stage derived from the toolchain, both eras
+# sharing the result. It links Debian's libssl3 -- libssl-dev is installed here
+# for that -- never the legacy era's vendored, static-only 1.1.1w. The deps
+# stages below COPY the whole prefix (ext-snmp needs bin/net-snmp-config and the
+# headers at build time); php/build.sh's stage_runtime_deps ships only the
 # library and the MIB files.
 FROM toolchain AS net-snmp
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -254,8 +256,14 @@ ENV PHP_DEPS_PREFIX=""
 FROM imagemagick AS deps-legacy
 ARG PHP_VERSION
 # libpng/libjpeg/libwebp/libfreetype/libheif -dev are already installed by
-# the imagemagick stage above, same as deps-modern. No libssl-dev or
-# libicu-dev here: both are vendored (see above). No libavif-dev: GD's AVIF
+# the imagemagick stage above, same as deps-modern. libicu-dev is not here: ICU
+# is vendored (see above). libssl-dev IS listed, for ext-snmp only: net-snmp-config
+# adds -lssl -lcrypto to its link line and that needs the system libssl.so
+# symlink, which libcurl4-openssl-dev and libssh2-1-dev used to supply only by
+# dependency. Naming it changes nothing php sees: it was installed already, and
+# the legacy php is pointed at the vendored OpenSSL by an explicit
+# --with-openssl=/opt/php-deps (php/build.sh asserts that substitution), never
+# by what happens to be under /usr/include. No libavif-dev: GD's AVIF
 # support doesn't exist before PHP 8.1. libxml2-dev IS here, unlike
 # deps-modern's comment used to say (I2) -- it's an ordinary system package
 # now, not a vendored one, for every legacy version, not just 8.0.
@@ -266,7 +274,7 @@ ARG PHP_VERSION
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      libcurl4-openssl-dev libxslt1-dev libxml2-dev \
+      libssl-dev libcurl4-openssl-dev libxslt1-dev libxml2-dev \
       libonig-dev libzip-dev libsqlite3-dev libpq-dev zlib1g-dev libzstd-dev \
       libbrotli-dev \
       libsodium-dev libargon2-dev libgmp-dev libreadline-dev libmemcached-dev \
@@ -553,6 +561,11 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # that scan has to see these .so files to pull in their runtime libraries
 # (libyaml, libtidy, librabbitmq, ...), and it walks /usr/local/lib once.
 #
+# No deps prefix on ldflags.sh here: it would put /opt/net-snmp's rpath and
+# --exclude-libs=ALL on every shared extension, and only snmp.so has anything
+# to find there. snmp.so's own RUNPATH comes from ext-snmp's configure, which
+# links what net-snmp-config prints; tests/smoke.sh asserts that RUNPATH.
+#
 # PHP_ERA is exported explicitly rather than left to ARG scoping:
 # build-shared-ext.sh hard-requires it to pick the configure/make flag split
 # (php/flag-split.sh), and an unset value there is a build failure by design --
@@ -563,7 +576,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     set -eux; \
     export CFLAGS="$(bash /build/php/cflags.sh "$UARCH")"; \
     export CXXFLAGS="$CFLAGS -std=c++17"; \
-    export LDFLAGS="$(bash /build/php/ldflags.sh /opt/net-snmp)"; \
+    export LDFLAGS="$(bash /build/php/ldflags.sh)"; \
     export PHP_ERA="$PHP_ERA"; \
     bash /build/php/build-shared-ext.sh "$PHP_VERSION" "$PWD"; \
     find /usr/local/lib/php/extensions -name '*.so' -exec strip --strip-unneeded {} +
@@ -709,20 +722,21 @@ RUN set -eux; \
 COPY conf/snuffleupagus/ /stage/usr/local/etc/php/snuffleupagus/
 
 # ----------------------------------------------------------- runtime-payload
-# Build-only: every file runtime-base takes from php-build and runtime-conf, in
-# the order they used to be copied (later wins), so runtime-base needs a single
-# COPY -- one layer -- instead of eleven.
+# Build-only, in two halves so runtime-base needs two COPYs -- two layers --
+# instead of eleven, split by how often they change: this one holds the tens of
+# MB (php, its extensions, the vendored libraries), the next one the few KB of
+# config. Editing an ini, a rootfs script or a snuffleupagus ruleset then
+# re-ships only the small layer.
 FROM scratch AS runtime-payload
-# Vendored libraries (ImageMagick in every era, plus the legacy era's vendored
-# openssl/icu/curl -- libxml2 is NOT vendored, task 14 review I2), at the absolute path their
-# binaries' rpath names (php/build.sh stages them). Empty of the legacy tree,
-# but not of ImageMagick, in the modern era -- either way one unconditional
-# COPY is enough.
+# Vendored libraries (ImageMagick and net-snmp in every era, plus the legacy
+# era's vendored openssl/icu/curl -- libxml2 is NOT vendored, task 14 review I2),
+# at the absolute path their binaries' rpath names (php/build.sh stages them).
+# Empty of the legacy tree, but not of ImageMagick and net-snmp, in the modern
+# era -- either way one unconditional COPY is enough.
 COPY --from=php-build /deps-stage/ /
 
 COPY --from=php-build /usr/local/bin/php /usr/local/bin/php
 COPY --from=php-build /usr/local/lib/php /usr/local/lib/php
-COPY --from=php-build /usr/local/etc/php /usr/local/etc/php
 # What the compile actually did: pgo on or off, the flags, the profile's
 # sha256 and coverage, the corpus versions it was trained on. tests/test-pgo.sh
 # cross-checks the pgo= line against matrix.json, so a version that silently
@@ -733,6 +747,12 @@ COPY --from=php-build /usr/local/share/php-build /usr/local/share/php-build
 # then regardless of which flavor.
 COPY --from=php-build /usr/local/lib/php-chmod-sanitize.so /usr/local/lib/php-chmod-sanitize.so
 
+# The config half: php-build's own /usr/local/etc/php first, then everything
+# runtime-conf baked on top of it (later wins, as it always did). Nothing in
+# the first half writes under /usr/local/etc, so the order between the halves
+# is free; runtime-base still copies this one last.
+FROM scratch AS runtime-payload-conf
+COPY --from=php-build /usr/local/etc/php /usr/local/etc/php
 COPY --from=runtime-conf /stage/ /
 
 # ------------------------------------------------------------ runtime-base
@@ -793,16 +813,17 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/* /tmp/runtime-packages.txt; \
 # Housekeeping, in this RUN because a later one would only whiteout files this
 # layer already stored. debconf keeps a *-old copy of its databases after every
-# apt run (0.8MB). mariadb-check (mysqlcheck) and my_print_defaults ride along in
+# apt run (0.8MB). mariadb-check and my_print_defaults ride along in
 # mariadb-client-core for ~10MB, and neither is a client this image documents or
 # tests: the mariadb shell is what the package is here for, and it reads its
 # option files itself.
     rm -f /var/cache/debconf/*-old /usr/bin/mariadb-check /usr/bin/my_print_defaults
 
-# Everything php-build produced for the runtime (vendored libraries, php, its
-# extensions, the build record, the chmod shim) plus the baked config, see the
-# runtime-payload stage above.
+# Everything php-build produced for the runtime, then the baked config, as two
+# layers: see the runtime-payload stages above. The config layer stays last so
+# a config edit never re-ships the binaries.
 COPY --from=runtime-payload / /
+COPY --from=runtime-payload-conf / /
 
 RUN set -eux; \
     getent group www-data >/dev/null || groupadd -g "$WWW_GID" www-data; \
@@ -816,6 +837,13 @@ RUN set -eux; \
 # the "writable by default" half of the contract, PHP_CONF_DIR is the other
 # half for a read-only rootfs.
     chown www-data:www-data /usr/local/etc/php/conf.d; \
+# net-snmp (deps/build-netsnmp.sh) keeps its persistent state in /var/lib/snmp
+# and its certificate index in cert_indexes below it, creating both on first
+# use and logging "Created directory: ..." to stderr when it does. Present up
+# front, owned by the image user, that is silent for root (which would otherwise
+# create them) and for www-data (which could not create them under a root-owned
+# /var/lib).
+    install -d -o www-data -g www-data /var/lib/snmp /var/lib/snmp/cert_indexes; \
     find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 
 WORKDIR /app
@@ -1020,8 +1048,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends \
       git rsync patch make brotli sqlite3 jq mariadb-client; \
     rm -rf /var/lib/apt/lists/*; \
-# runtime-base dropped mariadb-check; the full client's mysqlcheck alias would
-# be left pointing at it.
+# runtime-base dropped mariadb-check; the full client's mariadbcheck,
+# mariadb-analyze, mariadb-optimize and mariadb-repair symlinks (all pointing at
+# mariadb-check) would be left dangling.
     find /usr/bin -xtype l -lname 'mariadb-check' -delete; \
     rm -f /var/cache/debconf/*-old
 COPY conf/php-builder.ini /usr/local/etc/php/conf.d/10-php.ini

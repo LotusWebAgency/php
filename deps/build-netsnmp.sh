@@ -25,8 +25,13 @@
 #     would turn snmp2_walk() keys from numeric OIDs into SNMPv2-MIB::sysDescr.0
 #     names for code written against the Debian behaviour, and would make
 #     every PHP start parse about twenty MIB files. The files are installed, and
-#     the compiled-in MIB directory points at them, so snmp_read_mib(),
+#     the compiled-in MIB directory list names them, so snmp_read_mib(),
 #     MIBS=ALL and `mibs +ALL` work.
+#   - The MIB search path is Debian's (`net-snmp-config --default-mibdirs` on a
+#     trixie libsnmp-dev: $HOME/.snmp/mibs and /usr/share/snmp/mibs with its
+#     iana and ietf subdirectories, which are not searched recursively) with
+#     the shipped MIB directory added, so MIBs a user mounts where they would
+#     be on a Debian host are found without setting MIBDIRS.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -65,7 +70,8 @@ LDFLAGS="$(bash "$ROOT/php/ldflags.sh" "$PREFIX")"
   --enable-blumenthal-aes \
   --with-transports="TLSTCP DTLSUDP" \
   --with-security-modules=tsm \
-  --with-mibs=":"
+  --with-mibs=":" \
+  --with-mibdirs="\$HOME/.snmp/mibs:$PREFIX/share/snmp/mibs:/usr/share/snmp/mibs:/usr/share/snmp/mibs/iana:/usr/share/snmp/mibs/ietf"
 
 make -j"$(nproc)"
 make install
