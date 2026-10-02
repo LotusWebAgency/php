@@ -47,7 +47,7 @@ services:
 | Tag shape | Example | Meaning |
 |---|---|---|
 | `{version}-{flavor}` | `8.5-fpm` | Every published image (`fpm`, `cli`, `cli-builder`, `ext-builder`). |
-| `{version}-{flavor}-v3` | `8.4-fpm-v3` | `x86-64-v3` / `armv8.2-a+crypto`, 8.4 and 8.5 only, not for `ext-builder`. Older CPUs can't run it. |
+| `{version}-{flavor}-v3` | `8.4-fpm-v3` | `x86-64-v3` / `armv9-a`, 8.4 and 8.5 only, not for `ext-builder`. Older CPUs can't run it — on arm64 that means anything before Neoverse N2/V2 (Graviton4 yes, Graviton2/3 and Apple silicon no). |
 | `{version}` and `latest` | `8.5`, `latest` | The default version's `fpm` image only. |
 | `{release}-{flavor}[-v3]` | `8.5.11-fpm`, `8.5.11-ext-builder`, `8.4.26-cli-v3` | Full patch version, pinned. Read from the built image (`PHP_VERSION`) and required to match `matrix.json`, so the tag can't claim a version the image doesn't contain. |
 

@@ -123,7 +123,7 @@ echo "ok: build records confirm -march=$v3_march reached configure/make for v3 a
 # arm64 image pair is correctly labelled partial even when this script
 # happens to run on an amd64 CI host under emulation.
 if [ "$base_arch" != amd64 ] || [ "$v3_arch" != amd64 ]; then
-  echo "note: skipping the x86-64-v3 instruction-mix check ($BASELINE is $base_arch, $V3 is $v3_arch, not amd64/amd64) -- arm64's v3 level adds LSE atomics and similar, which the compiler does not auto-emit the way it does AVX2/BMI2/FMA3, so this check stays x86-only"
+  echo "note: skipping the x86-64-v3 instruction-mix check ($BASELINE is $base_arch, $V3 is $v3_arch, not amd64/amd64) -- arm64's v3 level is armv9-a, whose SVE2 gain is not measured by an instruction count against this threshold, so this check stays x86-only"
   partial=1
 else
   partial=0

@@ -31,7 +31,7 @@ class TestCflags(unittest.TestCase):
 
     def test_v3_sets_a_march(self):
         flags = run("php/cflags.sh", "v3")
-        self.assertTrue("-march=x86-64-v3" in flags or "-march=armv8.2-a+crypto" in flags)
+        self.assertTrue("-march=x86-64-v3" in flags or "-march=armv9-a" in flags)
 
     def test_arch_specific_cfi_flag(self):
         flags = run("php/cflags.sh", "baseline")

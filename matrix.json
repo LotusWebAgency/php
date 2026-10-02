@@ -7,7 +7,7 @@
   "platforms": ["linux/amd64", "linux/arm64"],
   "uarch": {
     "baseline": {"amd64": "x86-64", "arm64": "armv8-a"},
-    "v3": {"amd64": "x86-64-v3", "arm64": "armv8.2-a+crypto"}
+    "v3": {"amd64": "x86-64-v3", "arm64": "armv9-a"}
   },
   "versions": {
     "7.0": {"release": "7.0.33", "era": "legacy", "compiler": "gcc", "pgo": true, "icu": "67.1", "uarch": ["baseline"], "support": "end-of-life", "eol_date": "2019-01-10"},

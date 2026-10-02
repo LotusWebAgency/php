@@ -50,7 +50,14 @@ case "$ARCH" in
     ;;
   arm64)
     SEC="-mbranch-protection=standard"
-    if [ "$UARCH" = "v3" ]; then MARCH="-march=armv8.2-a+crypto"
+    # v3 on arm64 is armv9-a (owner decision 2026-10-02), not a v8.x point
+    # release: armv8-a already has NEON, and LSE atomics/crc32/crypto are
+    # reached at runtime (outline atomics, OpenSSL's own dispatch), so v8.2
+    # bought next to nothing. v9 is the real step -- SVE2, which gcc 16 and
+    # clang 19 both auto-vectorize with. It runs on Neoverse N2/V2 and later
+    # (Graviton4, Axion, Cobalt 100, Grace), not on Graviton2/3, Ampere or
+    # Apple silicon.
+    if [ "$UARCH" = "v3" ]; then MARCH="-march=armv9-a"
     else MARCH="-march=armv8-a"; fi
     ;;
   *)

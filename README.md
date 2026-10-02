@@ -90,7 +90,7 @@ Tag scheme (`scripts/gen_matrix.py`):
 | Tag shape | Example | Meaning |
 |---|---|---|
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
-| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Compiled for `x86-64-v3` / `armv8.2-a+crypto` instead of the `x86-64`/`armv8-a` baseline — 8.4 and 8.5 only, and not for `ext-builder` (an extension built against baseline headers loads on the v3 runtime). Newer instruction set, older CPUs (pre-Haswell/Excavator on amd64) can't run it. |
+| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Compiled for `x86-64-v3` / `armv9-a` instead of the `x86-64`/`armv8-a` baseline — 8.4 and 8.5 only, and not for `ext-builder` (an extension built against baseline headers loads on the v3 runtime). Newer instruction set, older CPUs can't run it: pre-Haswell/Excavator on amd64; on arm64 anything before Neoverse N2/V2 (it runs on Graviton4, Google Axion, Azure Cobalt 100, NVIDIA Grace — not on Graviton2/3, Ampere Altra/AmpereOne or Apple silicon). |
 | `{version}` and `latest` | `8.5`, `latest` | The default version's (`matrix.json`'s `default_version`, currently 8.5) `fpm` image only. |
 | `{release}-{flavor}[-v3]` | `8.5.11-fpm`, `8.5.11-ext-builder`, `8.4.26-cli-v3` | Full patch version, pinned. Read from the built image (`PHP_VERSION`) and required to match `matrix.json`, so the tag can't claim a version the image doesn't contain. |
 
