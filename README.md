@@ -247,7 +247,7 @@ zlib, igbinary, redis, imagick, memcached, apcu, zstd
 | `msgpack` | ≥7.0 | Compact queue serialization. |
 | `pcov` | ≥7.1 | PHPUnit coverage driver. |
 | `protobuf` | ≥8.2 | gRPC clients; pinned build refuses below 8.2. |
-| `snmp` | ≥7.0 | Legacy server monitoring. Links a vendored, client-only net-snmp (`/opt/net-snmp`) instead of Debian's `libsnmp40t64`, which hard-depends on perl (~49 MB). The MIB files ship in `/opt/net-snmp/share/snmp/mibs` but none load automatically, as on Debian; set `MIBS=ALL` or `mibs +ALL` in `/etc/snmp/snmp.conf` to load them. |
+| `snmp` | ≥7.0 | Legacy server monitoring. Links a vendored, client-only net-snmp (`/opt/net-snmp`) instead of Debian's `libsnmp40t64`, which hard-depends on perl (~49 MB). The MIB files ship in `/opt/net-snmp/share/snmp/mibs` but none load automatically, as on Debian; set `MIBS=ALL` or `mibs +ALL` in `/etc/snmp/snmp.conf` to load them. The search path is Debian's (`$HOME/.snmp/mibs`, `/usr/share/snmp/mibs` and its `iana` and `ietf` subdirectories) plus the shipped directory, so MIBs mounted where they would be on a Debian host are found; `MIBDIRS` replaces it (prefix `+` to extend it) and `MIBS=+NAME` loads one. |
 | `snuffleupagus` | ≥7.2 | Virtual patching — see [Hardening](#hardening). |
 | `ssh2` | ≥7.0 | Deployment tooling SFTP/SSH. |
 | `swoole` | ≥8.2 | Laravel Octane's async server; needs PHP Fibers. |
@@ -510,9 +510,10 @@ docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --format '{{ json .P
 A pull request or a push to `develop` builds and tests without publishing; a Trivy gate fails the
 build on any fixable CRITICAL or HIGH finding before anything can reach a
 registry (`.trivyignore` at the repo root records accepted risks with a
-reason). Trivy scans the Debian package layer -- it can't see the statically
-linked libraries (OpenSSL, ICU and similar) vendored into the 7.0–8.0 builds,
-which are tracked through `deps/versions.lock`'s pins instead. See
+reason). Trivy scans the Debian package layer -- it can't see the libraries
+built from source and vendored under `/opt`: ImageMagick and net-snmp in every
+build, plus the vendored OpenSSL and ICU (static) and curl (7.0–7.2) of the
+7.0–8.0 builds. Those are tracked through `deps/versions.lock`'s pins instead. See
 [SECURITY.md](SECURITY.md) for the reporting channel and what's automated.
 
 ## Branches and releases

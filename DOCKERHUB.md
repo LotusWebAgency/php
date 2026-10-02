@@ -243,9 +243,10 @@ cosign verify \
 
 A pull request or a push to `develop` builds and tests without publishing; a Trivy gate fails the
 build on any fixable CRITICAL or HIGH finding before anything reaches a
-registry. Trivy scans the Debian package layer -- it can't see the statically
-linked libraries (OpenSSL, ICU and similar) vendored into the 7.0–8.0 builds,
-which are tracked through `deps/versions.lock`'s pins instead.
+registry. Trivy scans the Debian package layer -- it can't see the libraries
+built from source and vendored under `/opt`: ImageMagick and net-snmp in every
+build, plus the vendored OpenSSL and ICU (static) and curl (7.0–7.2) of the
+7.0–8.0 builds. Those are tracked through `deps/versions.lock`'s pins instead.
 [SECURITY.md](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md)
 has the reporting channel.
 

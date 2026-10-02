@@ -29,8 +29,9 @@ path. Tag lifecycle and rebuild cadence are described in [SUPPORT.md](SUPPORT.md
 Every build — pull request, push to `develop`, merge to `main`, or the weekly
 rebuild — runs a Trivy scan and fails on any *fixable* CRITICAL or HIGH finding before an image can be
 published, so a known-vulnerable Debian package cannot ship silently. Trivy
-scans the OS package layer; it cannot see the statically linked libraries
-(OpenSSL, ICU and similar) vendored into the 7.0–8.0 builds, since those never
+scans the OS package layer; it cannot see the libraries built from source and
+vendored under `/opt` (ImageMagick and net-snmp in every build, the vendored
+OpenSSL, ICU and, on 7.0–7.2, curl in the 7.0–8.0 builds), since those never
 touch a package manager. Those are tracked by hand instead, through the
 pinned versions in `deps/versions.lock`. Only `main` publishes, and `main` is
 branch-protected: publishing requires a green pull request (work lands on
