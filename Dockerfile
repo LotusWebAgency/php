@@ -854,6 +854,9 @@ RUN set -eux; \
 # $prefix/var/run; make install creates both in the build stage, not here.
     mkdir -p /usr/local/var/log /usr/local/var/run; \
     chown -R www-data:www-data /usr/local/var; \
+# Copying fpm-payload as a tree also stamps its (root-owned) conf.d directory
+# onto the one runtime-base made writable for php-ext-enable; hand it back.
+    chown www-data:www-data /usr/local/etc/php/conf.d; \
 # The [global] error_log in the stock php-fpm.conf defaults to a file under
 # $prefix/var/log, commented out in the shipped template. www.conf's
 # catch_workers_output=yes makes every worker's own fd 2 a private pipe back

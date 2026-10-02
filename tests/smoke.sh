@@ -171,14 +171,18 @@ echo "ok: uid $want_uid"
 # and overstates by 100-200 MB) lives once, in tests/image-size.sh, so the two
 # scripts can't drift on what "size" means.
 #
-# Budgets are the measured real size of the finished image + ~3%, in decimal MB
-# (fpm 8.2 and 7.4 -- the larger, vendored-library era -- cli, cli-builder and
-# ext-builder 8.2; see the commit that set them for the numbers). That is one
-# number per flavor, so it is only as tight as the largest version measured:
-# 8.5 (clang) and 7.0-7.3 were not rebuilt for it. Still report-only for that
-# reason -- it becomes a hard failure once every version has a measured size
-# to budget against. tests/image-size.sh --breakdown names where the bytes are.
-declare -A SIZE_BUDGET_MB=( [fpm]=280 [cli]=270 [cli-builder]=550 [ext-builder]=420 )
+# Budgets are the measured real size (decimal MB, image-size.sh) + ~3%, one
+# number per flavor, so each covers the largest era measured. Measured on
+# 2026-10-03 (amd64, gcc builds): fpm 8.2 308.3 / 7.4 330.1, cli 8.2 287.2,
+# cli-builder 8.2 631.0, ext-builder 8.2 563.2. The legacy era (vendored
+# openssl/icu) is 21.8 MB heavier than modern on fpm; cli, cli-builder and
+# ext-builder were only built for 8.2, so their budgets add that same delta:
+# fpm 330.1*1.03, (cli 287.2 + 21.8)*1.03, (cli-builder 631.0 + 21.8)*1.03,
+# (ext-builder 563.2 + 21.8)*1.03. 8.5 (clang) was not rebuilt for this and
+# was ~34 MB larger than 8.2 in the stale cli image, so it may still note over.
+# Report-only until every version has a measured size to budget against.
+# tests/image-size.sh --breakdown names where the bytes are.
+declare -A SIZE_BUDGET_MB=( [fpm]=340 [cli]=318 [cli-builder]=672 [ext-builder]=602 )
 budget_mb="${SIZE_BUDGET_MB[$FLAVOR]}"
 actual_bytes=$(bash "$HERE/image-size.sh" --bytes "$IMAGE")
 budget_bytes=$(( budget_mb * 1000 * 1000 ))
@@ -1067,7 +1071,7 @@ no_toolchain() {  # no_toolchain <flavor> -- no compiler, assembler, linker, aut
       command -v "$t"
     done
     for p in /usr/local/include/php /usr/include/php; do test -e "$p" && echo "$p"; done
-    exit 0' 2>&1) || { echo "FAIL: $1: the toolchain probe did not run: $found"; exit 1; }
+    exit 0' 2>/dev/null) || { echo "FAIL: $1: the toolchain probe did not run"; exit 1; }
   [ -z "$found" ] \
     || { echo "FAIL: $1 carries a compiler, assembler, linker, autoconf, phpize/php-config or the PHP headers (expected only in ext-builder): $(tr '\n' ' ' <<<"$found")"; exit 1; }
 }
