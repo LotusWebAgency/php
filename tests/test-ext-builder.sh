@@ -65,9 +65,13 @@ for img in "$EXT" "$FPM" "$CLI"; do
 done
 echo "ok: php-config --extension-dir in ext-builder equals extension_dir in ext-builder, fpm and cli ($pc_dir)"
 
-api_ext="$(run "$EXT" php -r 'echo ZEND_MODULE_API_NO;')"
+# ZEND_MODULE_API_NO is a C macro with no userland constant; phpinfo's
+# "PHP Extension" row prints it on every version 7.0-8.5.
+module_api() { run "$1" php -i | sed -n 's/^PHP Extension => //p'; }
+api_ext="$(module_api "$EXT")"
+[ -n "$api_ext" ] || fail "$EXT: php -i printed no 'PHP Extension' row"
 for img in "$FPM" "$CLI"; do
-  api="$(run "$img" php -r 'echo ZEND_MODULE_API_NO;')"
+  api="$(module_api "$img")"
   [ "$api" = "$api_ext" ] || fail "$img reports Zend module API $api, ext-builder $api_ext"
 done
 case "$pc_dir" in
