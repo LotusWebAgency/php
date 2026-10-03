@@ -50,11 +50,28 @@ TEST_RESULT_TYPE="https://github.com/LotusWebAgency/php/attestation/test-result/
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# Docker Hub's referrers listing lags a fresh push by seconds: the first
+# release's verify, ~3s after its attest, found nothing ("no matching
+# attestations: "), and the same command passed minutes later against the same
+# digest. Only the verify is retried -- attesting again would stack a duplicate.
+VERIFY_WAITS="${ATTEST_VERIFY_WAITS:-5 10 20 30 45 60}"
+
 attest() {  # attest <digest> <type> <predicate-file>
   echo "attest $2 -> $repo@$1"
   "$COSIGN" attest --yes "${attest_flags[@]}" --type "$2" --predicate "$3" "$repo@$1"
-  "$COSIGN" verify-attestation "${verify_flags[@]}" --type "$2" "$repo@$1" >/dev/null
-  echo "ok: $2 attestation on $1 verifies"
+  local wait err
+  for wait in $VERIFY_WAITS ""; do
+    if err="$("$COSIGN" verify-attestation "${verify_flags[@]}" --type "$2" "$repo@$1" 2>&1 >/dev/null)"; then
+      echo "ok: $2 attestation on $1 verifies"
+      return 0
+    fi
+    [ -n "$wait" ] || break
+    echo "  not visible yet, retrying in ${wait}s: $(printf '%s' "$err" | tail -n1)"
+    sleep "$wait"
+  done
+  printf '%s\n' "$err" >&2
+  echo "FAIL: $2 attestation on $1 does not verify" >&2
+  return 1
 }
 
 attest_vex() {  # attest_vex <digest>
