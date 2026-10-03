@@ -243,7 +243,7 @@ jobs:
         target: ${{ fromJson(needs.verify-matrix.outputs.legs) }}
         arch: ${{ fromJson(needs.verify-matrix.outputs.arches) }}
     runs-on: ${{ matrix.arch.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
       # GHCR: pull of the PGO corpus image and the build cache, and, on a develop
@@ -325,9 +325,9 @@ jobs:
           set -euo pipefail
           read -ra bake_targets <<<"$TARGET_BAKE"
           # Retried on a Docker Hub 429/5xx/network error (ci/retry.sh); the second
-          # attempt is mostly layer-cache hits. Three attempts, not five: a build
-          # that fails for real after an hour is not worth five of them.
-          RETRY_ATTEMPTS=3 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
+          # attempt is mostly layer-cache hits. Five attempts (30s to 5min waits);
+          # a build that fails for real is never retried, only a registry error.
+          RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
             --set "*.platform=$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
             --load
@@ -350,7 +350,7 @@ jobs:
         run: |
           set -euo pipefail
           slug="php-${TARGET_PHP//./_}"
-          RETRY_ATTEMPTS=3 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm" \
+          RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm" \
             --set "*.platform=$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
             --load
@@ -714,7 +714,7 @@ jobs:
             platform: linux/arm64
     name: build ${{ matrix.target.name }} ${{ matrix.arch.name }}
     runs-on: ${{ matrix.arch.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
       packages: write # GHCR: corpus pull + build-cache push
@@ -811,7 +811,7 @@ jobs:
           # else carries a digest forward (DIGEST goes to GITHUB_ENV only after
           # this). Whatever a failed attempt pushed stays an untagged, unreferenced
           # orphan in the repository.
-          RETRY_ATTEMPTS=3 ./ci/retry.sh bash -c 'rm -f metadata.json; exec "$@"' retry-bake \
+          RETRY_ATTEMPTS=5 ./ci/retry.sh bash -c 'rm -f metadata.json; exec "$@"' retry-bake \
             docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
             --set '*.platform='"$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
@@ -984,7 +984,7 @@ jobs:
       matrix:
         target: ${{ fromJson(needs.release-matrix.outputs.targets) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 90
     permissions:
       contents: read # checkout, to read matrix.json for the image name (M19)
       id-token: write # cosign keyless OIDC

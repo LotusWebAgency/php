@@ -5,14 +5,16 @@
 #   ci/retry.sh <command> [args...]
 #
 # Docker Hub answers a burst of concurrent CI legs with `429 Too Many Requests`
-# (and now and then a 5xx or a dropped connection); every one of those is gone a
-# minute later. A failure that matches the pattern below is retried after
-# 15, 30, 60, 120 seconds (plus up to 50% jitter, so 100 legs do not come back in
-# lockstep), five attempts in all. Anything else -- a missing image, a denied
+# (and now and then a 5xx or a dropped connection). A personal account's pull
+# limit is counted per hour, and one warm-cache publish run reads several
+# hundred manifests in minutes, so the waits run long: a failure that matches
+# the pattern below is retried after 30, 60, 120, 300, 600, 900 seconds (plus
+# up to 50% jitter, so 100 legs do not come back in lockstep) -- seven attempts
+# over half an hour or more. Anything else -- a missing image, a denied
 # login, a failing build -- exits at once with the command's own exit code, and
 # the command's output is passed through either way.
 #
-#   RETRY_DELAYS    seconds to wait before retry 1, 2, ... (default "15 30 60 120");
+#   RETRY_DELAYS    seconds to wait before retry 1, 2, ... (default "30 60 120 300 600 900");
 #                   the last one repeats if RETRY_ATTEMPTS asks for more attempts
 #   RETRY_ATTEMPTS  attempts in total (default: one more than RETRY_DELAYS has entries)
 #
@@ -28,7 +30,7 @@
 set -uo pipefail
 [ "$#" -ge 1 ] || { echo "usage: $0 <command> [args...]" >&2; exit 2; }
 
-read -ra delays <<<"${RETRY_DELAYS:-15 30 60 120}"
+read -ra delays <<<"${RETRY_DELAYS:-30 60 120 300 600 900}"
 [ "${#delays[@]}" -gt 0 ] || delays=(0)
 max="${RETRY_ATTEMPTS:-$((${#delays[@]} + 1))}"
 
