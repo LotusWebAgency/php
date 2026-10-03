@@ -175,20 +175,19 @@ echo "ok: uid $want_uid"
 # image-size.sh) + ~3%, one number per flavor, so each covers the largest era
 # built. Measured on 2026-10-03 after the net-snmp vendoring and the payload
 # split (amd64): fpm 8.2 249.3 (gcc), fpm 7.4 271.0 (gcc, legacy era), cli-builder
-# 8.2 627.2 (gcc), cli 8.5 236.7 (clang). Not measured, inferred from the
-# differences between flavors in the previous measurement (fpm - cli = 21.1,
-# legacy - modern = 21.7 on fpm, ext-builder - cli = 276.0): cli 8.2 = 249.3 -
-# 21.1 = 228.2, so legacy cli = 249.9; legacy cli-builder = 627.2 + 21.7 = 648.9;
-# ext-builder 8.2 = 228.2 + 276.0 = 504.2, legacy 525.9. Each budget is then
-# the largest of its measured and inferred figures: fpm 271.0 * 1.03 = 279.1,
-# cli 249.9 * 1.03 = 257.4, cli-builder 648.9 * 1.03 = 668.4, ext-builder
-# 525.9 * 1.03 = 541.7 (the cli-builder delta to the old build is small because
-# git and mariadb-client pull perl back into that flavor; fpm/cli/ext-builder
-# lost it). 8.5 (clang) cli is measured 8.5 MB above the inferred 8.2 gcc one,
-# inside the legacy margin. The ext-builder and cli budgets are the inferred ones.
+# 8.2 627.2 (gcc), cli 8.5 236.7 (clang). Those builds still deleted
+# mariadb-check and my_print_defaults, which runtime-base now keeps (9.9 MB,
+# measured), so 9.9 is added to each. ext-builder 8.2 is measured after that:
+# 569.4. Not measured, inferred from the differences between flavors (fpm - cli
+# = 21.1, legacy - modern = 21.7 on fpm): cli 8.2 = 249.3 - 21.1 = 228.2, legacy
+# cli = 249.9; legacy cli-builder = 627.2 + 21.7 = 648.9; legacy ext-builder =
+# 569.4 + 21.7 = 591.1. Each budget is the largest of its figures, + 9.9 where
+# the build predates the revert, * 1.03: fpm 280.9 -> 289.3, cli 259.8 -> 267.6,
+# cli-builder 658.8 -> 678.6, ext-builder 591.1 -> 608.8. 8.5 (clang) cli is
+# measured 8.5 MB above the inferred 8.2 gcc one, inside the legacy margin.
 # Report-only until every version has a measured size to budget against.
 # tests/image-size.sh --breakdown names where the bytes are.
-declare -A SIZE_BUDGET_MB=( [fpm]=280 [cli]=258 [cli-builder]=669 [ext-builder]=542 )
+declare -A SIZE_BUDGET_MB=( [fpm]=290 [cli]=268 [cli-builder]=679 [ext-builder]=609 )
 budget_mb="${SIZE_BUDGET_MB[$FLAVOR]}"
 actual_bytes=$(bash "$HERE/image-size.sh" --bytes "$IMAGE")
 budget_bytes=$(( budget_mb * 1000 * 1000 ))
@@ -677,18 +676,18 @@ dpkg_installed() {  # dpkg_installed <name-or-glob>... -> the installed packages
 }
 [ "$(dpkg_installed libc6)" = "libc6" ] \
   || { echo "FAIL: dpkg-query could not see libc6 as installed -- the libperl/libsnmp absence check below would prove nothing"; exit 1; }
-# cli-builder installs git and the full mariadb-client, both of which Depend on
-# perl (git needs it for its perl scripts; mariadb-client for mariadb-hotcopy), so
-# libperl5.40 and perl-modules are in that flavor whatever ext-snmp links. It is
-# still held to the snmp half: no Debian libsnmp*/libnetsnmp* package, which is
-# what would put a second net-snmp in the image.
+# The builders bring perl in on purpose: cli-builder's git and full
+# mariadb-client Depend on it (git's perl scripts, mariadb-hotcopy), and
+# ext-builder's autoconf/automake are perl programs, so libperl5.40 and
+# perl-modules are there whatever ext-snmp links. Both are still held to the
+# snmp half: no Debian libsnmp*/libnetsnmp* package, which is what would put a
+# second net-snmp in the image.
 stray_globs=('libsnmp*' 'libnetsnmp*')
 perl_note="libperl*, perl-modules*, "
-if [ "$FLAVOR" != cli-builder ]; then
-  stray_globs+=('libperl*' 'perl-modules*')
-else
-  perl_note=""
-fi
+case "$FLAVOR" in
+  cli-builder|ext-builder) perl_note="" ;;
+  *) stray_globs+=('libperl*' 'perl-modules*') ;;
+esac
 stray_pkgs=$(dpkg_installed "${stray_globs[@]}" | tr '\n' ' ')
 [ -z "$stray_pkgs" ] || { echo "FAIL: the runtime image carries Debian perl/snmp library packages ($stray_pkgs) -- ext-snmp is meant to link the vendored /opt/net-snmp, and libsnmp40t64 pulls in libperl5.40"; exit 1; }
 echo "ok: no ${perl_note}libsnmp* or libnetsnmp* Debian package in the image (control: libc6 is visible to the same query)"
