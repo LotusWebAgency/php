@@ -111,9 +111,66 @@ set-but-empty value, refuses to start with a named reason.
 | `PHP_FPM_PM` / `_MAX_REQUESTS` / `_LISTEN` / `_STATUS_PATH` / `_ACCESS_LOG` / `_SLOWLOG_TIMEOUT` | `dynamic` / `1000` / `0.0.0.0:9000` / `/fpm-status` / `/proc/self/fd/2` / `10s` | `fpm` flavor pool config. |
 | `PHP_FPM_MAX_CHILDREN` (+ `_START_SERVERS` / `_MIN_SPARE` / `_MAX_SPARE`) | autotuned from the container's memory limit | Pool sizing — any one you set is honored exactly; the rest move to stay consistent. |
 
-**Read-only rootfs is supported**: `docker run --read-only --tmpfs /tmp …`
-still autotunes the pool and applies `PHP_EXT_ENABLE`/ini overrides, falling
-back to a private, mode-0700 directory under `/tmp` where needed.
+### Read-only root filesystem
+
+`fpm`, `cli` and `cli-builder` run with a read-only root filesystem and one
+writable mount, `/tmp`:
+
+```sh
+docker run --read-only --tmpfs /tmp:size=256m lotuswebagency/php:8.5-fpm
+```
+
+```yaml
+services:
+  php:
+    image: lotuswebagency/php:8.5-fpm
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    environment:
+      PHP_MEMORY_LIMIT: 512M
+      PHP_EXT_ENABLE: ldap,uuid
+```
+
+In Kubernetes the same shape is `readOnlyRootFilesystem: true` plus an
+`emptyDir` mounted at `/tmp`.
+
+`/tmp` is the only path the image writes at runtime (checked with `docker
+diff` after a full workload, and by `tests/test-readonly.sh` on every image):
+
+- PHP sessions (`session.save_path` defaults to `/tmp`) and upload temp files
+  (`upload_tmp_dir` defaults to `/tmp`). Size the tmpfs for your largest upload
+  (`upload_max_filesize` is 128M) plus the session files.
+- The env-driven ini: when `conf.d` is not writable the entrypoint generates
+  it in a private, mode-0700, `mktemp`-named directory under `/tmp`, so
+  `PHP_MEMORY_LIMIT`, the opcache variables, `PHP_EXT_ENABLE` and
+  `PHP_SNUFFLEUPAGUS` apply exactly as on a writable rootfs, and the FPM pool is
+  still autotuned.
+- `sys_get_temp_dir()`, `tempnam()`, Xdebug output and, in `cli-builder`, the
+  Composer, npm and Corepack caches (`COMPOSER_HOME`, `npm_config_cache`,
+  `COREPACK_HOME` already point into `/tmp`).
+
+Nothing else needs a mount. FPM logs to stderr and writes no pid file; opcache
+and the JIT live in shared memory; on PHP 7.x opcache's lock file goes to
+`/dev/shm`, which Docker and Kubernetes both provide writable; net-snmp's
+`/var/lib/snmp` is pre-created and stays untouched. The tmpfs may keep Docker's
+default `noexec`: nothing runs from `/tmp`.
+
+What does not work read-only, and how it fails:
+
+- **No writable `/tmp`.** `PHP_EXT_ENABLE` and `PHP_SNUFFLEUPAGUS` refuse to
+  start the container rather than run without the extension or the ruleset.
+  The other `PHP_*` ini variables are ignored with a warning that names the
+  variable. Sessions and uploads fail with `Read-only file system` in the
+  error log, not silently.
+- **Your application's own writes** (PrestaShop's `var/cache`, Laravel's
+  `storage`, WordPress uploads, `cli-builder`'s project directory for
+  `composer install` / `npm install`) need a volume or tmpfs of their own.
+- **A FastCGI unix socket** needs a writable directory: leave `PHP_FPM_LISTEN`
+  on its TCP default or put the socket on a mount you provide.
+- **`docker exec <container> php …`** does not see the env-driven ini (true
+  on a writable rootfs too); use `docker exec <container> docker-php-entrypoint
+  php …` to apply it.
 
 ## Extensions
 
