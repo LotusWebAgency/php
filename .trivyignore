@@ -1,0 +1,12 @@
+# GENERATED from vex/php.openvex.json by ci/vex.py -- do not edit.
+# Accepted risks for the Trivy gate in .github/workflows/ci.yml. Each line
+# expires on its statement's review-by date, so the gate re-asks the question.
+
+# CVE-2026-102276: pkg:npm/brace-expansion@5.0.9 in cli-builder -- affected
+CVE-2026-102276 exp:2026-11-30
+
+# CVE-2026-102278: pkg:npm/brace-expansion@5.0.9 in cli-builder -- affected
+CVE-2026-102278 exp:2026-11-30
+
+# CVE-2026-19534: pkg:npm/undici@6.28.0 in cli-builder -- affected
+CVE-2026-19534 exp:2026-11-30

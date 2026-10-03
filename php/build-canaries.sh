@@ -259,13 +259,54 @@ assert_attribute_canary() {
          "cache dump records no answer for any of them -- this canary measured nothing" >&2
     exit 1
   fi
+  # php-src's target probe is x86-only: AX_GCC_FUNC_ATTRIBUTE([target]) compiles
+  # __attribute__((target("sse2"))), which aarch64 gcc and clang reject, so "no"
+  # is the correct answer there -- and nothing it guards exists on that arch
+  # anyway (the ZEND_INTRIN_* SSE/AVX paths; php-src's NEON code is plain
+  # #ifdef __aarch64__, see assert_simd_dispatch_present). The allowance is
+  # derived from the probe body in this configure, not from the arch alone: a
+  # future generic target probe that aarch64 could pass is not excused.
+  local arch target_x86_only=0 excused=""
+  arch="$(uname -m)"
+  if grep -q '__attribute__((target("sse2")))' configure 2>/dev/null; then target_x86_only=1; fi
+  case "$arch" in
+    x86_64|i?86) ;;
+    *)
+      if grep -qx 'ax_cv_have_func_attribute_target' <<<"$probed" && [ "$target_x86_only" -eq 1 ]; then
+        allowed="${allowed}target "
+        excused="target"
+        echo "note: __attribute__((target)) is probed with target(\"sse2\") -- an x86-only body, so 'no' is the correct answer on $arch"
+      fi
+      ;;
+  esac
+
   # Positive control: at least one attribute has to have come back yes. If they
   # were all no -- which is what the shipped bug looked like -- the loop below
   # would be reporting a real failure, but a matcher that silently matched
   # nothing would look identical, and "no bad answers" would be vacuous.
-  grep -q '=yes$' <<<"$answers" \
-    || { echo "FATAL: not one probed function attribute came back yes. ./configure is being given a flag whose diagnostics it reads as feature answers." >&2
-         printf '  %s\n' $answers >&2; exit 1; }
+  #
+  # On aarch64, 7.3-8.3 probe only ifunc (forced off) and target (x86-only
+  # body), so no probed attribute can legitimately say yes and the control has
+  # nothing in the answers to stand on. It is then run directly instead, on the
+  # property the answers would have been evidence of: the probe harness under
+  # configure's real flags. assert_attribute_probe_harness reproduces
+  # AX_GCC_FUNC_ATTRIBUTE's link-and-empty-stderr rule with an attribute every
+  # target supports (visibility, the body 8.4+'s own probe uses), and proves the
+  # same harness can still answer no.
+  local can_be_yes=""
+  for name in $probed; do
+    name="${name#ax_cv_have_func_attribute_}"
+    case " $allowed " in *" $name "*) ;; *) can_be_yes="${can_be_yes:+${can_be_yes} }${name}" ;; esac
+  done
+  if [ -n "$can_be_yes" ]; then
+    grep -q '=yes$' <<<"$answers" \
+      || { echo "FATAL: not one probed function attribute came back yes. ./configure is being given a flag whose diagnostics it reads as feature answers." >&2
+           printf '  %s\n' $answers >&2; exit 1; }
+  else
+    echo "note: on $arch every attribute this configure probes is allowed to be 'no' ($(tr -s ' ' <<<"$allowed")) --" \
+         "no answer can serve as the positive control, so the probe harness is checked directly"
+    assert_attribute_probe_harness
+  fi
 
   # Every attribute configure probes has to appear in the answers. Without this
   # the loop below only ever inspects what the cache dump happened to contain:
@@ -295,7 +336,56 @@ assert_attribute_canary() {
     printf '  %s\n' $answers >&2
     exit 1
   fi
-  echo "ok: every probed function attribute answered yes except the forced ones ($(tr -s " " <<<"$allowed"))"
+  if [ -n "$excused" ]; then
+    echo "ok: every probed function attribute answered yes except the forced ones (${1:-}) and the x86-only ones on $arch ($excused)"
+  else
+    echo "ok: every probed function attribute answered yes except the forced ones ($(tr -s " " <<<"$allowed"))"
+  fi
+}
+
+# The positive control assert_attribute_canary falls back to when no probed
+# attribute can say yes on this arch. Same compile-and-link, same exported
+# $CC/$CFLAGS/$CPPFLAGS/$LDFLAGS configure ran with, same verdict rule
+# (AX_GCC_FUNC_ATTRIBUTE: link succeeded AND stderr empty -> yes):
+#   yes arm: visibility, which every ELF target supports -- a flag on
+#     configure's command line that emits any diagnostic turns this into no,
+#     which is exactly the defect the canary exists to catch.
+#   no arm:  target("sse2"), configure's own target probe body -- the harness
+#     has to reproduce the "no" configure recorded, or it is a check that
+#     cannot fail.
+assert_attribute_probe_harness() {
+  local tmp rc_yes=0 rc_no=0
+  tmp="$(mktemp -d)"
+  cat > "$tmp/yes.c" <<'EOF'
+int foo_def( void ) __attribute__((visibility("default")));
+int foo_hid( void ) __attribute__((visibility("hidden")));
+int foo_int( void ) __attribute__((visibility("internal")));
+int foo_pro( void ) __attribute__((visibility("protected")));
+int main (void) { return 0; }
+EOF
+  cat > "$tmp/no.c" <<'EOF'
+static int bar( void ) __attribute__((target("sse2")));
+int main (void) { return 0; }
+EOF
+  # shellcheck disable=SC2086  # the flag sets are meant to word-split, as configure splits them
+  "${CC:-cc}" -o "$tmp/yes" $CFLAGS ${CPPFLAGS:-} ${LDFLAGS:-} "$tmp/yes.c" 2>"$tmp/yes.err" || rc_yes=$?
+  # shellcheck disable=SC2086
+  "${CC:-cc}" -o "$tmp/no" $CFLAGS ${CPPFLAGS:-} ${LDFLAGS:-} "$tmp/no.c" 2>"$tmp/no.err" || rc_no=$?
+  if [ "$rc_yes" -ne 0 ] || [ -s "$tmp/yes.err" ]; then
+    echo "FATAL: a visibility-attribute probe built the way AX_GCC_FUNC_ATTRIBUTE builds its own" \
+         "(exit $rc_yes) was not clean under configure's flags -- every attribute probe on this" \
+         "branch would read the same diagnostics as 'no':" >&2
+    sed 's/^/  /' "$tmp/yes.err" >&2
+    rm -rf "$tmp"; exit 1
+  fi
+  if [ "$rc_no" -eq 0 ] && [ ! -s "$tmp/no.err" ]; then
+    echo "FATAL: target(\"sse2\") built cleanly on $(uname -m) under configure's flags, so the harness" \
+         "cannot tell yes from no here -- or configure's 'no' for target is wrong" >&2
+    rm -rf "$tmp"; exit 1
+  fi
+  rm -rf "$tmp"
+  echo "ok: attribute probe harness under configure's flags -- visibility links with empty stderr (yes)," \
+       "target(\"sse2\") does not (no, matching configure's answer)"
 }
 
 # The interpreter's dispatch model, which on this toolchain hangs on a single
@@ -335,4 +425,40 @@ assert_preserve_none_canary() {
     exit 1
   fi
   echo "ok: HAVE_PRESERVE_NONE defined -- clang builds the TAILCALL VM on this branch"
+}
+
+# read_zend_vm_kind
+#
+# Prints the dispatch model this build actually gets, as call|switch|goto|
+# hybrid|tailcall, by running Zend/zend_vm_opcodes.h and the freshly generated
+# main/php_config.h through the same $CC/$CFLAGS/$CPPFLAGS configure ran with and
+# reading what ZEND_VM_KIND expands to. The header is the authority: 7.0 and 7.1
+# define it as ZEND_VM_KIND_CALL unconditionally, so HAVE_GCC_GLOBAL_REGS being
+# set there (the CALL VM still pins registers) says nothing about the kind, and
+# 7.2+ choose HYBRID/TAILCALL/CALL from compiler and HAVE_* conditions that only
+# the preprocessor evaluates correctly. Run from the PHP source root, after
+# ./configure.
+read_zend_vm_kind() {
+  local n pp
+  [ -f Zend/zend_vm_opcodes.h ] && [ -f main/php_config.h ] \
+    || { echo "FATAL: read_zend_vm_kind needs Zend/zend_vm_opcodes.h and main/php_config.h in $PWD" >&2; return 1; }
+  # 8.5's header includes Zend/zend_portability.h, which pulls the generated
+  # Zend/zend_config.h and computes HAVE_MUSTTAIL itself, so this has to be a
+  # real preprocess of the configured tree. Captured in two steps: through a
+  # pipe, a compiler that failed halfway would still leave a line to parse.
+  # shellcheck disable=SC2086  # CFLAGS/CPPFLAGS are flag lists meant to word-split
+  pp="$(printf '#include "main/php_config.h"\n#include "Zend/zend_vm_opcodes.h"\nZEND_VM_KIND_IS ZEND_VM_KIND\n' \
+        | "${CC:-cc}" -E -P -x c -I. -IZend -Imain ${CFLAGS:-} ${CPPFLAGS:-} -)" \
+    || { echo "FATAL: preprocessing Zend/zend_vm_opcodes.h with ${CC:-cc} failed (diagnostics above)" >&2; return 1; }
+  n="$(sed -n 's/^ZEND_VM_KIND_IS[[:space:]]*//p' <<<"$pp" | tail -1 | tr -d '[:space:]')"
+  case "$n" in
+    1) echo call ;;
+    2) echo switch ;;
+    3) echo goto ;;
+    4) echo hybrid ;;
+    5) echo tailcall ;;
+    *) echo "FATAL: ZEND_VM_KIND did not preprocess to 1-5 (got '${n}') -- Zend/zend_vm_opcodes.h" \
+            "changed shape, so the recorded VM kind would be a guess" >&2
+       return 1 ;;
+  esac
 }

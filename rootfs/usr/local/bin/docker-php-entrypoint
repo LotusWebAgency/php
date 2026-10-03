@@ -129,6 +129,19 @@ if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
   done < <(disable_functions_split "$PHP_DISABLE_FUNCTIONS")
 fi
 
+# PHP_SNUFFLEUPAGUS names a file under /usr/local/etc/php/snuffleupagus/, so it
+# is a bare name -- never a path. Without this, PHP_SNUFFLEUPAGUS=../x resolves
+# outside that directory. Lowercase letters, digits, '-' and '_', and it has to
+# start with a letter or digit; the empty value is already refused above.
+if [ -n "${PHP_SNUFFLEUPAGUS:-}" ]; then
+  case "$PHP_SNUFFLEUPAGUS" in
+    [!a-z0-9]*|*[!a-z0-9_-]*)
+      echo "docker-php-entrypoint: refusing PHP_SNUFFLEUPAGUS=${PHP_SNUFFLEUPAGUS}: a ruleset name is lowercase letters, digits, '-' and '_' only, starting with a letter or digit (^[a-z0-9][a-z0-9_-]*\$) -- it selects /usr/local/etc/php/snuffleupagus/<name>.rules, it is not a path." >&2
+      exit 1
+      ;;
+  esac
+fi
+
 # ------------------------------------------ internal (computed) variables
 # The four PHP_FPM_*_EFFECTIVE names are what conf/www.conf actually reads,
 # which makes them the only pool variables `docker image inspect` shows --
@@ -630,7 +643,9 @@ enable_extensions() {
     echo "docker-php-entrypoint: PHP_EXT_ENABLE=\"$raw\" contains no extension names after splitting on commas" >&2
     exit 1
   fi
-  php-ext-enable "$@"
+  # stderr: the container's stdout belongs to the command it runs, and an
+  # "enabled <name>" line there corrupts `php script.php > out.json`.
+  php-ext-enable "$@" >&2
 }
 
 if [ -n "${PHP_EXT_ENABLE:-}" ]; then
@@ -669,7 +684,7 @@ if [ -n "${PHP_SNUFFLEUPAGUS:-}" ]; then
   fi
   ruleset="${sp_dir}/${PHP_SNUFFLEUPAGUS}.rules"
   [ -f "$ruleset" ] || { echo "no such snuffleupagus ruleset: ${PHP_SNUFFLEUPAGUS}" >&2; exit 1; }
-  php-ext-enable snuffleupagus
+  php-ext-enable snuffleupagus >&2
   {
     echo "sp.configuration_file=${ruleset}"
   } >> "${CONF_DIR}/20-snuffleupagus.ini"

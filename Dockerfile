@@ -101,6 +101,17 @@ FROM toolchain-base AS toolchain-select-clang
 
 FROM toolchain-base AS toolchain-select-gcc
 COPY --from=gcc16-toolchain /usr/local /opt/gcc16
+# GCC installs libstdc++.la (and one .la per runtime library) with libdir
+# pointing at its original /usr/local prefix, which does not exist once the
+# tree sits at /opt/gcc16. libtool resolves every `-lstdc++` -- php-src puts it
+# on the link line for ext/intl and the C++ PECL modules -- to that .la, warns
+# "library ... was moved", and hardcodes the .la's own directory as RUNPATH.
+# That is how php, php-fpm and swoole.so came to carry /opt/gcc16/lib64, a
+# directory the runtime image does not have (php resolves libstdc++ from
+# Debian's own libstdc++6). With the .la files gone libtool treats -lstdc++ as
+# a plain system library and adds no rpath. Nothing here links through a gcc
+# runtime .la on purpose; the compiler driver finds the .so files itself.
+RUN find /opt/gcc16 -name '*.la' -delete
 # Ahead of ccache's own masquerade dir's target search, not ahead of the
 # masquerade dir itself: ccache still intercepts every `gcc`/`g++` call (its
 # default compiler_check=mtime hashes the size+mtime of whichever real binary
@@ -134,7 +145,7 @@ FROM toolchain-select-${COMPILER} AS toolchain
 # workers. Built once here rather than once per era: both eras need the exact
 # same library at the exact same prefix, so this stage is what deps-modern
 # and deps-legacy both derive FROM, not something either one repeats. That
-# also means it builds once per (arch, uarch) instead of twice.
+# also means it builds once per (arch, uarch, COMPILER) instead of twice.
 FROM toolchain AS imagemagick
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -149,6 +160,26 @@ RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
 # than the ${VAR:-} self-reference pattern) avoids buildkit's UndefinedVar
 # lint on a variable this stage never declared as an ARG.
 ENV PKG_CONFIG_PATH=/opt/imagemagick/lib/pkgconfig
+
+# ------------------------------------------------------------- net-snmp
+# net-snmp's client library, vendored for the same reason as ImageMagick: the
+# distro copy (libsnmp40t64) hard-depends on libperl5.40, which puts ~49 MB of
+# perl in every runtime image and cannot be purged away. Its own stage, so it
+# neither invalidates nor waits for ImageMagick, and it builds once per
+# (arch, uarch, COMPILER) like every stage derived from the toolchain, both eras
+# sharing the result. It links Debian's libssl3 -- libssl-dev is installed here
+# for that -- never the legacy era's vendored, static-only 1.1.1w. The deps
+# stages below COPY the whole prefix (ext-snmp needs bin/net-snmp-config and the
+# headers at build time); php/build.sh's stage_runtime_deps ships only the
+# library and the MIB files.
+FROM toolchain AS net-snmp
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends libssl-dev
+COPY deps/build-netsnmp.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
+COPY php/cflags.sh php/ldflags.sh /build/php/
+RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
+    bash /build/deps/build-netsnmp.sh /opt/net-snmp
 
 # ------------------------------------------------------------- deps: modern
 # PHP 8.1+ links against what trixie ships; base rebuilds carry the CVE fixes.
@@ -177,8 +208,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # and trixie ships the pcre2 runtime lib but not the -dev package/pcre2-config
 # binary anywhere else in this image.
       librabbitmq-dev libbz2-dev libffi-dev libldap2-dev liblz4-dev \
-      libmcrypt-dev libsnmp-dev libssh2-1-dev libtidy-dev uuid-dev \
+      libmcrypt-dev libssh2-1-dev libtidy-dev uuid-dev \
       libyaml-dev libevent-dev libpcre2-dev
+# ext-snmp links this instead of libsnmp-dev (see the net-snmp stage above).
+COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 ENV PHP_DEPS_PREFIX=""
 
 # ------------------------------------------------------------- deps: legacy
@@ -223,8 +256,14 @@ ENV PHP_DEPS_PREFIX=""
 FROM imagemagick AS deps-legacy
 ARG PHP_VERSION
 # libpng/libjpeg/libwebp/libfreetype/libheif -dev are already installed by
-# the imagemagick stage above, same as deps-modern. No libssl-dev or
-# libicu-dev here: both are vendored (see above). No libavif-dev: GD's AVIF
+# the imagemagick stage above, same as deps-modern. libicu-dev is not here: ICU
+# is vendored (see above). libssl-dev IS listed, for ext-snmp only: net-snmp-config
+# adds -lssl -lcrypto to its link line and that needs the system libssl.so
+# symlink, which libcurl4-openssl-dev and libssh2-1-dev used to supply only by
+# dependency. Naming it changes nothing php sees: it was installed already, and
+# the legacy php is pointed at the vendored OpenSSL by an explicit
+# --with-openssl=/opt/php-deps (php/build.sh asserts that substitution), never
+# by what happens to be under /usr/include. No libavif-dev: GD's AVIF
 # support doesn't exist before PHP 8.1. libxml2-dev IS here, unlike
 # deps-modern's comment used to say (I2) -- it's an ordinary system package
 # now, not a vendored one, for every legacy version, not just 8.0.
@@ -235,12 +274,12 @@ ARG PHP_VERSION
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-      libcurl4-openssl-dev libxslt1-dev libxml2-dev \
+      libssl-dev libcurl4-openssl-dev libxslt1-dev libxml2-dev \
       libonig-dev libzip-dev libsqlite3-dev libpq-dev zlib1g-dev libzstd-dev \
       libbrotli-dev \
       libsodium-dev libargon2-dev libgmp-dev libreadline-dev libmemcached-dev \
       librabbitmq-dev libbz2-dev libffi-dev libldap2-dev liblz4-dev \
-      libmcrypt-dev libsnmp-dev libssh2-1-dev libtidy-dev uuid-dev \
+      libmcrypt-dev libssh2-1-dev libtidy-dev uuid-dev \
       libyaml-dev libevent-dev libpcre2-dev
 COPY deps/build-deps.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
 COPY php/cflags.sh php/ldflags.sh /build/php/
@@ -295,6 +334,8 @@ RUN set -eu; \
         ;; \
       *) : ;; \
     esac
+# ext-snmp links this instead of libsnmp-dev (see the net-snmp stage above).
+COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 # PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR (the latter set in php/build.sh) is what
 # actually makes PHP's ./configure find the vendored openssl/icu -- both
 # PHP_SETUP_OPENSSL and PHP_SETUP_ICU are PKG_CHECK_MODULES-based, and
@@ -520,6 +561,11 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # that scan has to see these .so files to pull in their runtime libraries
 # (libyaml, libtidy, librabbitmq, ...), and it walks /usr/local/lib once.
 #
+# No deps prefix on ldflags.sh here: it would put /opt/net-snmp's rpath and
+# --exclude-libs=ALL on every shared extension, and only snmp.so has anything
+# to find there. snmp.so's own RUNPATH comes from ext-snmp's configure, which
+# links what net-snmp-config prints; tests/smoke.sh asserts that RUNPATH.
+#
 # PHP_ERA is exported explicitly rather than left to ARG scoping:
 # build-shared-ext.sh hard-requires it to pick the configure/make flag split
 # (php/flag-split.sh), and an unset value there is a build failure by design --
@@ -567,83 +613,38 @@ RUN set -eux; \
       -o /usr/local/lib/php-chmod-sanitize.so /build/shim/chmod-sanitize.c -ldl; \
     strip --strip-unneeded /usr/local/lib/php-chmod-sanitize.so
 
+# What /deps-stage ships to every runtime image, trimmed to what a running php
+# loads. The COPY out of this stage sees the final view, so removing here is
+# what keeps these files out of the runtime layer. php links MagickWand and
+# MagickCore only (imagick is static; `readelf -d php` has no Magick++ NEEDED,
+# nor does any shared extension), so the C++ binding and ImageMagick's
+# pkg-config files are dead weight; the legacy era's vendored ICU also installs
+# a Makefile.inc per version under lib/icu, which only an ICU build reads.
+RUN set -eux; \
+    rm -f /deps-stage/opt/imagemagick/lib/libMagick++-*; \
+    rm -rf /deps-stage/opt/imagemagick/lib/pkgconfig; \
+    if [ -d /deps-stage/opt/php-deps/lib/icu ]; then \
+      find /deps-stage/opt/php-deps/lib/icu -name Makefile.inc -delete; \
+    fi
+
 # Resolve the runtime package set from actual linkage.
 RUN bash /build/scripts/runtime-libs.sh /usr/local/bin /usr/local/sbin /usr/local/lib \
       > /tmp/runtime-packages.txt && cat /tmp/runtime-packages.txt
 
-# ------------------------------------------------------------ runtime-base
-FROM ${BASE_IMAGE} AS runtime-base
+# ------------------------------------------------------------ runtime-conf
+# Build-only: the config half of the runtime image's file payload, assembled
+# (and version-patched) under /stage so runtime-base can take the whole tree in
+# one COPY. Every COPY/RUN in here would be its own layer in the shipped image
+# if it sat in runtime-base; as a stage of its own they cost nothing.
+FROM ${BASE_IMAGE} AS runtime-conf
 ARG PHP_VERSION
-ARG WWW_UID=33
-ARG WWW_GID=33
-# Core client packages, not the metapackages: ~38MB of tooling instead of ~85MB.
-# 17 is trixie's PostgreSQL major (apt-cache search '^postgresql-client-[0-9]').
-ARG PG_MAJOR=17
-ENV DEBIAN_FRONTEND=noninteractive
-# Without a UTF-8 LC_CTYPE, PHP 7.x's basename()/pathinfo() treat multibyte
-# bytes as invalid and cut them away: basename('/x/файл.txt') is '.txt', and
-# ZipArchive::extractTo() writes '日本語/.txt'. 8.0+ is locale-independent there.
-# C.UTF-8 is built into glibc, no locales package needed.
-ENV LANG=C.UTF-8
-
-COPY --from=php-build /tmp/runtime-packages.txt /tmp/runtime-packages.txt
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-      ca-certificates curl tzdata tini less nano procps \
-      tar gzip bzip2 zip unzip zstd xz-utils \
-      mariadb-client-core "postgresql-client-${PG_MAJOR}" \
-# libfcgi-bin (task 13): ships cgi-fcgi, the client the vendored
-# php-fpm-healthcheck (and its HEALTHCHECK in the fpm stage) uses to speak
-# FastCGI to the pool's ping.path directly, without a front web server.
-      libfcgi-bin \
-      $(tr '\n' ' ' < /tmp/runtime-packages.txt); \
-# Debian's /usr/bin/psql is a symlink to pg_wrapper, a #!/usr/bin/perl script that
-# dispatches between installed postgres majors. This image has exactly one, and that
-# wrapper is the only reason ~49MB of perl modules and libperl.so are here. Keep the
-# real client binaries, drop the wrapper machinery. postgresql-client-N Depends on
-# postgresql-client-common, so the package cannot outlive the purge: the binaries
-# have to be copied out first. Naming only `perl` lets apt take libperl/perl-modules
-# with it, which keeps this working across the next perl major.
-#
-# This does not remove the perl interpreter: /usr/bin/perl belongs to perl-base,
-# which is Essential, which dpkg needs, and which debian:trixie-slim already ships.
-# What goes is the module library and one #!/usr/bin/perl script in front of a
-# database client -- a real size win, a modest surface one, not "no interpreter".
-    for b in psql pg_dump pg_dumpall pg_restore pg_isready; do \
-      cp -a "/usr/lib/postgresql/${PG_MAJOR}/bin/$b" "/usr/local/bin/$b"; \
-    done; \
-    apt-get purge -y --auto-remove "postgresql-client-${PG_MAJOR}" perl; \
-# dpkg --audit exits 0 whether or not it finds anything, so the output is the
-# signal: any at all means the purge left a half-configured package behind.
-    audit="$(dpkg --audit 2>&1 || true)"; \
-    [ -z "$audit" ] || { echo "$audit" >&2; echo "FATAL: inconsistent dpkg state after purge" >&2; exit 1; }; \
-    rm -rf /var/lib/apt/lists/* /tmp/runtime-packages.txt
-
-# Vendored libraries (ImageMagick in every era, plus the legacy era's vendored
-# openssl/icu/curl -- libxml2 is NOT vendored, task 14 review I2), at the absolute path their
-# binaries' rpath names (php/build.sh stages them). Empty of the legacy tree,
-# but not of ImageMagick, in the modern era -- either way one unconditional
-# COPY is enough.
-COPY --from=php-build /deps-stage/ /
-
-COPY --from=php-build /usr/local/bin/php /usr/local/bin/php
-COPY --from=php-build /usr/local/lib/php /usr/local/lib/php
-COPY --from=php-build /usr/local/etc/php /usr/local/etc/php
-# What the compile actually did: pgo on or off, the flags, the profile's
-# sha256 and coverage, the corpus versions it was trained on. tests/test-pgo.sh
-# cross-checks the pgo= line against matrix.json, so a version that silently
-# stops taking PGO fails a test instead of shipping quietly slower.
-COPY --from=php-build /usr/local/share/php-build /usr/local/share/php-build
-# chmod-sanitize.so (task 13): carried into every flavor, same as every other
-# shared module -- opt-in via PHP_CHMOD_SHIM in the entrypoint, inert until
-# then regardless of which flavor.
-COPY --from=php-build /usr/local/lib/php-chmod-sanitize.so /usr/local/lib/php-chmod-sanitize.so
 
 # php-ext-enable (task 9): the only thing that may ever turn a shared module
 # on. Landed here, not baked into the flavor stages below, so cli/fpm/
 # cli-builder all get it the same way.
-COPY rootfs/ /
+# --chmod: the scripts are executable in the checkout already, this makes the
+# image not depend on file modes there (it replaces a `chmod +x` RUN).
+COPY --chmod=0755 rootfs/ /stage/
 
 # CA trust store (task 14): every flavor/era, unconditional. Fixes a Critical
 # found in review -- the legacy era's vendored OpenSSL had no CA store at all
@@ -656,13 +657,13 @@ COPY rootfs/ /
 # case for the compiled-in-default half of the fix; this ini is the explicit,
 # visible half, and applies equally (and harmlessly) to the modern era, whose
 # system OpenSSL already gets this right on its own.
-COPY conf/openssl.ini /usr/local/etc/php/conf.d/12-openssl.ini
+COPY conf/openssl.ini /stage/usr/local/etc/php/conf.d/12-openssl.ini
 
 # Baseline opcache settings (task 10), the one ini every flavor shares
 # unmodified. Numbered so task 11's entrypoint-written 90-opcache-env.ini
 # and 99-env.ini sort after it and win. (FPM pool tuning is ${VAR}-driven
 # in www.conf as of task 11 round 3 -- no file is written for it at all.)
-COPY conf/opcache.ini /usr/local/etc/php/conf.d/15-opcache.ini
+COPY conf/opcache.ini /stage/usr/local/etc/php/conf.d/15-opcache.ini
 # PHP 8.5 folded opcache fully into the engine (configure-args.sh already
 # knows this: --enable-opcache is omitted there from 8.5 on) and dropped it
 # as a loadable Zend extension, so conf/opcache.ini above is enough on its
@@ -684,7 +685,7 @@ COPY conf/opcache.ini /usr/local/etc/php/conf.d/15-opcache.ini
 # running with no opcache at all. Measured on the built images: with "opcache"
 # 7.0/7.1 fail and 7.2+ work; with "opcache.so" 7.0, 7.1, 7.2 and 8.4 all load
 # it. The suffixed form is correct on every version, so it is not gated.
-RUN [ "$PHP_VERSION" = "8.5" ] || echo "zend_extension=opcache.so" >> /usr/local/etc/php/conf.d/15-opcache.ini
+RUN [ "$PHP_VERSION" = "8.5" ] || echo "zend_extension=opcache.so" >> /stage/usr/local/etc/php/conf.d/15-opcache.ini
 
 # Task 16 found this while building the PGO corpus, and it belongs to task 10's
 # conf/opcache.ini rather than to the corpus: PHP before 7.3 cannot allocate the
@@ -706,10 +707,10 @@ RUN [ "$PHP_VERSION" = "8.5" ] || echo "zend_extension=opcache.so" >> /usr/local
 RUN set -eux; \
     case "$PHP_VERSION" in \
       7.0|7.1|7.2) \
-        grep -qx 'opcache.interned_strings_buffer = 32' /usr/local/etc/php/conf.d/15-opcache.ini \
+        grep -qx 'opcache.interned_strings_buffer = 32' /stage/usr/local/etc/php/conf.d/15-opcache.ini \
           || { echo "FATAL: conf/opcache.ini no longer sets interned_strings_buffer = 32; the <7.3 clamp below is dead" >&2; exit 1; }; \
-        sed -i 's/^opcache.interned_strings_buffer = 32$/opcache.interned_strings_buffer = 16/' /usr/local/etc/php/conf.d/15-opcache.ini; \
-        grep -qx 'opcache.interned_strings_buffer = 16' /usr/local/etc/php/conf.d/15-opcache.ini \
+        sed -i 's/^opcache.interned_strings_buffer = 32$/opcache.interned_strings_buffer = 16/' /stage/usr/local/etc/php/conf.d/15-opcache.ini; \
+        grep -qx 'opcache.interned_strings_buffer = 16' /stage/usr/local/etc/php/conf.d/15-opcache.ini \
           || { echo "FATAL: interned strings clamp did not apply" >&2; exit 1; }; \
         echo "ok: clamped interned_strings_buffer to 16 for php $PHP_VERSION" ;; \
     esac
@@ -718,13 +719,117 @@ RUN set -eux; \
 # PHP_SNUFFLEUPAGUS names one -- the module itself ships as a dormant .so
 # like every other shared extension (task 9) and is never referenced by any
 # baked ini here.
-COPY conf/snuffleupagus/ /usr/local/etc/php/snuffleupagus/
+COPY conf/snuffleupagus/ /stage/usr/local/etc/php/snuffleupagus/
+
+# ----------------------------------------------------------- runtime-payload
+# Build-only, in two halves so runtime-base needs two COPYs -- two layers --
+# instead of eleven, split by how often they change: this one holds the tens of
+# MB (php, its extensions, the vendored libraries), the next one the few KB of
+# config. Editing an ini, a rootfs script or a snuffleupagus ruleset then
+# re-ships only the small layer.
+FROM scratch AS runtime-payload
+# Vendored libraries (ImageMagick and net-snmp in every era, plus the legacy
+# era's vendored openssl/icu/curl -- libxml2 is NOT vendored, task 14 review I2),
+# at the absolute path their binaries' rpath names (php/build.sh stages them).
+# Empty of the legacy tree, but not of ImageMagick and net-snmp, in the modern
+# era -- either way one unconditional COPY is enough.
+COPY --from=php-build /deps-stage/ /
+
+COPY --from=php-build /usr/local/bin/php /usr/local/bin/php
+COPY --from=php-build /usr/local/lib/php /usr/local/lib/php
+# What the compile actually did: pgo on or off, the flags, the profile's
+# sha256 and coverage, the corpus versions it was trained on. tests/test-pgo.sh
+# cross-checks the pgo= line against matrix.json, so a version that silently
+# stops taking PGO fails a test instead of shipping quietly slower.
+COPY --from=php-build /usr/local/share/php-build /usr/local/share/php-build
+# chmod-sanitize.so (task 13): carried into every flavor, same as every other
+# shared module -- opt-in via PHP_CHMOD_SHIM in the entrypoint, inert until
+# then regardless of which flavor.
+COPY --from=php-build /usr/local/lib/php-chmod-sanitize.so /usr/local/lib/php-chmod-sanitize.so
+
+# The config half: php-build's own /usr/local/etc/php first, then everything
+# runtime-conf baked on top of it (later wins, as it always did). Nothing in
+# the first half writes under /usr/local/etc, so the order between the halves
+# is free; runtime-base still copies this one last.
+FROM scratch AS runtime-payload-conf
+COPY --from=php-build /usr/local/etc/php /usr/local/etc/php
+COPY --from=runtime-conf /stage/ /
+
+# ------------------------------------------------------------ runtime-base
+FROM ${BASE_IMAGE} AS runtime-base
+ARG PHP_VERSION
+ARG WWW_UID=33
+ARG WWW_GID=33
+# Core client packages, not the metapackages: ~38MB of tooling instead of ~85MB.
+# 17 is trixie's PostgreSQL major (apt-cache search '^postgresql-client-[0-9]').
+ARG PG_MAJOR=17
+# Without a UTF-8 LC_CTYPE, PHP 7.x's basename()/pathinfo() treat multibyte
+# bytes as invalid and cut them away: basename('/x/файл.txt') is '.txt', and
+# ZipArchive::extractTo() writes '日本語/.txt'. 8.0+ is locale-independent there.
+# C.UTF-8 is built into glibc, no locales package needed.
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8
+
+COPY --from=php-build /tmp/runtime-packages.txt /tmp/runtime-packages.txt
+# upgrade: BASE_IMAGE is digest-pinned, so without it a Debian security fix
+# to a package the base already ships (libpcre2-8-0 on the legacy era, which
+# bundles its own pcre and never names it) waits for the next digest bump
+# instead of landing in the weekly rebuild.
+RUN set -eux; \
+    apt-get update; \
+    apt-get upgrade -y; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl tzdata tini less nano procps \
+      tar gzip bzip2 zip unzip zstd xz-utils \
+      mariadb-client-core "postgresql-client-${PG_MAJOR}" \
+# libfcgi-bin (task 13): ships cgi-fcgi, the client the vendored
+# php-fpm-healthcheck (and its HEALTHCHECK in the fpm stage) uses to speak
+# FastCGI to the pool's ping.path directly, without a front web server.
+      libfcgi-bin \
+      $(tr '\n' ' ' < /tmp/runtime-packages.txt); \
+# Debian's /usr/bin/psql is a symlink to pg_wrapper, a #!/usr/bin/perl script that
+# dispatches between installed postgres majors. This image has exactly one, and that
+# wrapper is the only reason ~49MB of perl modules and libperl.so are here. Keep the
+# real client binaries, drop the wrapper machinery. postgresql-client-N Depends on
+# postgresql-client-common, so the package cannot outlive the purge: the binaries
+# have to be copied out first. Naming only `perl` lets apt take libperl/perl-modules
+# with it, which keeps this working across the next perl major. That only works
+# because nothing else Depends on libperl: Debian's libsnmp40t64 does, which is why
+# ext-snmp links the vendored client-only net-snmp (deps/build-netsnmp.sh) and no
+# libsnmp* package is ever installed. tests/smoke.sh asserts libperl is gone.
+#
+# This does not remove the perl interpreter: /usr/bin/perl belongs to perl-base,
+# which is Essential, which dpkg needs, and which debian:trixie-slim already ships.
+# What goes is the module library and one #!/usr/bin/perl script in front of a
+# database client -- a real size win, a modest surface one, not "no interpreter".
+    for b in psql pg_dump pg_dumpall pg_restore pg_isready; do \
+      cp -a "/usr/lib/postgresql/${PG_MAJOR}/bin/$b" "/usr/local/bin/$b"; \
+    done; \
+    apt-get purge -y --auto-remove "postgresql-client-${PG_MAJOR}" perl; \
+# dpkg --audit exits 0 whether or not it finds anything, so the output is the
+# signal: any at all means the purge left a half-configured package behind.
+    audit="$(dpkg --audit 2>&1 || true)"; \
+    [ -z "$audit" ] || { echo "$audit" >&2; echo "FATAL: inconsistent dpkg state after purge" >&2; exit 1; }; \
+    rm -rf /var/lib/apt/lists/* /tmp/runtime-packages.txt; \
+# Housekeeping, in this RUN because a later one would only whiteout files this
+# layer already stored. debconf keeps a *-old copy of its databases after every
+# apt run (0.8MB). Files that belong to an installed package stay, however
+# unused here: dpkg still lists the package, so apt never puts a deleted file
+# back, and a derived image that installs mariadb-server dies in
+# mariadb-install-db on the missing my_print_defaults (the PGO corpus build hit
+# exactly that).
+    rm -f /var/cache/debconf/*-old
+
+# Everything php-build produced for the runtime, then the baked config, as two
+# layers: see the runtime-payload stages above. The config layer stays last so
+# a config edit never re-ships the binaries.
+COPY --from=runtime-payload / /
+COPY --from=runtime-payload-conf / /
 
 RUN set -eux; \
     getent group www-data >/dev/null || groupadd -g "$WWW_GID" www-data; \
     id -u www-data >/dev/null 2>&1 || useradd -u "$WWW_UID" -g "$WWW_GID" -s /usr/sbin/nologin -M www-data; \
     mkdir -p /app /usr/local/etc/php/conf.d; \
-    chmod +x /usr/local/bin/*; \
     chown -R www-data:www-data /app; \
 # php-ext-enable (task 9) has to write here as whatever user actually runs the
 # container -- fpm/cli/cli-builder all set USER www-data, not root, and
@@ -733,6 +838,13 @@ RUN set -eux; \
 # the "writable by default" half of the contract, PHP_CONF_DIR is the other
 # half for a read-only rootfs.
     chown www-data:www-data /usr/local/etc/php/conf.d; \
+# net-snmp (deps/build-netsnmp.sh) keeps its persistent state in /var/lib/snmp
+# and its certificate index in cert_indexes below it, creating both on first
+# use and logging "Created directory: ..." to stderr when it does. Present up
+# front, owned by the image user, that is silent for root (which would otherwise
+# create them) and for www-data (which could not create them under a root-owned
+# /var/lib).
+    install -d -o www-data -g www-data /var/lib/snmp /var/lib/snmp/cert_indexes; \
     find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 
 WORKDIR /app
@@ -741,46 +853,21 @@ WORKDIR /app
 ENTRYPOINT ["/usr/bin/tini", "--", "docker-php-entrypoint"]
 
 # ----------------------------------------------------------------- flavors
+# Build-only: php-fpm's own files plus the two pool/ini configs, as one tree for
+# a single COPY (one layer) into the fpm image. conf/www.conf is copied last so
+# it replaces the stock pool file php-build installed.
+FROM scratch AS fpm-payload
+COPY --from=php-build /usr/local/sbin/php-fpm /usr/local/sbin/php-fpm
+COPY --from=php-build /usr/local/etc/php-fpm.conf /usr/local/etc/php-fpm.conf
+COPY --from=php-build /usr/local/etc/php-fpm.d /usr/local/etc/php-fpm.d
+COPY conf/php-fpm.ini /usr/local/etc/php/conf.d/10-php.ini
+COPY conf/www.conf /usr/local/etc/php-fpm.d/www.conf
+
 FROM runtime-base AS fpm
 # ARG does not cross a FROM: runtime-base declares PHP_VERSION, this stage has to
 # declare it again or the version gates below silently match nothing.
 ARG PHP_VERSION
-COPY --from=php-build /usr/local/sbin/php-fpm /usr/local/sbin/php-fpm
-COPY --from=php-build /usr/local/etc/php-fpm.conf /usr/local/etc/php-fpm.conf
-COPY --from=php-build /usr/local/etc/php-fpm.d /usr/local/etc/php-fpm.d
-# php-fpm's stock config logs to $prefix/var/log and drops its pid in
-# $prefix/var/run; make install creates both in the build stage, not here.
-RUN set -eux; \
-    mkdir -p /usr/local/var/log /usr/local/var/run; \
-    chown -R www-data:www-data /usr/local/var
-# The [global] error_log in the stock php-fpm.conf defaults to a file under
-# $prefix/var/log, commented out in the shipped template. www.conf's
-# catch_workers_output=yes makes every worker's own fd 2 a private pipe back
-# to the master, not the container's real stderr -- so a worker's
-# php_admin_value[error_log]=/proc/self/fd/2 resolves to that pipe, and the
-# master then re-logs the captured line through *its own* error_log. Left at
-# the stock default, that line -- and the master's own notices -- go to
-# /usr/local/var/log/php-fpm.log and never reach `docker logs`. Pointing the
-# global log at /proc/self/fd/2 too closes that loop: self there resolves to
-# the master process, whose fd 2 is the real container stderr.
-#
-# `sed -i` exits 0 whether or not it matched anything, so a bare substitution
-# here would silently no-op -- and stay silent -- the moment a future PHP
-# point release rewords this line even slightly: the build stays green, the
-# master's own startup notices still reach `docker logs` (they're emitted
-# before the log target opens), and the regression looks exactly like a
-# healthy image. Guarded on both sides: fail before touching the file unless
-# there is exactly one error_log directive (commented or not) to replace,
-# and fail after unless the replacement is actually present. The regex
-# itself is loosened to match any error_log value, not just today's exact
-# commented default, so a reworded *value* doesn't retrigger this --
-# only the directive disappearing or multiplying does.
-RUN set -eux; \
-    n="$(grep -cE '^;?error_log[[:space:]]*=' /usr/local/etc/php-fpm.conf || true)"; \
-    [ "$n" = "1" ] || { echo "FATAL: expected exactly one [global] error_log directive in php-fpm.conf, found $n" >&2; exit 1; }; \
-    sed -i -E 's|^;?error_log[[:space:]]*=.*|error_log = /proc/self/fd/2|' /usr/local/etc/php-fpm.conf; \
-    grep -qx 'error_log = /proc/self/fd/2' /usr/local/etc/php-fpm.conf \
-      || { echo "FATAL: php-fpm.conf error_log substitution did not apply" >&2; exit 1; }
+COPY --from=fpm-payload / /
 # Ruling T11-G: no pool config file is ever written by the entrypoint, on a
 # read-only rootfs or otherwise -- www.conf below references every tunable
 # pool directive as ${PHP_FPM_*}, which php-fpm resolves from its own
@@ -814,6 +901,43 @@ ENV PHP_FPM_PM=dynamic \
     PHP_FPM_ACCESS_LOG=/proc/self/fd/2 \
     PHP_FPM_SLOWLOG_TIMEOUT=10s \
     PHP_DISABLE_FUNCTIONS="passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec"
+# One RUN for everything that edits or verifies the files above, in the order
+# the separate steps used to run (each a layer of its own for no reason).
+RUN set -eux; \
+# php-fpm's stock config logs to $prefix/var/log and drops its pid in
+# $prefix/var/run; make install creates both in the build stage, not here.
+    mkdir -p /usr/local/var/log /usr/local/var/run; \
+    chown -R www-data:www-data /usr/local/var; \
+# Copying fpm-payload as a tree also stamps its (root-owned) conf.d directory
+# onto the one runtime-base made writable for php-ext-enable; hand it back.
+    chown www-data:www-data /usr/local/etc/php/conf.d; \
+# The [global] error_log in the stock php-fpm.conf defaults to a file under
+# $prefix/var/log, commented out in the shipped template. www.conf's
+# catch_workers_output=yes makes every worker's own fd 2 a private pipe back
+# to the master, not the container's real stderr -- so a worker's
+# php_admin_value[error_log]=/proc/self/fd/2 resolves to that pipe, and the
+# master then re-logs the captured line through *its own* error_log. Left at
+# the stock default, that line -- and the master's own notices -- go to
+# /usr/local/var/log/php-fpm.log and never reach `docker logs`. Pointing the
+# global log at /proc/self/fd/2 too closes that loop: self there resolves to
+# the master process, whose fd 2 is the real container stderr.
+#
+# `sed -i` exits 0 whether or not it matched anything, so a bare substitution
+# here would silently no-op -- and stay silent -- the moment a future PHP
+# point release rewords this line even slightly: the build stays green, the
+# master's own startup notices still reach `docker logs` (they're emitted
+# before the log target opens), and the regression looks exactly like a
+# healthy image. Guarded on both sides: fail before touching the file unless
+# there is exactly one error_log directive (commented or not) to replace,
+# and fail after unless the replacement is actually present. The regex
+# itself is loosened to match any error_log value, not just today's exact
+# commented default, so a reworded *value* doesn't retrigger this --
+# only the directive disappearing or multiplying does.
+    n="$(grep -cE '^;?error_log[[:space:]]*=' /usr/local/etc/php-fpm.conf || true)"; \
+    [ "$n" = "1" ] || { echo "FATAL: expected exactly one [global] error_log directive in php-fpm.conf, found $n" >&2; exit 1; }; \
+    sed -i -E 's|^;?error_log[[:space:]]*=.*|error_log = /proc/self/fd/2|' /usr/local/etc/php-fpm.conf; \
+    grep -qx 'error_log = /proc/self/fd/2' /usr/local/etc/php-fpm.conf \
+      || { echo "FATAL: php-fpm.conf error_log substitution did not apply" >&2; exit 1; }; \
 # docker-php-entrypoint refuses a PHP_FPM_*_EFFECTIVE that differs from what
 # this stage baked -- they are computed outputs, and the only pool variables
 # `docker image inspect` shows, so they are exactly what an operator finds
@@ -822,9 +946,13 @@ ENV PHP_FPM_PM=dynamic \
 # if they ever drift, every container of this image refuses to start. Fail
 # the build instead, the same way the php-fpm.conf error_log substitution
 # above refuses to pass unverified.
-RUN set -eu;     for pair in "MAX_CHILDREN=$PHP_FPM_MAX_CHILDREN_EFFECTIVE"                 "START_SERVERS=$PHP_FPM_START_SERVERS_EFFECTIVE"                 "MIN_SPARE=$PHP_FPM_MIN_SPARE_EFFECTIVE"                 "MAX_SPARE=$PHP_FPM_MAX_SPARE_EFFECTIVE"; do       grep -qx "BAKED_${pair}" /usr/local/bin/docker-php-entrypoint         || { echo "FATAL: docker-php-entrypoint has no 'BAKED_${pair}' -- its constants disagree with this stage's PHP_FPM_*_EFFECTIVE ENV defaults" >&2; exit 1; };     done
-COPY conf/php-fpm.ini /usr/local/etc/php/conf.d/10-php.ini
-COPY conf/www.conf /usr/local/etc/php-fpm.d/www.conf
+    for pair in "MAX_CHILDREN=$PHP_FPM_MAX_CHILDREN_EFFECTIVE" \
+                "START_SERVERS=$PHP_FPM_START_SERVERS_EFFECTIVE" \
+                "MIN_SPARE=$PHP_FPM_MIN_SPARE_EFFECTIVE" \
+                "MAX_SPARE=$PHP_FPM_MAX_SPARE_EFFECTIVE"; do \
+      grep -qx "BAKED_${pair}" /usr/local/bin/docker-php-entrypoint \
+        || { echo "FATAL: docker-php-entrypoint has no 'BAKED_${pair}' -- its constants disagree with this stage's PHP_FPM_*_EFFECTIVE ENV defaults" >&2; exit 1; }; \
+    done; \
 # decorate_workers_output arrived in php-fpm 7.3. On 7.0-7.2 it is not an
 # ignored unknown key, it is a hard startup failure:
 #
@@ -839,7 +967,6 @@ COPY conf/www.conf /usr/local/etc/php-fpm.d/www.conf
 # Guarded like every other substitution here: `sed -i` exits 0 whether or not it
 # matched, so a reworded www.conf would turn this into a no-op and hand three
 # versions back a dead image.
-RUN set -eux; \
     case "$PHP_VERSION" in \
       7.0|7.1|7.2) \
         grep -qx 'decorate_workers_output = no' /usr/local/etc/php-fpm.d/www.conf \
@@ -848,14 +975,14 @@ RUN set -eux; \
         ! grep -q '^decorate_workers_output' /usr/local/etc/php-fpm.d/www.conf \
           || { echo "FATAL: decorate_workers_output survived removal" >&2; exit 1; }; \
         echo "ok: dropped decorate_workers_output for php $PHP_VERSION" ;; \
-    esac
+    esac; \
 # php-fpm parses its own configuration and refuses to start on anything it does
 # not recognise, so ask it here rather than finding out in production. Both
 # defects above shipped because nothing in this build or in tests/smoke.sh
 # ever started php-fpm -- `php -r` runs fine on an image whose fpm binary cannot
 # initialise. This catches any future directive that outruns the oldest PHP in
 # the matrix, not just the one that was found.
-RUN php-fpm -t
+    php-fpm -t
 EXPOSE 9000
 STOPSIGNAL SIGQUIT
 # php-fpm-healthcheck (vendored, task 13) speaks FastCGI directly to the
@@ -872,23 +999,57 @@ COPY conf/php-cli.ini /usr/local/etc/php/conf.d/10-php.ini
 USER www-data
 CMD ["php", "-a"]
 
+# Node 24 LTS for cli-builder, copied out of the official image instead of
+# Debian's nodejs/npm (trixie ships Node 20, which upstream no longer
+# maintains). Pinned by the multi-arch INDEX digest, so both the amd64 and the
+# arm64 build resolve it and a retag upstream cannot change what ships.
+# node 24.21.0 / npm 11.19.0 at the time of pinning.
+FROM node:24-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS node24
+
+# Node, npm and semantic-release as the one tree cli-builder takes, finished
+# here so that no intermediate npm ever lands in a shipped layer: copying the
+# node image's node_modules and upgrading npm in a later RUN left the 11.19
+# copy (~20MB) underneath the new one.
+#
+# npm itself is moved past the 11.19.0 the node image bundles: 11.21.0 ships
+# the fixed tar and ip-address. Its bundled brace-expansion and undici are
+# still behind their fixes in every npm release (see .trivyignore). The /out
+# tree is built by hand rather than by copying /usr/local/bin wholesale, which
+# also holds the node image's docker-entrypoint.sh and yarn. semantic-release is
+# not run here (it refuses to start without git, which the node image lacks);
+# tests/smoke.sh runs `semantic-release --version` in the finished image. The
+# readme/changelog markdown inside the packages is 2.5MB nothing reads.
+FROM node24 AS node-tools
+RUN set -eux; \
+    node -v; \
+    npm install -g npm@11.21.0; \
+    npm -v; \
+    npm install -g semantic-release; \
+    npm cache clean --force; \
+    test -x /usr/local/bin/semantic-release; \
+    find /usr/local/lib/node_modules -type f \( -iname 'readme*.md' -o -iname 'changelog*.md' -o -iname 'history.md' \) -delete; \
+    mkdir -p /out/bin /out/lib; \
+    cp -a /usr/local/lib/node_modules /out/lib/node_modules; \
+    for b in node npm npx corepack semantic-release; do \
+      cp -a "/usr/local/bin/$b" "/out/bin/$b"; \
+    done
+
+# cli-builder is a pure asset/test/deploy image: composer, node and the CLI
+# tooling a build or deploy stage reaches for. It carries no compiler and no
+# phpize -- compiling an extension is ext-builder's job below.
 FROM cli AS cli-builder
 USER root
-# gcc + libc6-dev + autoconf: phpize/php-config below ship the PHP headers
-# precisely so an extension can be built against them, and that needs a full
-# toolchain, not just make (already in the list). phpize itself calls out to
-# autoconf to regenerate an extension's configure script from config.m4
-# before ./configure ever runs, so autoconf is as load-bearing here as gcc --
-# phpize fails outright ("Cannot find autoconf") without it, compiler or not.
-# Scoped to this stage only; fpm and cli derive from runtime-base
-# independently and never see it.
+COPY --from=node-tools /out/ /usr/local/
+# less, nano, procps, zip, unzip and zstd are already in runtime-base.
+# mariadb-client-core there only has the mariadb/mysql shell; the full
+# mariadb-client adds mariadb-dump/mysqldump (and pulls perl back in).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      git rsync patch make brotli sqlite3 nodejs npm gcc libc6-dev autoconf \
-    && rm -rf /var/lib/apt/lists/*
-COPY --from=php-build /usr/local/bin/phpize /usr/local/bin/phpize
-COPY --from=php-build /usr/local/bin/php-config /usr/local/bin/php-config
-COPY --from=php-build /usr/local/include/php /usr/local/include/php
+    set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      git rsync patch make brotli sqlite3 jq mariadb-client; \
+    rm -rf /var/lib/apt/lists/*; \
+    rm -f /var/cache/debconf/*-old
 COPY conf/php-builder.ini /usr/local/etc/php/conf.d/10-php.ini
 # The installer is verified against the signature Composer publishes; piping it
 # straight into php would trust whatever the network returned.
@@ -900,5 +1061,36 @@ RUN set -eux; \
     rm -f /tmp/composer-setup.php /tmp/composer-setup.sig; \
     composer --version
 USER www-data
-ENV COMPOSER_HOME=/tmp/composer
+# www-data's HOME (/var/www) does not exist, so npm and corepack would try to
+# write their caches under a directory uid 33 cannot create.
+ENV COMPOSER_HOME=/tmp/composer \
+    npm_config_cache=/tmp/npm \
+    COREPACK_HOME=/tmp/corepack
+CMD ["bash"]
+
+# Build-only: the three paths ext-builder takes from php-build, as one tree for
+# a single COPY.
+FROM scratch AS ext-builder-payload
+COPY --from=php-build /usr/local/bin/phpize /usr/local/bin/phpize
+COPY --from=php-build /usr/local/bin/php-config /usr/local/bin/php-config
+COPY --from=php-build /usr/local/include/php /usr/local/include/php
+
+# Build-stage-only image for compiling PHP extensions that are then COPYed into
+# fpm/cli of the same PHP version. Same php-build output as every other flavor
+# of that version (no second compile, no second PGO run); only the headers and
+# phpize/php-config are copied out of it. Runs as root: it is a build stage and
+# `make install` writes into the extension dir. No composer, no node.
+FROM cli AS ext-builder
+USER root
+# g++: several extensions are C++. autoconf: phpize regenerates ./configure
+# from config.m4 and fails outright ("Cannot find autoconf") without it.
+# pkg-config: extension configure scripts locate their -dev libraries with it.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      gcc g++ make autoconf pkg-config libc6-dev; \
+    rm -rf /var/lib/apt/lists/*; \
+    rm -f /var/cache/debconf/*-old
+COPY --from=ext-builder-payload / /
 CMD ["bash"]

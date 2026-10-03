@@ -383,10 +383,11 @@ sp.disable_function.function("proc_open").filename_r("/(symfony/console|Symfony/
 # Harden the PRNG
 sp.harden_random.enable();
 
-# Enable XXE protection
-@condition extension_loaded("xml");
-sp.xxe_protection.enable();
-@end_condition;
+# sp.xxe_protection.enable() is deliberately absent: it switches libxml's entity
+# loader off from an INI handler at startup, which does not carry into requests,
+# so LIBXML_NOENT still expands file:// entities with it on. On PHP 7 it also
+# nops the application's own libxml_disable_entity_loader(true). It would claim
+# protection it does not give.
 
 # Global configuration variables
 # sp.global.secret_key("YOU _DO_ NEED TO CHANGE THIS WITH SOME RANDOM CHARACTERS.");

@@ -105,6 +105,34 @@ PYEOF
   fi
 fi
 
+if [ -n "${pr_json:-}" ]; then
+  # The pr group in docker-bake.hcl and the CI matrix (scripts/gen_matrix.py
+  # --github pr, whose legs name every target they bake, riders included) are
+  # two spellings of one list; a target in one and not the other is a PR that
+  # silently stops building something, or a leg bake cannot resolve.
+  pr_json_file="$(mktemp)"
+  printf '%s' "$pr_json" > "$pr_json_file"
+  pr_out="$(python3 scripts/gen_matrix.py --github pr | python3 -c '
+import json, sys
+legs = json.load(sys.stdin)["include"]
+bake = json.load(open(sys.argv[1]))
+ci = {n for leg in legs for n in leg["bake"].split()}
+grp = set(bake["group"]["pr"]["targets"])
+for n in sorted(ci - grp):
+    print(f"PROBLEM: {n} is built by a CI pr leg but is not in the bake pr group")
+for n in sorted(grp - ci):
+    print(f"PROBLEM: {n} is in the bake pr group but no CI pr leg builds it")
+print(f"pr legs: {len(legs)}, targets they bake: {len(ci)}, bake pr group: {len(grp)}")
+' "$pr_json_file")"
+  rm -f "$pr_json_file"
+  echo "$pr_out"
+  if grep -q '^PROBLEM:' <<<"$pr_out"; then
+    fail "the bake pr group and scripts/gen_matrix.py --github pr disagree (see above)"
+  else
+    ok "the bake pr group matches the targets the CI pr legs build"
+  fi
+fi
+
 # ------------------------------------------------------------- 4. shellcheck
 section "4/8 shellcheck on every shell file"
 command -v shellcheck >/dev/null || fail "shellcheck not found on this host"
@@ -152,7 +180,7 @@ else
 fi
 
 # --------------------------------------------- 6. python unit/lock-format tests
-section "6/8 python unit tests (matrix/ext-registry/elf-hardening/flags/locks)"
+section "6/8 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex)"
 # Covers, among others, the lock-file format checks that exist:
 # scripts/test_versions_lock.py (deps/versions.lock), scripts/test_release_keys.py
 # (php/release-keys.asc), scripts/test_fetch_verified_sync.py (the two
@@ -163,6 +191,19 @@ if python3 -m unittest discover -s scripts -p 'test_*.py' -v 2>&1 | tail -20; th
   ok "python3 -m unittest discover -s scripts"
 else
   fail "scripts/test_*.py unittest suite failed"
+fi
+# ci/test_vex.py (the release tooling, kept out of scripts/ so it is not a build
+# input): vex/php.openvex.json is valid OpenVEX, .trivyignore is the file
+# generated from it, the attestation predicate refuses a Trivy step that did not
+# succeed. It does NOT assert that no review-by date has passed: preflight gates
+# every build job, so a date-triggered failure here would stop the whole publish
+# on the deadline Monday. The deadline gate is Trivy itself (the generated
+# .trivyignore lines carry exp:); `python3 ci/vex.py check --warn-within 14`
+# warns in CI ahead of time.
+if python3 -m unittest discover -s ci -p 'test_*.py' -v 2>&1 | tail -20; then
+  ok "python3 -m unittest discover -s ci"
+else
+  fail "ci/test_*.py unittest suite failed"
 fi
 
 # ----------------------------------------------- 7. matrix <-> label consistency

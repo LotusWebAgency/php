@@ -170,14 +170,19 @@ wait_http() {  # wait_http <host:port> <path> -> 0 once anything but a gateway e
 }
 
 run_app() {
-  local app="$1" set fixture have want dir manifest
+  local app="$1" set fixture have want dir manifest state
   set="$(apptest_resolve_set "$app" "$PHP")" || { result "$app" "-" "-" FAIL "no set for php $PHP"; return; }
   fixture="$(apptest_fixture_tag "$app" "$set")"
   want="$(apptest_recipe_hash "$app" "$set")"
-  have="$(apptest_label "$fixture" com.lotuswebagency.apptest-hash)"
-  if [ "$have" != "$want" ]; then
+  apptest_fixture_current "$fixture" "$want" || apptest_fixture_try_pull "$app" "$set" || true
+  if ! apptest_fixture_current "$fixture" "$want"; then
     if [ "$NO_BUILD" -eq 1 ]; then
-      result "$app" "$set" "-" FAIL "fixture $fixture is ${have:+stale}${have:-missing} and --no-build was given"
+      have="$(apptest_label "$fixture" com.lotuswebagency.apptest-hash)"
+      if [ -z "$have" ]; then state=missing
+      elif [ "$have" != "$want" ]; then state=stale
+      else state="the wrong architecture"
+      fi
+      result "$app" "$set" "-" FAIL "fixture $fixture is $state and --no-build was given"
       return
     fi
     "$APPTEST_ROOT/build-fixture.sh" "$app" "$set" || { result "$app" "$set" "-" FAIL "fixture build failed"; return; }

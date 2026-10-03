@@ -231,6 +231,12 @@ php_configure() {
   args="$(render_configure_args)"
   # shellcheck disable=SC2086  # the rendered flags and cache overrides are meant to word-split
   ./configure $args $CONFIGURE_CACHE_OVERRIDES
+  # The VM this build gets, from the header's own ZEND_VM_KIND (see
+  # read_zend_vm_kind). The messages below name it instead of assuming gcc means
+  # HYBRID: 7.0/7.1 are CALL on every arch even though they pin the same
+  # registers, and 7.2/7.3 on aarch64 have no register probe at all.
+  ZEND_VM_KIND_CONFIG="$(read_zend_vm_kind)" || exit 1
+  local vm_name="${ZEND_VM_KIND_CONFIG^^}"
   # Task 33: the whole point of COMPILER=gcc. PHP's HYBRID VM pins
   # execute_data/opline into %r14/%r15 via GCC global register variables
   # (Zend/zend_execute.c) when ./configure's own probe decides the compiler
@@ -240,10 +246,42 @@ php_configure() {
   # directions are asserted: gcc must get it, and clang -- the control this
   # whole experiment is measured against -- must not, or the premise this
   # task tests no longer holds.
-  if [ "${COMPILER:-clang}" = gcc ]; then
+  #
+  # %r14/%r15 is the x86_64 pair. On aarch64 the gcc answer depends on the
+  # branch, not the compiler: Zend/Zend.m4's global-register probe only knows
+  # __aarch64__ (x27/x28, Zend/zend_execute.c) from 7.4 on -- 7.0-7.3 list
+  # i386/x86_64 alone, so their probe answers no on arm64 under any gcc and
+  # those builds get the plain CALL VM. Which case applies is read out of the
+  # probe block itself rather than keyed off a version list, and it is still
+  # asserted both ways: a branch whose probe knows aarch64 must get the
+  # registers, one whose probe does not must not have them by some other route.
+  if [ "${COMPILER:-clang}" = gcc ] && [ "$(uname -m)" = aarch64 ]; then
+    # From the --enable-gcc-global-regs option to the probe's #error: the
+    # probe program and nothing else. Every branch's block names __x86_64__,
+    # so a range that does not is a stale extraction, not an answer.
+    local regs_probe
+    regs_probe="$(sed -n '/gcc-global-regs/,/global register variables are not supported/p' Zend/Zend.m4)"
+    grep -q '__x86_64__' <<<"$regs_probe" \
+      || { echo "FATAL: could not find the global-register probe in Zend/Zend.m4 (no __x86_64__ in the" \
+                "extracted block) -- the aarch64 expectation below would be guessed, not derived" >&2; exit 1; }
+    if grep -q '__aarch64__' <<<"$regs_probe"; then
+      grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h \
+        || { echo "FATAL: COMPILER=gcc on aarch64 but HAVE_GCC_GLOBAL_REGS did not take, though this" \
+                  "branch's Zend/Zend.m4 probe knows __aarch64__ -- check main/php_config.h" >&2; exit 1; }
+      echo "ok: HAVE_GCC_GLOBAL_REGS=1 -- the ${vm_name} VM will pin execute_data/opline in x27/x28 (aarch64)"
+    else
+      if grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h; then
+        echo "FATAL: HAVE_GCC_GLOBAL_REGS=1 on aarch64, but this branch's Zend/Zend.m4 probe only" \
+             "knows i386/x86_64 -- the derivation above is stale" >&2
+        exit 1
+      fi
+      echo "ok: HAVE_GCC_GLOBAL_REGS is not defined on aarch64, as expected -- PHP ${PHP_VERSION}'s" \
+           "Zend/Zend.m4 probe predates aarch64 global registers (added in 7.4), so this build runs the CALL VM"
+    fi
+  elif [ "${COMPILER:-clang}" = gcc ]; then
     grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h \
       || { echo "FATAL: COMPILER=gcc but HAVE_GCC_GLOBAL_REGS did not take -- check main/php_config.h" >&2; exit 1; }
-    echo "ok: HAVE_GCC_GLOBAL_REGS=1 -- the HYBRID VM will pin execute_data/opline in %r14/%r15"
+    echo "ok: HAVE_GCC_GLOBAL_REGS=1 -- the ${vm_name} VM will pin execute_data/opline in %r14/%r15"
   elif grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h; then
     echo "FATAL: COMPILER=clang but HAVE_GCC_GLOBAL_REGS=1 was defined -- this build no longer" \
          "demonstrates the finding task 33 exists to test" >&2
@@ -263,22 +301,11 @@ php_configure() {
   # Task 37b: tests/smoke.sh's VM-kind expectation needs a build-time answer
   # for the versions it cannot ask at runtime -- 7.0-7.3 have no FFI (ext.json's
   # floor is >=7.4), so there is no `zend_vm_kind()` to call from a shipped
-  # image. What decided the VM was already computed two probes up
-  # (HAVE_GCC_GLOBAL_REGS -> HYBRID, HAVE_PRESERVE_NONE -> TAILCALL, neither ->
-  # the plain CALL VM); this just names the answer so write_build_record can
-  # ship it. The two defines are mutually exclusive on every toolchain this
-  # project builds (gcc has no preserve_none calling convention; clang has no
-  # global register variables), so exactly one of the first two branches can
-  # ever be true here -- this does not re-decide anything, only records what
-  # the canaries above already asserted.
-  if grep -q '^#define HAVE_GCC_GLOBAL_REGS 1' main/php_config.h; then
-    ZEND_VM_KIND_CONFIG=hybrid
-  elif grep -Eq '^[[:space:]]*#[[:space:]]*define[[:space:]]+HAVE_PRESERVE_NONE[[:space:]]+1' main/php_config.h; then
-    ZEND_VM_KIND_CONFIG=tailcall
-  else
-    ZEND_VM_KIND_CONFIG=call
-  fi
-  echo "ok: vm_kind_config=$ZEND_VM_KIND_CONFIG (from main/php_config.h)"
+  # image. ZEND_VM_KIND_CONFIG was read from the generated header right after
+  # configure (read_zend_vm_kind); this just reports it so write_build_record
+  # can ship it. It used to be inferred from HAVE_GCC_GLOBAL_REGS, which
+  # recorded hybrid for 7.0/7.1 although their header pins the CALL VM.
+  echo "ok: vm_kind_config=$ZEND_VM_KIND_CONFIG (ZEND_VM_KIND from Zend/zend_vm_opcodes.h and main/php_config.h)"
 }
 
 # The only place a compile is driven. Task 17's PGO passes belong here, which is
@@ -352,6 +379,16 @@ stage_runtime_deps() {
   if [ -d /opt/imagemagick/lib ]; then
     mkdir -p /deps-stage/opt/imagemagick
     cp -a /opt/imagemagick/lib /deps-stage/opt/imagemagick/
+  fi
+  # net-snmp's client library and MIB files only: no bin (net-snmp-config),
+  # include or pkgconfig -- those were build-time inputs for ext-snmp, which
+  # php/build-shared-ext.sh compiles after this runs, against the prefix still
+  # sitting in this stage. share/snmp/mibs is where the library's compiled-in
+  # MIB directory points.
+  if [ -d /opt/net-snmp/lib ]; then
+    mkdir -p /deps-stage/opt/net-snmp/lib /deps-stage/opt/net-snmp/share/snmp
+    cp -a /opt/net-snmp/lib/libnetsnmp.so.* /deps-stage/opt/net-snmp/lib/
+    cp -a /opt/net-snmp/share/snmp/mibs /deps-stage/opt/net-snmp/share/snmp/
   fi
 }
 
@@ -461,6 +498,16 @@ case "${COMPILER:-clang}" in
     # linker option (see the Dockerfile's ld-shim for why it needs gold, not
     # the CFLAGS/LDFLAGS here) so it is not repeated on this line.
     LTO_CFLAGS="-ffunction-sections -freorder-functions -freorder-blocks-and-partition"
+    # Not on arm64: aarch64 gcc keeps block partitioning off by default
+    # because its compact jump tables are label differences that cannot span
+    # .text and .text.unlikely, and forcing it on fails in the assembler
+    # (ext/standard/var_unserializer.c, 8.1/8.2, even without a profile).
+    # Measured there (gcc 16.2, gold): -freorder-functions alone already puts
+    # profiled-hot functions in .text.hot.*, and discriminator-control.sh
+    # passes both ways with it.
+    if [ "$(dpkg --print-architecture)" = arm64 ]; then
+      LTO_CFLAGS="-ffunction-sections -freorder-functions"
+    fi
     LTO_LDFLAGS="-Wl,-z,keep-text-section-prefix"
     ;;
   *) echo "php/build.sh: unsupported COMPILER=${COMPILER:-<unset>}" >&2; exit 1 ;;
@@ -574,9 +621,9 @@ assert_simd_dispatch_present() {
 
   case "$(uname -m)" in
     x86_64) ;;
-    *) SIMD_CHECK_RESULT="skipped-non-x86_64"
-       echo "note: php-src's target-attributed implementations are x86-only; nothing to check on $(uname -m)"
-       return 0 ;;
+    aarch64) assert_neon_base64_present "$src" "$@"; return 0 ;;
+    *) echo "FATAL: no SIMD assertion is defined for $(uname -m) -- add one before building here" >&2
+       exit 1 ;;
   esac
 
   names="$(bash "$HERE/simd-symbols.sh" "$src")"
@@ -633,6 +680,70 @@ assert_simd_dispatch_present() {
   SIMD_FOUND="$found"
 }
 
+# assert_neon_base64_present <php-src-dir> <unstripped-binary> [<binary>...]
+#
+# The aarch64 counterpart of the x86 check above. php-src has no
+# target-attributed code for aarch64 and nothing a configure probe can switch
+# off: from 7.4 on, ext/standard/base64.c carries NEON encode/decode loops
+# (neon_base64_encode/neon_base64_decode, plus strrev/addslashes in string.c)
+# behind a plain #if __aarch64__, always_inline'd into the exported
+# php_base64_encode[_ex]/php_base64_decode_ex. So the failure mode the x86
+# check guards cannot happen here, but the result is still asserted rather
+# than assumed: the NEON loops are the only code in those functions that uses
+# de-interleaving structure loads/stores (vld3q_u8/vst4q_u8 to encode,
+# vld4q_u8/vst3q_u8 to decode), and they must be there.
+#
+# Per symbol, never whole-binary -- vendored OpenSSL carries NEON of its own on
+# the legacy era, the same attribution problem as on x86. A function's
+# ".cold"/".part" pieces are read with it, since -freorder-blocks-and-partition
+# under a profile that never ran base64 is free to move the vector loop there.
+assert_neon_base64_present() {
+  local src="$1"; shift
+  local bin base syms parts dis enc_ok dec_ok
+
+  if ! grep -q 'neon_base64_decode' "$src/ext/standard/base64.c" 2>/dev/null; then
+    SIMD_CHECK_RESULT="none-in-this-branch"
+    echo "note: php ${PHP_VERSION} has no aarch64 NEON code in ext/standard/base64.c (added in 7.4) and no target-attributed SIMD on this arch -- nothing to check"
+    return 0
+  fi
+
+  for bin in "$@"; do
+    syms="$(nm "$bin" 2>/dev/null)" \
+      || { echo "FATAL: nm could not read $bin" >&2; exit 1; }
+    [ "$(wc -l <<<"$syms")" -gt 100 ] \
+      || { echo "FATAL: $bin has almost no symbols -- it is stripped, and the check below would" \
+                "report the NEON loops missing regardless of the truth" >&2; exit 1; }
+
+    enc_ok=0; dec_ok=0
+    for base in php_base64_encode php_base64_encode_ex; do
+      parts="$(awk -v b="$base" '$3 == b || index($3, b ".") == 1 { print $3 }' <<<"$syms" | sort -u)"
+      [ -n "$parts" ] || continue
+      dis="$(for p in $parts; do objdump -d --disassemble="$p" "$bin" 2>/dev/null || true; done)"
+      if grep -qE '[[:space:]]ld3[[:space:]]+\{v' <<<"$dis" && grep -qE '[[:space:]]st4[[:space:]]+\{v' <<<"$dis"; then
+        enc_ok=1
+      fi
+    done
+    parts="$(awk '$3 == "php_base64_decode_ex" || index($3, "php_base64_decode_ex.") == 1 { print $3 }' <<<"$syms" | sort -u)"
+    [ -n "$parts" ] || {
+      echo "FATAL: $bin defines no php_base64_decode_ex -- the anchor this check reads is gone, so" \
+           "it would measure nothing" >&2; exit 1; }
+    dis="$(for p in $parts; do objdump -d --disassemble="$p" "$bin" 2>/dev/null || true; done)"
+    if grep -qE '[[:space:]]ld4[[:space:]]+\{v' <<<"$dis" && grep -qE '[[:space:]]st3[[:space:]]+\{v' <<<"$dis"; then
+      dec_ok=1
+    fi
+
+    [ "$enc_ok" -eq 1 ] || {
+      echo "FATAL: no php_base64_encode[_ex] in $bin carries the ld3/st4 of neon_base64_encode --" \
+           "ext/standard/base64.c's aarch64 NEON loop did not reach the binary" >&2; exit 1; }
+    [ "$dec_ok" -eq 1 ] || {
+      echo "FATAL: php_base64_decode_ex in $bin does not carry the ld4/st3 of neon_base64_decode --" \
+           "ext/standard/base64.c's aarch64 NEON loop did not reach the binary" >&2; exit 1; }
+    echo "ok: $(basename "$bin") -- php_base64_encode/decode carry php-src's NEON loops (ld3/st4, ld4/st3)"
+  done
+  SIMD_CHECK_RESULT="neon: 2/2 php-src base64 functions carry NEON structure loads/stores"
+  SIMD_FOUND=2
+}
+
 # assert_php_src_hardening <unstripped-binary> [<binary>...]
 #
 # tests/assert-elf-hardening.sh asserts PIE, full RELRO and a non-executable
@@ -665,7 +776,7 @@ assert_simd_dispatch_present() {
 # One objdump pass, attributed by enclosing symbol, because thirty
 # --disassemble= invocations each re-parse the whole binary.
 assert_php_src_hardening() {
-  local bin out total endbr chk pct
+  local bin out total endbr chk bti pct
 
   for bin in "$@"; do
     out="$(objdump -d "$bin" 2>/dev/null | awk '
@@ -675,16 +786,24 @@ assert_php_src_hardening() {
         first = 1;
         next
       }
-      php && first && /\t/ { total++; if ($0 ~ /endbr64/) endbr++; first = 0 }
+      # aarch64 (-mbranch-protection=standard): a function entry is a BTI
+      # landing pad when it starts with "bti c"/"bti jc", or with paciasp/
+      # pacibsp, which BTI also accepts as one -- gcc and clang emit the PAC
+      # form instead of a separate bti on every function that saves LR
+      # (checked on the trixie gcc 14 and clang 19 under this cflags.sh output).
+      # Neither mnemonic exists on x86_64, so this counter stays 0 there.
+      php && first && /\t/ { total++; if ($0 ~ /endbr64/) endbr++; if ($0 ~ /\t(bti|paciasp|pacibsp)(\t|$)/) bti++; first = 0 }
       # The call target has to *end* at _chk. Unanchored, this matched inside
       # __stack_chk_fail, which -fstack-protector-strong emits in most
       # functions -- so the counter was measuring the stack protector and
       # stayed non-zero with _FORTIFY_SOURCE=0. Caught by the negative control,
       # which is the only reason it is not still wrong.
+      # "call" is x86_64; aarch64 spells a direct call "bl".
       php && /call/ && /__[a-z0-9_]+_chk(@plt)?>/ { chk++ }
-      END { printf "%d %d %d", total+0, endbr+0, chk+0 }')" \
+      php && /\tbl\t/ && /__[a-z0-9_]+_chk(@plt)?>/ { chk++ }
+      END { printf "%d %d %d %d", total+0, endbr+0, chk+0, bti+0 }')" \
       || { echo "FATAL: objdump could not disassemble $bin" >&2; exit 1; }
-    read -r total endbr chk <<<"$out"
+    read -r total endbr chk bti <<<"$out"
 
     # Positive control for both assertions below: if no php-src function was
     # found at all -- a stripped binary, a changed objdump format, a prefix that
@@ -713,6 +832,21 @@ assert_php_src_hardening() {
                "see this on the legacy era -- the vendored static archives supply thousands." >&2
           exit 1; }
         ;;
+      aarch64)
+        # The same assertion for -mbranch-protection=standard, and the same
+        # 50% for the same reason: the gap that matters is "most entries"
+        # against "none" -- neither trixie's gcc nor the gcc:16 image enables
+        # branch protection by default, so php-src compiled without the flag
+        # has no bti/paciasp entry at all. Like CET's IBT/SHSTK note on x86,
+        # the GNU_PROPERTY_AARCH64_FEATURE_1 BTI/PAC note is not asserted: it
+        # is the AND over every input object, gold (the gcc path's linker)
+        # does not emit it, and its absence is not a property of php-src.
+        pct=$((100 * bti / total))
+        [ "$pct" -ge 50 ] || {
+          echo "FATAL: only $bti of $total php-src functions in $bin start with a BTI landing pad" \
+               "(bti/paciasp, ${pct}%). -mbranch-protection did not reach php-src's own compiles." >&2
+          exit 1; }
+        ;;
       *) pct=-1 ;;
     esac
 
@@ -722,13 +856,16 @@ assert_php_src_hardening() {
            "vendored dependencies'." >&2
       exit 1; }
 
-    if [ "$pct" -ge 0 ]; then
+    if [ "$(uname -m)" = aarch64 ]; then
+      echo "ok: $(basename "$bin") -- $bti/$total php-src functions start with bti/paciasp (${pct}%), $chk php-src __*_chk call sites"
+    elif [ "$pct" -ge 0 ]; then
       echo "ok: $(basename "$bin") -- $endbr/$total php-src functions carry endbr64 (${pct}%), $chk php-src __*_chk call sites"
     else
       echo "ok: $(basename "$bin") -- $chk php-src __*_chk call sites (endbr64 is x86_64-only, skipped on $(uname -m))"
     fi
   done
   HARDENING_PHP_SRC="endbr64 ${endbr}/${total} php-src functions, ${chk} __*_chk call sites"
+  [ "$(uname -m)" != aarch64 ] || HARDENING_PHP_SRC="bti/paciasp ${bti}/${total} php-src functions, ${chk} __*_chk call sites"
   [ "$pct" -ge 0 ] || HARDENING_PHP_SRC="${chk} __*_chk call sites (endbr64 skipped on $(uname -m))"
 }
 

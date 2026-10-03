@@ -730,28 +730,42 @@ for rs in default laravel wordpress prestashop; do
 done
 echo "ok: curl_setopt(CURLOPT_SSLENGINE) blocked on every ruleset"
 
-# deps/patches/ext-snuffleupagus-v0.14.0/010: a nopped libxml_disable_entity_loader()
-# no longer logs (Symfony calls it on every XSD validation on php 7), but it is still
-# a nop -- entity expansion reads the same before and after a call asking to switch the
-# loader on -- and libxml_set_external_entity_loader() still logs.
+# sp.xxe_protection is deliberately not enabled in any ruleset (conf/snuffleupagus/*.rules
+# say why): its hook replaced libxml_disable_entity_loader() with a nop, which on php 7
+# also swallowed the application's own call, while protecting nothing in a request.
+# Pin both halves of that. The function is the real one again -- the real one returns the
+# previous state, so a first call to disable the loader returns false, where the nop
+# returned true -- and nothing logs under the [xxe] tag. On php 7, the application's own
+# libxml_disable_entity_loader(true) then does what it says: LIBXML_NOENT expands a
+# file:// entity until the app has called it, and not after.
 xxe_probe='<?php
+echo @libxml_disable_entity_loader(true) === false ? "LOADER_REAL\n" : "LOADER_REPLACED\n";
+@libxml_disable_entity_loader(false);
+libxml_set_external_entity_loader(function () { return null; });
+if (PHP_MAJOR_VERSION >= 8) { echo "SKIP_PHP8\n"; echo "DONE\n"; exit; }
 file_put_contents("/tmp/xxe-probe", "XXE_PROBE");
 $x = "<?xml version=\"1.0\"?><!DOCTYPE r [<!ENTITY x SYSTEM \"file:///tmp/xxe-probe\">]><r>&x;</r>";
-$d = new DOMDocument(); @$d->loadXML($x, LIBXML_NOENT); $before = $d->textContent;
-libxml_disable_entity_loader(false);
+libxml_set_external_entity_loader(null);
 $d = new DOMDocument(); @$d->loadXML($x, LIBXML_NOENT);
-echo $d->textContent === $before ? "NOP_HELD\n" : "LOADER_CHANGED\n";
-echo "BETWEEN\n";
-libxml_set_external_entity_loader(function () { return null; });
+echo strpos($d->textContent, "XXE_PROBE") !== false ? "BASELINE_EXPANDED\n" : "BASELINE_NOT_EXPANDED\n";
+libxml_disable_entity_loader(true);
+$d = new DOMDocument(); @$d->loadXML($x, LIBXML_NOENT);
+echo strpos($d->textContent, "XXE_PROBE") === false ? "APP_DISABLE_BLOCKS\n" : "APP_DISABLE_IGNORED\n";
 echo "DONE\n";'
 for rs in default laravel wordpress prestashop; do
   out=$(run_probe "$IMAGE" "$rs" "$xxe_probe") || fail "$rs.rules: the xxe probe did not run: $out"
-  echo "$out" | grep -q "NOP_HELD" || fail "$rs.rules: libxml_disable_entity_loader(false) changed entity loading: $out"
-  echo "$out" | grep -q "A call to libxml_disable_entity_loader was tried" \
-    && fail "$rs.rules: a nopped libxml_disable_entity_loader() still logs -- is the ext-snuffleupagus patch applied?: $out"
-  echo "$out" | grep -q "A call to libxml_set_external_entity_loader was tried and nopped" \
-    || fail "$rs.rules: libxml_set_external_entity_loader() no longer logs: $out"
+  echo "$out" | grep -q "DONE" || fail "$rs.rules: the xxe probe did not finish: $out"
+  echo "$out" | grep -q "LOADER_REAL" \
+    || fail "$rs.rules: libxml_disable_entity_loader() is still replaced (sp.xxe_protection on?): $out"
+  echo "$out" | grep -qiE "\[xxe\]|A call to libxml_[a-z_]+ was tried" \
+    && fail "$rs.rules: something still logs under the xxe tag: $out"
+  if ! echo "$out" | grep -q "SKIP_PHP8"; then
+    echo "$out" | grep -q "BASELINE_EXPANDED" \
+      || fail "$rs.rules: LIBXML_NOENT did not expand the file:// entity, so the check below proves nothing: $out"
+    echo "$out" | grep -q "APP_DISABLE_BLOCKS" \
+      || fail "$rs.rules: the application's libxml_disable_entity_loader(true) did not block the file:// entity: $out"
+  fi
 done
-echo "ok: libxml_disable_entity_loader() nopped without a log line, libxml_set_external_entity_loader() still logged, on every ruleset"
+echo "ok: libxml_disable_entity_loader() is the real function with no xxe log line on every ruleset; on php 7 the application's own call blocks file:// entities"
 
 echo "SNUFFLEUPAGUS TESTS PASSED"

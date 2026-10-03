@@ -28,6 +28,12 @@ VALID_SUPPORT = {"active", "security", "end-of-life"}
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def validate_baseline_only_flavors(matrix):
+    unknown = set(matrix.get("baseline_only_flavors", [])) - set(matrix["flavors"])
+    if unknown:
+        raise SystemExit(f"matrix.json: baseline_only_flavors {sorted(unknown)} are not in flavors")
+
+
 def validate_support_fields(matrix):
     """support/eol_date feed straight into published image labels
     (docker-bake.hcl) -- a typo here would silently ship a wrong one.
@@ -85,12 +91,20 @@ def corpus_tags(matrix):
 
 
 def build_targets(matrix):
-    """One entry per published image. 33 baseline + 6 v3 = 39."""
+    """One entry per published image. 44 baseline + 6 v3 = 50.
+
+    Flavors in matrix.json's baseline_only_flavors (ext-builder) get no v3
+    variant: an extension built against baseline headers loads on the v3
+    runtime, so a second one would only be a duplicate to publish.
+    """
+    baseline_only = set(matrix.get("baseline_only_flavors", []))
     tags = corpus_tags(matrix)
     targets = []
     for php, spec in matrix["versions"].items():
         for uarch in spec["uarch"]:
             for flavor in matrix["flavors"]:
+                if uarch != "baseline" and flavor in baseline_only:
+                    continue
                 targets.append({
                     "name": target_name(php, flavor, uarch),
                     "php": php,
@@ -102,6 +116,7 @@ def build_targets(matrix):
                     "pgo": "true" if spec["pgo"] else "false",
                     "icu": spec["icu"] or "",
                     "corpus": tags[php],
+                    "cache_flavor": RIDES_WITH.get(flavor, flavor),
                     "tags": tags_for(matrix, php, flavor, uarch),
                     "platforms": matrix["platforms"],
                     "support": spec["support"],
@@ -143,6 +158,59 @@ def build_bootstrap_targets(matrix):
     return targets
 
 
+# A flavor listed here is built in the SAME bake invocation (so the same CI
+# job and the same BuildKit session) as the sibling flavor it maps to, for the
+# same php/uarch. ext-builder is `FROM cli` in the Dockerfile and copies out of
+# the same php-build stage, but every CI leg keeps its own registry cache scope
+# and runner, so a leg of its own would recompile PHP and re-run PGO from
+# scratch. Riding with cli shares that one php-build.
+RIDES_WITH = {"ext-builder": "cli"}
+
+PR_SUBSET = {
+    "php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm", "php-8_5-cli-builder",
+    "php-8_5-cli", "php-8_5-ext-builder",
+}
+
+
+def build_legs(targets):
+    """Group image targets into CI build legs: one bake invocation each.
+
+    A leg is the host target's own entry plus, for hosts a RIDES_WITH flavor
+    attaches to, `rider_name` / `rider_flavor` / `rider_tag` (all "" when
+    there is none -- a flat string every matrix expression can read without a
+    null check) and `bake`, the space-separated bake target names to build
+    together. Riders get no leg of their own: every target is either a leg or
+    exactly one leg's rider, which is what keeps one php-build per leg while
+    the publish/merge side still sees every target separately
+    (`--github targets` is unchanged).
+    """
+    by_key = {(t["php"], t["uarch"], t["flavor"]): t for t in targets}
+    riders = {}
+    for t in targets:
+        host_flavor = RIDES_WITH.get(t["flavor"])
+        if host_flavor is None:
+            continue
+        host = (t["php"], t["uarch"], host_flavor)
+        if host not in by_key:
+            raise SystemExit(
+                f"{t['name']} rides with {host_flavor}, but there is no {host_flavor} target "
+                f"for php {t['php']} ({t['uarch']}) in this selection"
+            )
+        riders[host] = t
+    legs = []
+    for t in targets:
+        if t["flavor"] in RIDES_WITH:
+            continue
+        rider = riders.get((t["php"], t["uarch"], t["flavor"]))
+        leg = dict(t)
+        leg["rider_name"] = rider["name"] if rider else ""
+        leg["rider_flavor"] = rider["flavor"] if rider else ""
+        leg["rider_tag"] = rider["tags"][0] if rider else ""
+        leg["bake"] = " ".join([t["name"]] + ([rider["name"]] if rider else []))
+        legs.append(leg)
+    return legs
+
+
 def build_compile_jobs(matrix):
     """One entry per distinct compile: version x uarch x arch. 26 total."""
     jobs = []
@@ -177,20 +245,23 @@ def render(matrix):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true", help="exit 1 if generated file is stale")
-    parser.add_argument("--github", choices=["targets", "compile", "pr"], help="print a GitHub Actions matrix")
+    parser.add_argument("--github", choices=["targets", "build", "compile", "pr"], help="print a GitHub Actions matrix")
     args = parser.parse_args()
     matrix = load()
     validate_support_fields(matrix)
+    validate_baseline_only_flavors(matrix)
 
     if args.github == "targets":
         print(json.dumps({"include": build_targets(matrix)}))
+        return 0
+    if args.github == "build":
+        print(json.dumps({"include": build_legs(build_targets(matrix))}))
         return 0
     if args.github == "compile":
         print(json.dumps({"include": build_compile_jobs(matrix)}))
         return 0
     if args.github == "pr":
-        subset = {"php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm", "php-8_5-cli-builder"}
-        include = [t for t in build_targets(matrix) if t["name"] in subset]
+        include = build_legs([t for t in build_targets(matrix) if t["name"] in PR_SUBSET])
         print(json.dumps({"include": include}))
         return 0
 

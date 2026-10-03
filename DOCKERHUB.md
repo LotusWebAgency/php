@@ -46,10 +46,10 @@ services:
 
 | Tag shape | Example | Meaning |
 |---|---|---|
-| `{version}-{flavor}` | `8.5-fpm` | Every published image (`fpm`, `cli`, `cli-builder`). |
-| `{version}-{flavor}-v3` | `8.4-fpm-v3` | `x86-64-v3` / `armv8.2-a+crypto`, 8.4 and 8.5 only. Older CPUs can't run it. |
+| `{version}-{flavor}` | `8.5-fpm` | Every published image (`fpm`, `cli`, `cli-builder`, `ext-builder`). |
+| `{version}-{flavor}-v3` | `8.4-fpm-v3` | `x86-64-v3` / `armv9-a`, 8.4 and 8.5 only, not for `ext-builder`. Older CPUs can't run it — on arm64 that means anything before Neoverse N2/V2 (Graviton4 yes, Graviton2/3 no). Not for Apple silicon either: M4–M6 have no SVE outside SME streaming mode, so `-v3` dies with SIGILL in Docker Desktop. Use the baseline tag on a Mac. |
 | `{version}` and `latest` | `8.5`, `latest` | The default version's `fpm` image only. |
-| `{release}-{flavor}[-v3]` | `8.5.11-fpm`, `8.4.26-cli-v3` | Full patch version, pinned. Read from the built image (`PHP_VERSION`) and required to match `matrix.json`, so the tag can't claim a version the image doesn't contain. |
+| `{release}-{flavor}[-v3]` | `8.5.11-fpm`, `8.5.11-ext-builder`, `8.4.26-cli-v3` | Full patch version, pinned. Read from the built image (`PHP_VERSION`) and required to match `matrix.json`, so the tag can't claim a version the image doesn't contain. |
 
 Version tags are read out of the built image after tests and the Trivy gate,
 never out of the Dockerfile. `linux/amd64` and `linux/arm64`, SBOM, max-mode
@@ -61,7 +61,8 @@ build provenance and a keyless Cosign signature on every published digest.
 |---|---|
 | `fpm` | PHP-FPM on `:9000`, behind nginx / Angie / any FastCGI-speaking proxy. `STOPSIGNAL SIGQUIT`, a FastCGI-native `HEALTHCHECK`. |
 | `cli` | `php -a` by default — one-shot scripts, cron jobs, queue workers. |
-| `cli-builder` | `cli` plus git, Node.js/npm, a build toolchain and Composer. Meant for a build stage, not for runtime. |
+| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, the MariaDB client, Node.js 24 LTS with npm/corepack, semantic-release and Composer. No compiler. Meant for a build stage, not for runtime. |
+| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, libc6-dev and the PHP headers with `phpize`/`php-config`, for compiling your own extension and copying the `.so` into `fpm`/`cli` of the same version — see [Adding your own extension](#adding-your-own-extension). Runs as root; no Composer, no Node.js. Meant for a build stage, not for runtime. |
 
 ## Quick start
 
@@ -97,22 +98,85 @@ set-but-empty value, refuses to start with a named reason.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PHP_MEMORY_LIMIT` | fpm `256M` · cli `512M` · cli-builder `-1` | `memory_limit`; unset keeps the flavor's baked value. |
-| `PHP_MAX_EXECUTION_TIME` / `PHP_MAX_INPUT_TIME` / `PHP_MAX_INPUT_VARS` | `300` (cli, cli-builder: `0`) / `120` / `10000` | Execution limits. |
+| `PHP_MEMORY_LIMIT` | fpm `256M` · cli, ext-builder `512M` · cli-builder `-1` | `memory_limit`; unset keeps the flavor's baked value. |
+| `PHP_MAX_EXECUTION_TIME` / `PHP_MAX_INPUT_TIME` / `PHP_MAX_INPUT_VARS` | `300` (cli, cli-builder, ext-builder: `0`) / `120` / `10000` | Execution limits. |
 | `PHP_UPLOAD_MAX_FILESIZE` / `PHP_POST_MAX_SIZE` | `128M` / `128M` | Upload limits. |
 | `PHP_TIMEZONE` | _(unset)_ | `date.timezone`. |
 | `PHP_DISPLAY_ERRORS` | `Off` | Errors always go to stderr regardless. |
 | `PHP_DISABLE_FUNCTIONS` | `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec` | **Adds to** the baked list, never replaces it. `proc_open` is deliberately never disabled — Composer and `symfony/process` need it. |
 | `PHP_OPCACHE_ENABLE` / `_MEMORY` / `_VALIDATE_TIMESTAMPS` / `_JIT` | `1` / autotuned 64–512 MB / `1` / `tracing` | OPcache tuning. |
 | `PHP_EXT_ENABLE` | _(unset)_ | Comma-separated shared extensions to turn on, e.g. `ldap,uuid` — see below. |
-| `PHP_SNUFFLEUPAGUS` | _(unset)_ | `default` / `wordpress` / `prestashop` / `laravel` — loads that virtual-patching ruleset. |
+| `PHP_SNUFFLEUPAGUS` | _(unset)_ | `default` / `wordpress` / `prestashop` / `laravel`, or the name of a custom ruleset you mounted — loads that virtual-patching ruleset. |
 | `PHP_CHMOD_SHIM` | `0` | `true` enables the PrestaShop `chmod(0)` cache-bug workaround shim. |
 | `PHP_FPM_PM` / `_MAX_REQUESTS` / `_LISTEN` / `_STATUS_PATH` / `_ACCESS_LOG` / `_SLOWLOG_TIMEOUT` | `dynamic` / `1000` / `0.0.0.0:9000` / `/fpm-status` / `/proc/self/fd/2` / `10s` | `fpm` flavor pool config. |
 | `PHP_FPM_MAX_CHILDREN` (+ `_START_SERVERS` / `_MIN_SPARE` / `_MAX_SPARE`) | autotuned from the container's memory limit | Pool sizing — any one you set is honored exactly; the rest move to stay consistent. |
 
-**Read-only rootfs is supported**: `docker run --read-only --tmpfs /tmp …`
-still autotunes the pool and applies `PHP_EXT_ENABLE`/ini overrides, falling
-back to a private, mode-0700 directory under `/tmp` where needed.
+### Read-only root filesystem
+
+`fpm`, `cli` and `cli-builder` run with a read-only root filesystem and one
+writable mount, `/tmp`:
+
+```sh
+docker run --read-only --tmpfs /tmp:size=256m lotuswebagency/php:8.5-fpm
+```
+
+```yaml
+services:
+  php:
+    image: lotuswebagency/php:8.5-fpm
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    environment:
+      PHP_MEMORY_LIMIT: 512M
+      PHP_EXT_ENABLE: ldap,uuid
+```
+
+In Kubernetes the same shape should map to `readOnlyRootFilesystem: true` plus an
+`emptyDir` mounted at `/tmp` (not exercised by our tests).
+
+`/tmp` is the only path the image writes at runtime (checked with `docker
+diff` after a full workload, and by `tests/test-readonly.sh` on every image):
+
+- PHP sessions (`session.save_path` defaults to `/tmp`) and upload temp files
+  (`upload_tmp_dir` defaults to `/tmp`). Size the tmpfs as your largest upload
+  (`upload_max_filesize` is 128M) times the number of concurrent uploads, plus
+  the session files. A tmpfs counts against the container's memory limit (an
+  `emptyDir` with `medium: Memory` does too), so it has to fit inside that
+  budget, not on top of it.
+- The env-driven ini: when `conf.d` is not writable the entrypoint generates
+  it in a private, mode-0700, `mktemp`-named directory under `/tmp`, so
+  `PHP_MEMORY_LIMIT`, the opcache variables, `PHP_EXT_ENABLE` and
+  `PHP_SNUFFLEUPAGUS` apply exactly as on a writable rootfs, and the FPM pool is
+  still autotuned.
+- `sys_get_temp_dir()`, `tempnam()`, Xdebug output and, in `cli-builder`, the
+  Composer, npm and Corepack caches (`COMPOSER_HOME`, `npm_config_cache`,
+  `COREPACK_HOME` already point into `/tmp`).
+
+Nothing else needs a mount. FPM logs to stderr and writes no pid file; opcache
+and the JIT live in shared memory; on PHP 7.x opcache's lock file goes to
+`/dev/shm`, which Docker and Kubernetes both provide writable; net-snmp's
+`/var/lib/snmp` is pre-created and stays untouched. For `fpm` and `cli` the tmpfs
+may keep Docker's default `noexec`: nothing runs from `/tmp`. `cli-builder` is
+the exception: `npx <package>` unpacks the package into `/tmp/npm/_npx` and runs
+it from there, which fails with `EACCES` under `noexec`. Mount it executable,
+`--tmpfs /tmp:exec,size=256m` (compose: `/tmp:exec,size=256m`).
+
+What does not work read-only, and how it fails:
+
+- **No writable `/tmp`.** `PHP_EXT_ENABLE` and `PHP_SNUFFLEUPAGUS` refuse to
+  start the container rather than run without the extension or the ruleset.
+  The other `PHP_*` ini variables are ignored with a warning that names the
+  variable. Sessions and uploads fail with `Read-only file system` in the
+  error log, not silently.
+- **Your application's own writes** (PrestaShop's `var/cache`, Laravel's
+  `storage`, WordPress uploads, `cli-builder`'s project directory for
+  `composer install` / `npm install`) need a volume or tmpfs of their own.
+- **A FastCGI unix socket** needs a writable directory: leave `PHP_FPM_LISTEN`
+  on its TCP default or put the socket on a mount you provide.
+- **`docker exec <container> php …`** does not see the env-driven ini (true
+  on a writable rootfs too); use `docker exec <container> docker-php-entrypoint
+  php …` to apply it.
 
 ## Extensions
 
@@ -127,6 +191,50 @@ soap, sodium, zip, and more — full list in the source repo's README).
 `uuid`, `xdebug` (always available), `xmlrpc` (removed from core in 8.0),
 `yaml`.
 
+### Adding your own extension
+
+No `pecl`, `pear` or `docker-php-ext-install` in the images. Compile in an
+`ext-builder` stage (`cli` plus gcc, g++, make, autoconf, pkg-config, libc6-dev,
+the PHP headers, `phpize` and `php-config`) and copy only the `.so` into `fpm`
+or `cli`:
+
+```dockerfile
+FROM lotuswebagency/php:8.5-ext-builder AS ext
+ARG MYEXT_VERSION=1.2.3
+ARG MYEXT_SHA256=<sha256 of the tarball>
+RUN apt-get update && apt-get install -y --no-install-recommends libmyext-dev
+RUN set -eux; \
+    curl -fsSLo /tmp/myext.tgz "https://example.com/myext-${MYEXT_VERSION}.tgz"; \
+    echo "${MYEXT_SHA256}  /tmp/myext.tgz" | sha256sum -c -; \
+    mkdir /src; \
+    tar -xzf /tmp/myext.tgz -C /src --strip-components=1; \
+    cd /src; \
+    phpize; \
+    ./configure; \
+    make -j"$(nproc)"; \
+    make install INSTALL_ROOT=/out
+
+FROM lotuswebagency/php:8.5-fpm
+COPY --from=ext /out/ /
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libmyext1 \
+    && rm -rf /var/lib/apt/lists/*
+USER www-data
+ENV PHP_EXT_ENABLE=myext
+```
+
+- Use the **same PHP version tag** (ideally the same digest) for `ext-builder`
+  and the runtime stage: the extension directory carries the Zend module API
+  number, and an extension built for one PHP minor does not load in another.
+- Fetch a source tarball and verify its checksum; there is no `pecl install`.
+- Runtime libraries must be `apt-get install`ed in the final stage **as root**
+  (the images run as UID 33) — the shared libraries, not the `-dev` packages.
+- `PHP_EXT_ENABLE` works for any `.so` in the extension directory; for a
+  `zend_extension` other than xdebug/opcache/snuffleupagus, drop a
+  `zend_extension=myext.so` ini file into `/usr/local/etc/php/conf.d/`.
+- `ext-builder` runs as root, has no Composer or Node.js, and has no `-v3`
+  variant (an extension built against baseline headers loads in `-v3` too).
+
 ## Hardening
 
 Measured on the shipped ELF binaries, not just asserted as compiler intent:
@@ -139,6 +247,13 @@ stripped.
 **Snuffleupagus** virtual patching ships compiled but never loaded —
 `PHP_SNUFFLEUPAGUS=prestashop` (or `default`/`wordpress`/`laravel`) turns
 it on.
+To use your own rules, mount
+`/usr/local/etc/php/snuffleupagus/<name>.rules` read-only and set
+`PHP_SNUFFLEUPAGUS=<name>` (lowercase letters, digits, `-` and `_`, starting
+with a letter or digit; anything else, including a path, is refused). Start
+from a copy of `default.rules`. The XXE feature (`sp.xxe_protection`) is not
+enabled: it does not hold across requests, and on PHP 7 it would nop your own
+`libxml_disable_entity_loader(true)`.
 
 ## Measured performance
 
@@ -189,11 +304,56 @@ cosign verify \
   lotuswebagency/php:8.5-fpm
 ```
 
-A pull request builds and tests without publishing; a Trivy gate fails the
+Two more keyless attestations, from the same workflow identity, sit on the
+platform images and on the multi-arch tag: signed test results on every one of
+them, and OpenVEX where an accepted finding applies. The test-result one is
+attached only after the smoke tests and the Trivy gate passed against the pushed
+digest, and records the digest, PHP version, flavor, uarch, inputs hash, git
+commit, workflow run URL, and per architecture the smoke verdict with every check
+that passed and the Trivy verdict (taken from the Trivy step's own outcome, with
+the scanner version and database date when the runner could read them). The
+OpenVEX one carries the findings we accepted instead of fixing, each with its
+reason and a re-review date (the source is [`vex/php.openvex.json`](https://github.com/LotusWebAgency/php/blob/main/vex/php.openvex.json)). Only an
+image a statement applies to has one: today that is `cli-builder`, whose bundled
+npm ships a `brace-expansion` and an `undici` with no fixed release yet.
+
+```sh
+cosign verify-attestation --type openvex \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity 'https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main' \
+  lotuswebagency/php:8.5-cli-builder | jq -r .payload | head -n1 | base64 -d | jq .predicate
+
+cosign verify-attestation --type https://github.com/LotusWebAgency/php/attestation/test-result/v1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity 'https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main' \
+  lotuswebagency/php:8.5-fpm | jq -r .payload | head -n1 | base64 -d | jq .predicate
+```
+
+`cosign verify-attestation` prints one line per attestation on the digest, and a
+re-run of the release adds another rather than replacing the first, which is why
+the commands above take `head -n1`. On a tag it checks the attestation on the
+manifest list, which covers both architectures. To check one platform's own attestation,
+resolve its digest first and verify `lotuswebagency/php@sha256:...` instead:
+
+```sh
+docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --raw \
+  | jq -r '.manifests[] | select(.platform.architecture == "arm64") | .digest'
+```
+
+Trivy can in principle apply the VEX document too
+(`trivy image --vex oci lotuswebagency/php:8.5-cli-builder`); that is expected to
+work against these attestations and will be verified after the first release.
+Trivy only suppresses `not_affected` and `fixed` statements, and ours are
+`affected` (accepted, no upstream fix, not claimed unreachable), so the findings
+still show. The CI gate honors them through a `.trivyignore` generated from the
+same file, which expires on the same date.
+
+A pull request or a push to `develop` builds and tests without publishing to Docker Hub; a Trivy gate fails the
 build on any fixable CRITICAL or HIGH finding before anything reaches a
-registry. Trivy scans the Debian package layer -- it can't see the statically
-linked libraries (OpenSSL, ICU and similar) vendored into the 7.0–8.0 builds,
-which are tracked through `deps/versions.lock`'s pins instead.
+registry. Trivy scans the Debian package layer -- it can't see the libraries
+built from source and vendored under `/opt`: ImageMagick and net-snmp in every
+build, plus the vendored OpenSSL and ICU (static) and curl (7.0–7.2) of the
+7.0–8.0 builds. Those are tracked through `deps/versions.lock`'s pins instead.
 [SECURITY.md](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md)
 has the reporting channel.
 

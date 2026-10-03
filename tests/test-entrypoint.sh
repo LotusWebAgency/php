@@ -252,6 +252,46 @@ set -e
 echo "$out" | grep -qi "no such snuffleupagus ruleset" || fail "unknown ruleset rejected for the wrong reason: $out"
 echo "ok: an unknown ruleset name still fails loudly"
 
+# 12b. PHP_SNUFFLEUPAGUS is a bare ruleset name, never a path: '../x' used to
+# resolve outside /usr/local/etc/php/snuffleupagus/. Refused before anything is
+# written, on every image, module or not. The empty value is refused by the
+# generic set-but-empty loop (see below), repeated here so the whole contract
+# sits in one place.
+for v in '../etc/passwd' 'a/b' 'UPPER' '-x' '_x' 'a b' 'a.b'; do
+  set +e
+  out=$(docker run --rm -e "PHP_SNUFFLEUPAGUS=${v}" "$IMAGE" php -v 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "PHP_SNUFFLEUPAGUS='${v}' was not rejected"
+  echo "$out" | grep -qF "refusing PHP_SNUFFLEUPAGUS=${v}: a ruleset name is lowercase letters" \
+    || fail "PHP_SNUFFLEUPAGUS='${v}' rejected for the wrong reason: $out"
+done
+set +e
+out=$(docker run --rm -e PHP_SNUFFLEUPAGUS= "$IMAGE" php -v 2>&1 >/dev/null)
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "PHP_SNUFFLEUPAGUS= (set but empty) was accepted"
+echo "$out" | grep -q "refusing PHP_SNUFFLEUPAGUS: set but empty" \
+  || fail "PHP_SNUFFLEUPAGUS= rejected for the wrong reason: $out"
+echo "ok: a PHP_SNUFFLEUPAGUS that is not a bare lowercase name is refused"
+
+# 12c. A custom ruleset: a file mounted read-only into the ruleset directory,
+# selected by name. Needs the module, so images without it skip.
+if docker run --rm --entrypoint sh "$IMAGE" -c 'test -f "$(php -r "echo ini_get(\"extension_dir\");")/snuffleupagus.so"'; then
+  sp_custom_dir=$(mktemp -d)
+  chmod 755 "$sp_custom_dir"
+  printf '%s\n' 'sp.harden_random.enable();' > "${sp_custom_dir}/my-site_2.rules"
+  chmod 644 "${sp_custom_dir}/my-site_2.rules"
+  out=$(echo '<?php echo "loaded:", ini_get("sp.configuration_file");' \
+    | docker run --rm -i -v "${sp_custom_dir}/my-site_2.rules:/usr/local/etc/php/snuffleupagus/my-site_2.rules:ro" \
+        -e PHP_SNUFFLEUPAGUS=my-site_2 "$IMAGE" php 2>&1) \
+    || { rm -rf "$sp_custom_dir"; fail "a mounted custom ruleset did not load: $out"; }
+  rm -rf "$sp_custom_dir"
+  echo "$out" | grep -q "loaded:/usr/local/etc/php/snuffleupagus/my-site_2.rules" \
+    || fail "the custom ruleset is not the one snuffleupagus was pointed at: $out"
+  echo "ok: a custom ruleset mounted into the ruleset directory loads by name"
+fi
+
 # 13. PHP_CHMOD_SHIM now succeeds and actually toggles LD_PRELOAD (task 13).
 # Behavioural proof that the shim changes chmod() behaviour -- on vs off --
 # lives in tests/test-fpm-health.sh; this only proves the entrypoint branch

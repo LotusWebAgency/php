@@ -34,6 +34,23 @@ case "$(uname -m)" in
   aarch64|arm64) NATIVE_PLATFORM=linux/arm64 ;;
   *) echo "FATAL: unsupported host architecture '$(uname -m)' for the bootstrap build" >&2; exit 1 ;;
 esac
+# BUILD_CORPUS_PLATFORM=linux/arm64 on an amd64 host builds the other arch's
+# bootstrap and corpus under QEMU binfmt instead -- slow (several times a
+# native build), but the only way to exercise an arm64 tier without an arm64
+# machine. Local tags carry no arch, so every "already built" shortcut below
+# also requires the existing image to be of the wanted arch; otherwise an
+# amd64 image left over from a native run would be reused for arm64.
+PLATFORM="${BUILD_CORPUS_PLATFORM:-$NATIVE_PLATFORM}"
+case "$PLATFORM" in
+  linux/amd64|linux/arm64) ;;
+  *) echo "FATAL: BUILD_CORPUS_PLATFORM='$PLATFORM' -- expected linux/amd64 or linux/arm64" >&2; exit 1 ;;
+esac
+[ "$PLATFORM" = "$NATIVE_PLATFORM" ] \
+  || echo "note: building for $PLATFORM on a $NATIVE_PLATFORM host -- emulated, expect it to be slow"
+WANT_ARCH="${PLATFORM#linux/}"
+have_image() {  # have_image <ref>: exists locally AND is of the wanted arch
+  [ "$(docker image inspect --format '{{.Architecture}}' "$1" 2>/dev/null || true)" = "$WANT_ARCH" ]
+}
 
 # CF-47/T15-P, same instrument tests/build-all.sh and tests/smoke.sh already
 # use: a content hash of the build-context inputs, baked in as a label, so a
@@ -85,15 +102,15 @@ while IFS=$'\t' read -r tier _release builder tag _versions; do
   # prefers the release image over the bootstrap one.
   bootstrap_tag="lotuswebagency/php:${tier}-cli-builder-bootstrap"
   bootstrap_target="php-${tier//./_}-cli-builder-bootstrap"
-  if docker image inspect "$builder" >/dev/null 2>&1; then
+  if have_image "$builder"; then
     : # release cli-builder already built -- use it, nothing to do here
-  elif docker image inspect "$bootstrap_tag" >/dev/null 2>&1; then
+  elif have_image "$bootstrap_tag"; then
     echo "=== tier $tier: $builder not built yet -- using existing bootstrap $bootstrap_tag"
     builder="$bootstrap_tag"
   else
     echo "=== tier $tier: neither $builder nor $bootstrap_tag exist -- bootstrapping $bootstrap_tag"
     if ! (cd "$ROOT" && docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$bootstrap_target" \
-           --set '*.platform='"$NATIVE_PLATFORM" --load); then
+           --set '*.platform='"$PLATFORM" --load); then
       echo "=== tier $tier -> $tag: FAIL -- bootstrap build of $bootstrap_tag failed" >&2
       results+=("$tier"$'\t'"FAIL"$'\t'"bootstrap build of $bootstrap_tag failed")
       continue
@@ -103,14 +120,14 @@ while IFS=$'\t' read -r tier _release builder tag _versions; do
 
   # Resumable: skip a tier whose corpus image already matches this tree.
   label_hash=$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}' "$tag" 2>/dev/null || true)
-  if [ -n "$label_hash" ] && [ "$label_hash" != "<no value>" ] && [ "$label_hash" = "$INPUTS_HASH" ]; then
+  if [ -n "$label_hash" ] && [ "$label_hash" != "<no value>" ] && [ "$label_hash" = "$INPUTS_HASH" ] && have_image "$tag"; then
     echo "=== tier $tier -> $tag: up to date (inputs-hash matches), skipping"
     results+=("$tier"$'\t'"skip"$'\t'"up to date")
     continue
   fi
 
   echo "=== tier $tier -> $tag (from $builder)"
-  if docker build "${NETWORK_ARGS[@]}" -f "${ROOT}/php/pgo/Dockerfile.corpus" \
+  if docker build "${NETWORK_ARGS[@]}" --platform "$PLATFORM" -f "${ROOT}/php/pgo/Dockerfile.corpus" \
        --build-arg "BUILDER_IMAGE=${builder}" --build-arg "TIER=${tier}" \
        --build-arg "INPUTS_HASH=${INPUTS_HASH}" \
        -t "$tag" "${ROOT}/php/pgo"; then

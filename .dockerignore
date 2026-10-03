@@ -6,5 +6,7 @@
 docs
 spike
 tests
+ci
+vex
 *.md
 LICENSE

@@ -5,7 +5,7 @@
 #
 # <php-version> is a matrix.json key ("8.5", "7.0", ...); every era-specific
 # expectation below (release string, era, pgo, icu) is derived from it, never
-# a literal. <flavor> is fpm, cli or cli-builder -- also asserted against,
+# a literal. <flavor> is fpm, cli, cli-builder or ext-builder -- also asserted against,
 # never inferred from the image tag, which a caller could always get wrong or
 # rename.
 set -euo pipefail
@@ -13,8 +13,8 @@ IMAGE="${1:?usage: smoke.sh <image> <php-version> <flavor>}"
 EXPECT="${2:?usage: smoke.sh <image> <php-version> <flavor>}"
 FLAVOR="${3:?usage: smoke.sh <image> <php-version> <flavor>}"
 case "$FLAVOR" in
-  fpm|cli|cli-builder) ;;
-  *) echo "FAIL: flavor '$FLAVOR' is not one of fpm, cli, cli-builder"; exit 1 ;;
+  fpm|cli|cli-builder|ext-builder) ;;
+  *) echo "FAIL: flavor '$FLAVOR' is not one of fpm, cli, cli-builder, ext-builder"; exit 1 ;;
 esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -105,24 +105,45 @@ else
   echo "ok: com.lotuswebagency.compiler=$VM_COMPILER matches matrix.json"
 fi
 
-# gcc's HYBRID VM (global register variables) and clang's TAILCALL VM
-# (preserve_none + musttail, 8.5+ only -- see php/build-canaries.sh's
-# assert_preserve_none_canary) are the only two ways off the plain CALL VM
-# this toolchain matrix produces, so the expectation is a function of
-# VM_COMPILER (and, for clang, of whether this version is new enough for
-# TAILCALL) rather than a per-version literal.
+# The expectation is a function of VM_COMPILER, the PHP version and the image's
+# architecture, mirroring what Zend/zend_vm_opcodes.h derives at build time:
+#   - 7.0 and 7.1 define ZEND_VM_KIND as ZEND_VM_KIND_CALL unconditionally, on
+#     every compiler and arch. gcc still pins execute_data/opline in global
+#     registers there (HAVE_GCC_GLOBAL_REGS), but that is the CALL VM with
+#     registers, not HYBRID.
+#   - gcc from 7.2 gets the HYBRID VM (global register variables), except on
+#     arm64 below 7.4, where Zend/Zend.m4's probe only knows __aarch64__ from
+#     7.4 on -- 7.2/7.3 run the CALL VM there.
+#   - clang has no usable global register variables: TAILCALL
+#     (preserve_none + musttail, 8.5+ only -- see php/build-canaries.sh's
+#     assert_preserve_none_canary), the plain CALL VM before that.
+#
+# The image's own architecture, not the host's: an arm64 image smoke-tested
+# under emulation on an amd64 host is still an arm64 build.
+IMAGE_ARCH=$(docker image inspect --format '{{.Architecture}}' "$IMAGE")
+version_lt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]; }
 case "$VM_COMPILER" in
   gcc)
-    EXPECTED_VM_KIND=4
-    EXPECTED_VM_NAME=HYBRID
-    ;;
-  clang)
-    if [ "$(printf '8.5\n%s\n' "$EXPECT" | sort -V | head -1)" = "8.5" ]; then
-      EXPECTED_VM_KIND=5
-      EXPECTED_VM_NAME=TAILCALL
-    else
+    if version_lt "$EXPECT" 7.2; then
       EXPECTED_VM_KIND=1
       EXPECTED_VM_NAME=CALL
+      echo "note: PHP $EXPECT defines ZEND_VM_KIND as CALL unconditionally (HYBRID arrived in 7.2), expecting the CALL VM"
+    elif [ "$IMAGE_ARCH" = arm64 ] && version_lt "$EXPECT" 7.4; then
+      EXPECTED_VM_KIND=1
+      EXPECTED_VM_NAME=CALL
+      echo "note: arm64 gcc build of PHP $EXPECT -- no aarch64 global registers before 7.4, expecting the CALL VM"
+    else
+      EXPECTED_VM_KIND=4
+      EXPECTED_VM_NAME=HYBRID
+    fi
+    ;;
+  clang)
+    if version_lt "$EXPECT" 8.5; then
+      EXPECTED_VM_KIND=1
+      EXPECTED_VM_NAME=CALL
+    else
+      EXPECTED_VM_KIND=5
+      EXPECTED_VM_NAME=TAILCALL
     fi
     ;;
   *)
@@ -136,23 +157,39 @@ ver=$(docker run --rm "$IMAGE" php -r 'echo PHP_VERSION;')
 [ "$ver" = "$RELEASE" ] || { echo "FAIL: expected exactly $RELEASE (matrix.json), got $ver"; exit 1; }
 echo "ok: php $ver"
 
+# ext-builder is a build stage and runs as root (make install writes into the
+# extension dir); every other flavor drops to www-data.
+want_uid=33
+[ "$FLAVOR" != ext-builder ] || want_uid=0
 uid=$(docker run --rm "$IMAGE" id -u)
-[[ "$uid" == "33" ]] || { echo "FAIL: running as uid $uid, expected 33"; exit 1; }
-echo "ok: uid 33"
+[[ "$uid" == "$want_uid" ]] || { echo "FAIL: running as uid $uid, expected $want_uid"; exit 1; }
+echo "ok: uid $want_uid"
 
 # CF-12: uncompressed image size against spec section 13's per-flavor budget.
-# "Uncompressed" and which docker command actually reports it (`docker image
-# inspect --format '{{.Size}}'`, not `docker images`' compressed CONTENT SIZE
-# column) is documented once, in tests/image-size.sh -- not re-derived here,
-# so the two scripts can't drift on what "size" means. task 21 measured every
-# flavor well over budget (up to ~2x for cli-builder). Report-only until the
-# image contents are final: budgets are set once, against the finished images,
-# and this becomes a hard failure then -- not raised now to paper over the
-# miss, and not enforced now against images whose contents are still moving.
-# tests/image-size.sh --breakdown names where the bytes are going.
-declare -A SIZE_BUDGET_MB=( [fpm]=280 [cli]=270 [cli-builder]=550 )
+# The measurement (the sum of `docker history` layer sizes -- NOT `docker image
+# inspect .Size`, which under the containerd store adds the compressed blobs
+# and overstates by 100-200 MB) lives once, in tests/image-size.sh, so the two
+# scripts can't drift on what "size" means.
+#
+# Budgets are the measured (or, where marked, inferred) real size (decimal MB,
+# image-size.sh) + ~3%, one number per flavor, so each covers the largest era
+# built. Measured on 2026-10-03 after the net-snmp vendoring and the payload
+# split (amd64): fpm 8.2 249.3 (gcc), fpm 7.4 271.0 (gcc, legacy era), cli-builder
+# 8.2 627.2 (gcc), cli 8.5 236.7 (clang). Those builds still deleted
+# mariadb-check and my_print_defaults, which runtime-base now keeps (9.9 MB,
+# measured), so 9.9 is added to each. ext-builder 8.2 is measured after that:
+# 569.4. Not measured, inferred from the differences between flavors (fpm - cli
+# = 21.1, legacy - modern = 21.7 on fpm): cli 8.2 = 249.3 - 21.1 = 228.2, legacy
+# cli = 249.9; legacy cli-builder = 627.2 + 21.7 = 648.9; legacy ext-builder =
+# 569.4 + 21.7 = 591.1. Each budget is the largest of its figures, + 9.9 where
+# the build predates the revert, * 1.03: fpm 280.9 -> 289.3, cli 259.8 -> 267.6,
+# cli-builder 658.8 -> 678.6, ext-builder 591.1 -> 608.8. 8.5 (clang) cli is
+# measured 8.5 MB above the inferred 8.2 gcc one, inside the legacy margin.
+# Report-only until every version has a measured size to budget against.
+# tests/image-size.sh --breakdown names where the bytes are.
+declare -A SIZE_BUDGET_MB=( [fpm]=290 [cli]=268 [cli-builder]=679 [ext-builder]=609 )
 budget_mb="${SIZE_BUDGET_MB[$FLAVOR]}"
-actual_bytes=$(docker image inspect "$IMAGE" --format '{{.Size}}')
+actual_bytes=$(bash "$HERE/image-size.sh" --bytes "$IMAGE")
 budget_bytes=$(( budget_mb * 1000 * 1000 ))
 actual_mb=$(awk -v b="$actual_bytes" 'BEGIN { printf "%.1f", b / 1000 / 1000 }')
 if [ "$actual_bytes" -le "$budget_bytes" ]; then
@@ -270,10 +307,11 @@ rm -f "$tmp_php"
 # NEEDED at all, direct or transitive. A shared *extension* was never held to
 # that same bar in practice, and measurement (L-1) showed why the original
 # "any NEEDED at all" version of this check was the wrong instrument: on
-# 7.4-8.0, event.so and snmp.so directly NEED libssl.so.3/libcrypto.so.3 --
-# Debian's supported, dynamically-patched OpenSSL 3, pulled in by libevent
-# and libsnmp -- and bind to it cleanly (LD_DEBUG=bindings confirmed
-# SSL_CTX_new et al. resolve to /lib/.../libssl.so.3, never to php's static
+# 7.4-8.0, event.so NEEDs libssl.so.3/libcrypto.so.3 directly, and snmp.so
+# reaches them too (directly on clang builds, transitively through the vendored
+# libnetsnmp on gcc builds) -- Debian's supported, dynamically-patched
+# OpenSSL 3, which libevent and libnetsnmp link -- and bind to it cleanly
+# (LD_DEBUG=bindings confirmed SSL_CTX_new et al. resolve to /lib/.../libssl.so.3, never to php's static
 # 1.1). That is two independent OpenSSL stacks in one process, not the EOL
 # vendored one escaping. CF-5's actual purpose is narrower: the legacy era's
 # *EOL, vendored* OpenSSL (1.1.1, built --no-shared) must never ship as a
@@ -345,7 +383,7 @@ echo "ok: CF-9 -- inspected the php binary and $n_ext_files shared extension .so
 # earlier build stage, a vendored copy nothing links against yet). Narrowed
 # by the same T19-T ruling as the NEEDED scan above: Debian's libssl.so.3/
 # libcrypto.so.3 is expected and allowed anywhere in a legacy image (curl,
-# psql, the mariadb client and libsnmp all pull it in) -- what must never
+# psql, the mariadb client and the vendored libnetsnmp all pull it in) -- what must never
 # exist is a file that could only be the vendored, EOL build: a
 # libssl.so.1*/libcrypto.so.1* file anywhere, or a libssl.so*/libcrypto.so*
 # file under a vendored prefix (/opt/php-deps, or anywhere under /opt) --
@@ -602,6 +640,155 @@ fi
 grep -qi "no such extension" /tmp/php-ext-enable.err || { echo "FAIL: unknown extension did not fail loudly"; exit 1; }
 echo "ok: php-ext-enable refuses unknown names"
 
+# COPY from a scratch stage stamps its own directory metadata onto directories
+# that already exist in the image, so runtime-base re-asserts the one that
+# matters after its payload COPYs: conf.d is where php-ext-enable and the
+# entrypoint write as the image user. ext-builder runs as root but inherits the
+# same runtime-base; measured www-data:www-data on every flavor.
+conf_d_owner=$(docker run --rm --entrypoint stat "$IMAGE" -c '%U:%G' /usr/local/etc/php/conf.d)
+[ "$conf_d_owner" = "www-data:www-data" ] \
+  || { echo "FAIL: /usr/local/etc/php/conf.d is owned by $conf_d_owner, expected www-data:www-data (a payload COPY reset it)"; exit 1; }
+echo "ok: /usr/local/etc/php/conf.d is owned by www-data"
+
+# Root has to start php without a word on stderr too (the entrypoint's own
+# notices aside): anything a library creates or logs on first use as root would
+# show up in every `docker run -u 0` and in every CI job that runs as root.
+root_err=$(docker run --rm -u 0 "$IMAGE" php -r 'echo 1;' 2>&1 >/dev/null | grep -v '^docker-php-entrypoint:' || true)
+[ -z "$root_err" ] || { echo "FAIL: php -r as root wrote to stderr: $root_err"; exit 1; }
+echo "ok: php starts silent as root"
+
+# net-snmp (deps/build-netsnmp.sh): Debian's libsnmp40t64 hard-depends on
+# libperl5.40, and a package another package Depends on cannot be purged, so
+# the only way to ship no libperl/perl-modules (~49 MB) is to link ext-snmp
+# against a vendored client-only build. These assertions are what keeps that
+# true: a regression to libsnmp-dev brings libperl back silently, with every
+# functional check still green.
+#
+# dpkg-query takes package names and globs, which `dpkg -s` does not. It exits
+# non-zero when nothing matches, which for an absence assertion is the answer
+# rather than an error, so the exit status is deliberately ignored and the
+# Status column is what is read. The control proves the query can see an
+# installed package at all -- an empty result is otherwise indistinguishable
+# from a dpkg-query that cannot run.
+dpkg_installed() {  # dpkg_installed <name-or-glob>... -> the installed packages matching, one per line
+  docker run --rm "$IMAGE" dpkg-query -W -f='${Package} ${Status}\n' "$@" 2>/dev/null \
+    | sed -n 's/ install ok installed$//p' || true
+}
+[ "$(dpkg_installed libc6)" = "libc6" ] \
+  || { echo "FAIL: dpkg-query could not see libc6 as installed -- the libperl/libsnmp absence check below would prove nothing"; exit 1; }
+# The builders bring perl in on purpose: cli-builder's git and full
+# mariadb-client Depend on it (git's perl scripts, mariadb-hotcopy), and
+# ext-builder's autoconf/automake are perl programs, so libperl5.40 and
+# perl-modules are there whatever ext-snmp links. Both are still held to the
+# snmp half: no Debian libsnmp*/libnetsnmp* package, which is what would put a
+# second net-snmp in the image.
+stray_globs=('libsnmp*' 'libnetsnmp*')
+perl_note="libperl*, perl-modules*, "
+case "$FLAVOR" in
+  cli-builder|ext-builder) perl_note="" ;;
+  *) stray_globs+=('libperl*' 'perl-modules*') ;;
+esac
+stray_pkgs=$(dpkg_installed "${stray_globs[@]}" | tr '\n' ' ')
+[ -z "$stray_pkgs" ] || { echo "FAIL: the runtime image carries Debian perl/snmp library packages ($stray_pkgs) -- ext-snmp is meant to link the vendored /opt/net-snmp, and libsnmp40t64 pulls in libperl5.40"; exit 1; }
+echo "ok: no ${perl_note}libsnmp* or libnetsnmp* Debian package in the image (control: libc6 is visible to the same query)"
+
+if grep -qw snmp <<<"$SHARED_EXTS"; then
+  snmp_ldd=$(docker run --rm "$IMAGE" ldd "$extdir/snmp.so" 2>&1 || true)
+  grep -qE '^[[:space:]]*libnetsnmp\.so\.[0-9]+ => /opt/net-snmp/lib/libnetsnmp\.so\.[0-9]+' <<<"$snmp_ldd" \
+    || { echo "FAIL: snmp.so does not resolve libnetsnmp from /opt/net-snmp/lib: $snmp_ldd"; exit 1; }
+  ! grep -q 'not found' <<<"$snmp_ldd" || { echo "FAIL: snmp.so has an unresolved NEEDED entry: $snmp_ldd"; exit 1; }
+  nsnmp_ldd=$(docker run --rm "$IMAGE" sh -c 'ldd /opt/net-snmp/lib/libnetsnmp.so.*[0-9]' 2>&1 || true)
+  # USM auth/priv crypto goes through Debian's supported libssl3, from the system
+  # path -- not a vendored copy, and (CF-9) never an EOL one.
+  grep -qE 'libcrypto\.so\.3 => /(usr/)?lib/' <<<"$nsnmp_ldd" \
+    || { echo "FAIL: libnetsnmp does not link the system libcrypto.so.3: $nsnmp_ldd"; exit 1; }
+  ! grep -qE 'libperl|libwrap|libsensors|libpci|not found' <<<"$nsnmp_ldd" \
+    || { echo "FAIL: libnetsnmp links something it is built without, or has an unresolved entry: $nsnmp_ldd"; exit 1; }
+  echo "ok: snmp.so resolves libnetsnmp from /opt/net-snmp/lib, which links only the system libssl3 (no perl/wrap/sensors/pci)"
+
+  # Only the library and the MIB files ship; the prefix's bin/include/pkgconfig
+  # were build-time inputs for ext-snmp. Control: the same find sees the library.
+  nsnmp_files=$(docker run --rm "$IMAGE" find /opt/net-snmp \( -type f -o -type l \))
+  grep -q '/lib/libnetsnmp\.so\.' <<<"$nsnmp_files" \
+    || { echo "FAIL: find /opt/net-snmp did not list the library -- the dev-file absence check below would prove nothing"; exit 1; }
+  nsnmp_dev=$(grep -E '\.(a|la|pc|h)$|/(bin|include)/' <<<"$nsnmp_files" || true)
+  [ -z "$nsnmp_dev" ] || { echo "FAIL: build-time files shipped under /opt/net-snmp: $nsnmp_dev"; exit 1; }
+  echo "ok: /opt/net-snmp ships the library and MIB files only"
+
+  # Works with no network. Output is compared exactly, stderr included: a wrong
+  # compiled-in MIB directory or an unresolvable libnetsnmp prints noise on load
+  # (the fpm entrypoint's own memory-limit notice is the one line filtered out).
+  #   - snmp_read_mib on a shipped MIB succeeds; on a missing file it fails (control).
+  #   - SNMPv3 authPriv key generation (SHA + AES) is local, so success means the
+  #     OpenSSL-backed USM crypto is really there.
+  #   - A MIB-qualified name resolves from the compiled-in MIB directory with no
+  #     MIBS set: the request then fails on the network, not on the name. The
+  #     control name, from a module that does not exist, must fail on the name --
+  #     otherwise the resolution check cannot tell the two failures apart.
+  snmp_out=$(docker run --rm -i "$IMAGE" sh -c 'php-ext-enable snmp >/dev/null && php' 2>&1 <<'PHP' | grep -v '^docker-php-entrypoint:' || true
+<?php
+$fail = function ($m) { echo "FAIL: $m\n"; exit(1); };
+(extension_loaded("snmp") && class_exists("SNMP")) || $fail("snmp extension or SNMP class missing");
+is_int(snmp_get_valueretrieval()) || $fail("snmp_get_valueretrieval() did not return an int");
+snmp_read_mib("/opt/net-snmp/share/snmp/mibs/SNMPv2-MIB.txt") === true || $fail("snmp_read_mib failed on a shipped MIB");
+@snmp_read_mib("/nonexistent/NO-SUCH-MIB.txt") === false || $fail("snmp_read_mib accepted a missing file");
+$s = new SNMP(SNMP::VERSION_3, "127.0.0.1", "smokeuser");
+$s->setSecurity("authPriv", "SHA", "12345678", "AES", "12345678") === true || $fail("USM authPriv SHA/AES setup failed");
+$last = "";
+set_error_handler(function ($no, $str) use (&$last) { $last = $str; return true; });
+snmpget("127.0.0.1:1", "public", "SNMPv2-MIB::sysDescr.0", 100000, 0);
+stripos($last, "Invalid object identifier") === false || $fail("SNMPv2-MIB::sysDescr.0 did not resolve from the default MIB directory: $last");
+$last = "";
+snmpget("127.0.0.1:1", "public", "NO-SUCH-MIB::nothing.0", 100000, 0);
+stripos($last, "Invalid object identifier") !== false || $fail("control: an unknown MIB name did not fail on the name ($last), so the resolution check above proves nothing");
+echo "snmp-ok";
+PHP
+)
+  [ "$snmp_out" = "snmp-ok" ] || { echo "FAIL: ext-snmp functional check printed: $snmp_out"; exit 1; }
+  echo "ok: ext-snmp loads clean and works offline (snmp_read_mib, USM SHA/AES keys, MIB name resolution, negative controls)"
+
+  # net-snmp creates /var/lib/snmp and /var/lib/snmp/cert_indexes the first time
+  # the extension loads and logs "Created directory: ..." to stderr when it does;
+  # runtime-base pre-creates both, owned by www-data, so neither root nor www-data
+  # prints anything. The control removes them and requires the notice to come
+  # back, otherwise a clean stderr below would only prove the notice is gone from
+  # this net-snmp build, not that the directories are what silenced it. -d
+  # extension=snmp.so rather than php-ext-enable: the entrypoint is bypassed so
+  # stderr holds php's and net-snmp's output only.
+  for snmp_uid in 0 33; do
+    snmp_err=$(docker run --rm -u "$snmp_uid" --entrypoint php "$IMAGE" -d extension=snmp.so -r 'echo extension_loaded("snmp") ? "" : "snmp not loaded";' 2>&1 >/dev/null || true)
+    [ -z "$snmp_err" ] || { echo "FAIL: loading snmp.so as uid $snmp_uid wrote to stderr: $snmp_err"; exit 1; }
+  done
+  snmp_ctl=$(docker run --rm -u 0 --entrypoint sh "$IMAGE" -c 'rm -rf /var/lib/snmp; exec php -d extension=snmp.so -r "echo 1;"' 2>&1 >/dev/null || true)
+  grep -q 'Created directory: /var/lib/snmp' <<<"$snmp_ctl" \
+    || { echo "FAIL: control: with /var/lib/snmp removed, loading snmp.so as root did not log its directory creation ($snmp_ctl), so the clean-stderr check above proves nothing"; exit 1; }
+  echo "ok: loading snmp.so is silent as root and as uid 33 (control: without /var/lib/snmp net-snmp logs 'Created directory')"
+
+  # MIBs mounted where a Debian host keeps them are found without MIBDIRS: the
+  # compiled-in search path is Debian's plus /opt/net-snmp's. A renamed copy of
+  # IF-MIB in /usr/share/snmp/mibs/ietf (a directory net-snmp does not search
+  # recursively, so it has to be named in the path) resolves a qualified name;
+  # the same name before the copy exists must fail on the name (control).
+  # shellcheck disable=SC2016  # the script is for the container's shell
+  snmp_mibdir=$(docker run --rm -u 0 -i --entrypoint sh "$IMAGE" -c '
+    set -eu
+    cat > /tmp/probe.php <<"PHP"
+<?php
+$last = "";
+set_error_handler(function ($no, $str) use (&$last) { $last = $str; return true; });
+snmpget("127.0.0.1:1", "public", "ZZ-SMOKE-MIB::ifNumber.0", 100000, 0);
+echo stripos($last, "Invalid object identifier") === false ? "resolved" : "unresolved";
+PHP
+    before=$(php -d extension=snmp.so /tmp/probe.php)
+    mkdir -p /usr/share/snmp/mibs/ietf
+    sed s/IF-MIB/ZZ-SMOKE-MIB/g /opt/net-snmp/share/snmp/mibs/IF-MIB.txt > /usr/share/snmp/mibs/ietf/ZZ-SMOKE-MIB.txt
+    after=$(php -d extension=snmp.so /tmp/probe.php)
+    echo "$before $after"' 2>&1 || true)
+  [ "$snmp_mibdir" = "unresolved resolved" ] \
+    || { echo "FAIL: MIB lookup in the Debian directories: expected 'unresolved resolved' (before/after a MIB appears in /usr/share/snmp/mibs/ietf), got: $snmp_mibdir"; exit 1; }
+  echo "ok: a MIB placed in /usr/share/snmp/mibs/ietf is found without MIBDIRS (control: unknown before it exists)"
+fi
+
 # Baseline php.ini (task 10): expose_php/display_errors/allow_url_include off.
 for pair in "expose_php:" "display_errors:" "allow_url_include:"; do
   key="${pair%%:*}"
@@ -658,34 +845,42 @@ echo "on:jit=" . (!empty($s["jit"]["on"]) ? "1" : "0");
 echo "ok: opcache activates when explicitly enabled ($on)"
 
 php_major="${RELEASE%%.*}"
-if [ "$php_major" -ge 8 ]; then
+# 8.0's ext/opcache/config.m4 builds the JIT for i386/x86 hosts only (aarch64
+# DynASM arrived in 8.1) and turns it off elsewhere with a configure warning,
+# so an arm64 8.0 has no JIT to run -- asserted as off, not skipped.
+if [ "$IMAGE_ARCH" = arm64 ] && [ "$EXPECT" = "8.0" ]; then
+  [ "$on" = "on:jit=0" ] || { echo "FAIL: PHP 8.0 on arm64 reports a running JIT, but 8.0's opcache builds none for aarch64: $on"; exit 1; }
+  echo "ok: JIT not available on PHP 8.0/arm64 (8.0's JIT is x86-only; aarch64 support arrived in 8.1)"
+elif [ "$php_major" -ge 8 ]; then
   [ "$on" = "on:jit=1" ] || { echo "FAIL: opcache activated but JIT is not actually running -- PHP $EXPECT should support it: $on"; exit 1; }
   echo "ok: JIT active on PHP $EXPECT when opcache is enabled"
 else
   echo "ok: JIT not applicable on PHP $EXPECT (introduced in PHP 8.0)"
 fi
 
-# The VM kind, expected from VM_COMPILER/EXPECTED_VM_KIND computed above
-# (task 37b), not from PHP_VERSION alone: gcc gets the HYBRID VM (global
-# register variables, Zend/zend_execute.c) on every version it builds; clang
-# gets the plain CALL VM except on 8.5, which adds the TAILCALL VM (needs
-# HAVE_PRESERVE_NONE from a configure probe that 8.5.0 failed silently under
-# ThinLTO -- php/build-canaries.sh's assert_preserve_none_canary).
+# The VM kind, expected from VM_COMPILER/PHP version/IMAGE_ARCH (task 37b, see
+# the table above), checked two ways:
 #
-# Measured two different ways depending on whether this version has FFI to
-# measure it with. zend_vm_kind() is ZEND_API and exported, and FFI (shipped
-# shared, opt-in) can call it in a throwaway process -- this is the end-to-end
-# half of assert_preserve_none_canary and the HAVE_GCC_GLOBAL_REGS check in
-# php/build.sh's php_configure(). But ext.json floors ffi at >=7.4, so 7.0-7.3
-# have nothing in the image that can call zend_vm_kind() at all; for those,
-# the check falls back to the build record's own vm_kind_config field
-# (php/build.sh: recorded from main/php_config.h's HAVE_GCC_GLOBAL_REGS/
-# HAVE_PRESERVE_NONE at configure time, the same probes that decide the VM) --
-# a build that got the wrong VM records the wrong value there just as
-# reliably as it would answer wrong at runtime, so a CALL-VM build still fails
-# this either way.
+#   - the build record's vm_kind_config (php/build.sh: ZEND_VM_KIND as the
+#     generated Zend/zend_vm_opcodes.h resolves it against this build's own
+#     php_config.h), on every version. A build that got the wrong VM records the
+#     wrong value there just as reliably as it would answer wrong at runtime.
+#   - on versions with FFI, zend_vm_kind() called in a throwaway process. It is
+#     ZEND_API and exported, and this is the end-to-end half of
+#     assert_preserve_none_canary and of the record itself. ext.json floors ffi
+#     at >=7.4, so 7.0-7.3 can only be checked through the record.
 has_ffi=false
 for _sx in $SHARED_EXTS; do [ "$_sx" = ffi ] && has_ffi=true; done
+
+build_record=$(docker run --rm --entrypoint cat "$IMAGE" /usr/local/share/php-build/pgo.txt 2>/dev/null) \
+  || { echo "FAIL: $IMAGE has no /usr/local/share/php-build/pgo.txt -- cannot check vm_kind_config"; exit 1; }
+vm_kind_config=$(sed -n 's/^vm_kind_config=//p' <<<"$build_record" | head -1)
+[ -n "$vm_kind_config" ] \
+  || { echo "FAIL: the build record has no vm_kind_config line -- this image predates the task 37b VM-kind recording, rebuild it"; exit 1; }
+want=$(tr '[:upper:]' '[:lower:]' <<<"$EXPECTED_VM_NAME")
+[ "$vm_kind_config" = "$want" ] \
+  || { echo "FAIL: the build record says vm_kind_config=$vm_kind_config for PHP $EXPECT ($VM_COMPILER, $IMAGE_ARCH), expected $want (ZEND_VM_KIND_$EXPECTED_VM_NAME)"; exit 1; }
+echo "ok: build record shows vm_kind_config=$vm_kind_config for PHP $EXPECT ($VM_COMPILER, $IMAGE_ARCH)"
 
 if [ "$has_ffi" = true ]; then
   vm_kind=$(docker run --rm "$IMAGE" php -d extension=ffi -d ffi.enable=1 \
@@ -694,15 +889,7 @@ if [ "$has_ffi" = true ]; then
     || { echo "FAIL: PHP $EXPECT ($VM_COMPILER) runs VM kind '$vm_kind', expected $EXPECTED_VM_KIND (ZEND_VM_KIND_$EXPECTED_VM_NAME)"; exit 1; }
   echo "ok: interpreter is ZEND_VM_KIND_$EXPECTED_VM_NAME (zend_vm_kind()=$vm_kind)"
 else
-  build_record=$(docker run --rm --entrypoint cat "$IMAGE" /usr/local/share/php-build/pgo.txt 2>/dev/null) \
-    || { echo "FAIL: $IMAGE has no /usr/local/share/php-build/pgo.txt -- cannot check vm_kind_config on a version with no FFI to probe zend_vm_kind() directly"; exit 1; }
-  vm_kind_config=$(sed -n 's/^vm_kind_config=//p' <<<"$build_record" | head -1)
-  [ -n "$vm_kind_config" ] \
-    || { echo "FAIL: the build record has no vm_kind_config line -- this image predates the task 37b VM-kind recording, rebuild it"; exit 1; }
-  want=$(tr '[:upper:]' '[:lower:]' <<<"$EXPECTED_VM_NAME")
-  [ "$vm_kind_config" = "$want" ] \
-    || { echo "FAIL: the build record says vm_kind_config=$vm_kind_config for $VM_COMPILER, expected $want (ZEND_VM_KIND_$EXPECTED_VM_NAME) -- no FFI on PHP $EXPECT to check zend_vm_kind() directly"; exit 1; }
-  echo "ok: build record shows vm_kind_config=$vm_kind_config (no FFI on PHP $EXPECT, so this comes from main/php_config.h at configure time rather than zend_vm_kind())"
+  echo "note: no FFI on PHP $EXPECT, so the VM kind rests on the build record alone"
 fi
 
 # Per-flavor ini differences, driven by the $FLAVOR argument, not the image tag.
@@ -714,11 +901,11 @@ case "$FLAVOR" in
     [[ -z "$dis_b" ]] || { echo "FAIL: builder disable_functions is '$dis_b', expected empty"; exit 1; }
     echo "ok: builder ini (unbounded memory, no disable_functions)"
     ;;
-  cli)
-    [[ "$mem" == "512M" ]] || { echo "FAIL: cli memory_limit is '$mem', expected 512M"; exit 1; }
+  cli|ext-builder)
+    [[ "$mem" == "512M" ]] || { echo "FAIL: $FLAVOR memory_limit is '$mem', expected 512M"; exit 1; }
     met=$(docker run --rm "$IMAGE" php -r "echo ini_get('max_execution_time');")
-    [[ "$met" == "0" ]] || { echo "FAIL: cli max_execution_time is '$met', expected 0"; exit 1; }
-    echo "ok: cli ini (512M memory, unbounded execution time)"
+    [[ "$met" == "0" ]] || { echo "FAIL: $FLAVOR max_execution_time is '$met', expected 0"; exit 1; }
+    echo "ok: $FLAVOR ini (512M memory, unbounded execution time)"
     ;;
   fpm)
     [[ "$mem" == "256M" ]] || { echo "FAIL: fpm memory_limit is '$mem', expected 256M"; exit 1; }
@@ -770,9 +957,26 @@ docker cp "$hcid:$extdir/." "$hard_dir/ext" >/dev/null
 # ldflags.sh path and pass; including them is coverage that costs nothing.
 mkdir -p "$hard_dir/im"
 docker cp "$hcid:/opt/imagemagick/lib/." "$hard_dir/im" >/dev/null 2>&1 || true
+# Same for the vendored net-snmp client library.
+mkdir -p "$hard_dir/nsnmp"
+docker cp "$hcid:/opt/net-snmp/lib/." "$hard_dir/nsnmp" >/dev/null 2>&1 || true
+# Everything under /opt, for the RPATH scan below: the vendored libraries'
+# plugins (ImageMagick's coder modules) and the legacy era's vendored tree are
+# ELF files nothing above names. docker cp keeps symlinks as symlinks, so each
+# file is seen once, under its real name.
+mkdir -p "$hard_dir/opt"
+docker cp "$hcid:/opt/." "$hard_dir/opt" >/dev/null
 case "$FLAVOR" in
   fpm) docker cp "$hcid:/usr/local/sbin/php-fpm" "$hard_dir/php-fpm" >/dev/null ;;
 esac
+# The image's own C++ runtime, for the symbol-version check below: the GCC 16
+# built objects are linked against GCC 16's libstdc++ headers but run against
+# Debian's libstdc++6/libgcc-s1, resolved the way ldd resolved them for php.
+for rt_lib in libstdc++.so.6 libgcc_s.so.1; do
+  rt_path=$(awk -v l="$rt_lib" '$1 == l { print $3; exit }' <<<"$linkage")
+  [ -n "$rt_path" ] || { echo "FAIL: ldd of /usr/local/bin/php lists no $rt_lib -- cannot check the GLIBCXX/GCC symbol versions against the image's own copy"; exit 1; }
+  docker cp -L "$hcid:$rt_path" "$hard_dir/$rt_lib" >/dev/null
+done
 docker rm -f "$hcid" >/dev/null
 
 # The extraction is itself a measurement, so check it landed before trusting
@@ -830,11 +1034,91 @@ assert_compiler_comment "php-$EXPECT" "$hard_dir/php"
 # shellcheck disable=SC2046  # the .so list is meant to word-split
 im_libs=$(find "$hard_dir/im" -maxdepth 1 -type f -name '*.so.*' 2>/dev/null | tr '\n' ' ')
 [ -n "$im_libs" ] || { echo "FAIL: no ImageMagick libraries extracted -- they ship in every flavor, so an empty set means the copy failed"; exit 1; }
+# shellcheck disable=SC2046  # the .so list is meant to word-split
+nsnmp_libs=$(find "$hard_dir/nsnmp" -maxdepth 1 -type f -name '*.so.*' 2>/dev/null | tr '\n' ' ')
+[ -n "$nsnmp_libs" ] || { echo "FAIL: no net-snmp library extracted -- it ships in every flavor, so an empty set means the copy failed"; exit 1; }
 module_files=("$hard_dir/php-chmod-sanitize.so")
 [ -f "$hard_dir/php-fpm" ] && module_files+=("$hard_dir/php-fpm")
 # shellcheck disable=SC2206  # both are deliberate globs/word-splits
-module_files+=("$hard_dir"/ext/*.so $im_libs)
+module_files+=("$hard_dir"/ext/*.so $im_libs $nsnmp_libs)
 bash "$HERE/assert-elf-hardening.sh" "modules-$EXPECT" "${module_files[@]}" || exit 1
+
+# RPATH/RUNPATH hygiene: every directory a shipped ELF names must exist in the
+# image. libtool used to hardcode the GCC 16 toolchain's own lib dir
+# (/opt/gcc16/lib64, via the stale libstdc++.la) into php, php-fpm and the C++
+# extensions -- a directory only the build stage has. Harmless until someone
+# creates it, and then that someone's libstdc++ wins over Debian's. Same
+# extraction as the hardening check above, one container for the whole set.
+# Inside $hard_dir so the EXIT trap removes it however this script ends.
+rpath_hits="$hard_dir/rpath_hits"
+: > "$rpath_hits"
+scan_rpath() {  # scan_rpath <label> <file>: append "<label> <dir>" per RPATH/RUNPATH entry
+  local dyn_out
+  dyn_out=$(readelf -dW "$2") || { echo "FAIL: readelf could not read the dynamic section of $1"; exit 1; }
+  sed -n -E 's/.*\((RPATH|RUNPATH)\)[^[]*\[(.*)\].*/\2/p' <<<"$dyn_out" | tr ':' '\n' | grep -v '^$' \
+    | sed "s|^|$1 |" >> "$rpath_hits" || true
+}
+for f in "${module_files[@]}" "$hard_dir/php"; do
+  scan_rpath "$(basename "$f")" "$f"
+done
+# Every ELF under /opt, picked by magic number rather than by name: the vendored
+# trees hold versioned libraries (*.so.1.2), plugin modules and, on the legacy
+# era, whatever the dependency builds installed. Labelled by path so a hit in
+# a plugin does not read as one of php's own extensions. The legacy tree may be
+# empty of ELF files (static-only openssl/icu, .a files deleted) -- that is fine,
+# but the ImageMagick libraries are in every image, so zero ELF files means the
+# extraction or the magic test is broken.
+opt_elf=0
+while IFS= read -r -d '' f; do
+  [ "$(head -c4 "$f" | od -An -c | tr -d ' ')" = '177ELF' ] || continue
+  opt_elf=$((opt_elf + 1))
+  scan_rpath "opt/${f#"$hard_dir"/opt/}" "$f"
+done < <(find "$hard_dir/opt" -type f -print0)
+[ "$opt_elf" -ge 1 ] || { echo "FAIL: no ELF file found under the extracted /opt -- the RPATH scan of vendored libraries saw nothing"; exit 1; }
+# Positive controls: php carries /opt/imagemagick/lib on purpose (ldflags.sh), so
+# a parser that found nothing would pass the check below by being blind.
+grep -qx 'php /opt/imagemagick/lib' "$rpath_hits" \
+  || { echo "FAIL: the RPATH scan did not see php's /opt/imagemagick/lib entry -- it would not see a bad one either: $(cat "$rpath_hits")"; exit 1; }
+if grep -qw snmp <<<"$SHARED_EXTS"; then
+  # snmp.so is the one shared extension that names /opt/net-snmp/lib (from its own
+  # link line), and it has to: nothing else tells the loader where libnetsnmp is.
+  grep -qx 'snmp.so /opt/net-snmp/lib' "$rpath_hits" \
+    || { echo "FAIL: snmp.so has no /opt/net-snmp/lib RUNPATH, so libnetsnmp cannot be found: $(grep '^snmp.so ' "$rpath_hits" || echo 'no entries at all')"; exit 1; }
+  # ... and no other extension should: that prefix on ldflags.sh also switches on
+  # --exclude-libs=ALL, which has no business in twenty unrelated modules.
+  stray_nsnmp=$(grep -E '^[^/ ]+\.so /opt/net-snmp/lib$' "$rpath_hits" | grep -v '^snmp\.so ' || true)
+  [ -z "$stray_nsnmp" ] || { echo "FAIL: shared extensions other than snmp.so carry the net-snmp RUNPATH: $stray_nsnmp"; exit 1; }
+fi
+# $ORIGIN-relative entries resolve per file and are not a fixed directory.
+rpath_dirs=$(awk '{ print $2 }' "$rpath_hits" | grep -v '^\$ORIGIN' | sort -u)
+# shellcheck disable=SC2086  # the dir list is meant to word-split into arguments
+rpath_missing=$(docker run --rm "$IMAGE" sh -c 'for d in "$@"; do [ -d "$d" ] || echo "$d"; done' sh $rpath_dirs)
+if [ -n "$rpath_missing" ]; then
+  echo "FAIL: RPATH/RUNPATH entries name directories that do not exist in the image:"
+  while IFS= read -r d; do grep -F " $d" "$rpath_hits" | sed 's/^/  /'; done <<<"$rpath_missing"
+  exit 1
+fi
+echo "ok: every RPATH/RUNPATH entry of php, php-fpm, the shared extensions and the $opt_elf ELF files under /opt names a directory present in the image ($(wc -l < "$rpath_hits") entries, $(wc -l <<<"$rpath_dirs") distinct dirs)"
+
+# The objects are built with GCC 16 (7.0-8.4) or clang 19 but run on Debian's
+# libstdc++/libgcc_s, so a GLIBCXX_/CXXABI_/GCC_ version they need that the
+# image's own copies do not define is a dlopen failure at the first request
+# that reaches it -- swoole.so, the one big C++ object, is the likeliest.
+elf_versions() {  # elf_versions defs|needs <file> -> GLIBCXX_/CXXABI_/GCC_ version names, one per line
+  readelf -VW "$2" | awk -v want="$1" '
+    /^Version definition section/ { in_sec = (want == "defs"); next }
+    /^Version needs section/      { in_sec = (want == "needs"); next }
+    /^Version symbols section/    { in_sec = 0; next }
+    in_sec { for (i = 1; i < NF; i++) if ($i == "Name:" && $(i+1) ~ /^(GLIBCXX|CXXABI|GCC)_/) print $(i+1) }'
+}
+provided_versions=$( { elf_versions defs "$hard_dir/libstdc++.so.6"; elf_versions defs "$hard_dir/libgcc_s.so.1"; } | sort -u)
+grep -q '^GLIBCXX_3\.4$' <<<"$provided_versions" \
+  || { echo "FAIL: the image's libstdc++.so.6 defines no GLIBCXX_3.4 -- the symbol-version scan is not reading it"; exit 1; }
+for f in "${module_files[@]}" "$hard_dir/php"; do
+  unmet=$(comm -23 <(elf_versions needs "$f" | sort -u) <(printf '%s\n' "$provided_versions"))
+  [ -z "$unmet" ] || { echo "FAIL: $(basename "$f") needs symbol versions the image's libstdc++/libgcc_s do not define: $(tr '\n' ' ' <<<"$unmet")"; exit 1; }
+done
+echo "ok: every GLIBCXX_/CXXABI_/GCC_ version the shipped ELF files need is defined by the image's own libstdc++/libgcc_s ($(grep -c '^GLIBCXX_' <<<"$provided_versions") GLIBCXX versions available)"
 
 # intl, against the ICU this version is supposed to have. Both of these came
 # back from spike/verify.sh, which was deleted with the rest of spike/ -- and
@@ -961,25 +1245,146 @@ echo $b === false ? "FAIL" : "OK:" . strlen($b);
 echo "ok: negative control confirms the ext/curl check has discriminating power"
 
 # Flavor shape, checked against what the Dockerfile's own stages actually
-# build rather than assumed: `FROM cli AS cli-builder` adds gcc, libc6-dev,
-# autoconf, make, git, composer and the PHP headers/phpize/php-config so an
-# extension can genuinely be compiled against this image. fpm and cli derive
-# from runtime-base directly and see none of that -- a compiler sitting in a
-# shipped fpm or cli image is CVE surface and attack surface bought for
-# nothing (an attacker who can write a .c file and already has a shell has
-# one less step to a native payload).
-case "$FLAVOR" in
-  cli-builder)
-    for tool in gcc phpize php-config composer autoconf; do
-      docker run --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
-        || { echo "FAIL: cli-builder is missing $tool (Dockerfile's cli-builder stage should install it)"; exit 1; }
+# build rather than assumed. Only ext-builder carries a compiler, g++, autoconf
+# and the PHP headers/phpize/php-config, so an extension can genuinely be
+# compiled against it. cli-builder (composer, node, deploy tooling), cli and
+# fpm see none of that -- a compiler sitting in a shipped image is CVE surface
+# and attack surface bought for nothing (an attacker who can write a .c file
+# and already has a shell has one less step to a native payload).
+no_toolchain() {  # no_toolchain <flavor> -- no compiler, assembler, linker, autoconf, phpize, PHP headers
+  # Explicit names, not a `ld*` glob: that would also match ldd and ldconfig,
+  # which every image has. The triplet forms are what a cross/multiarch
+  # binutils installs. Fail-closed control first: if the probe shell cannot
+  # run at all, "found nothing" below would be a pass on a dead container.
+  docker run --rm "$IMAGE" sh -c 'command -v sh' >/dev/null 2>&1 \
+    || { echo "FAIL: $1: the toolchain probe cannot run a shell in the image, so its absence checks would prove nothing"; exit 1; }
+  local found
+  found=$(docker run --rm "$IMAGE" sh -c '
+    for t in gcc g++ cc c++ cpp clang clang++ as ld ld.bfd ld.gold ld.lld lld gold \
+             x86_64-linux-gnu-gcc x86_64-linux-gnu-g++ x86_64-linux-gnu-as x86_64-linux-gnu-ld \
+             aarch64-linux-gnu-gcc aarch64-linux-gnu-g++ aarch64-linux-gnu-as aarch64-linux-gnu-ld \
+             autoconf phpize php-config; do
+      command -v "$t"
     done
-    echo "ok: cli-builder carries a compiler, phpize/php-config and composer"
+    for p in /usr/local/include/php /usr/include/php; do test -e "$p" && echo "$p"; done
+    exit 0' 2>/dev/null) || { echo "FAIL: $1: the toolchain probe did not run"; exit 1; }
+  [ -z "$found" ] \
+    || { echo "FAIL: $1 carries a compiler, assembler, linker, autoconf, phpize/php-config or the PHP headers (expected only in ext-builder): $(tr '\n' ' ' <<<"$found")"; exit 1; }
+}
+case "$FLAVOR" in
+  ext-builder)
+    for tool in gcc g++ make autoconf pkg-config phpize php-config; do
+      docker run --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
+        || { echo "FAIL: ext-builder is missing $tool (Dockerfile's ext-builder stage should provide it)"; exit 1; }
+    done
+    docker run --rm "$IMAGE" test -f /usr/local/include/php/main/php.h \
+      || { echo "FAIL: ext-builder has no PHP headers under /usr/local/include/php"; exit 1; }
+    for tool in composer node npm; do
+      if docker run --rm "$IMAGE" sh -c "command -v $tool" >/dev/null 2>&1; then
+        echo "FAIL: ext-builder carries $tool -- it is a compile stage, composer and node belong to cli-builder"; exit 1
+      fi
+    done
+    echo "ok: ext-builder carries a compiler, g++, make, autoconf, pkg-config, phpize/php-config and the PHP headers, and no composer/node"
+
+    # php-config has to describe the runtime it sits in: the extension dir
+    # names the Zend module API, so equal dirs mean an extension built here
+    # loads in the fpm/cli image of the same version.
+    pc_dir=$(docker run --rm "$IMAGE" php-config --extension-dir)
+    rt_dir=$(docker run --rm "$IMAGE" php -r 'echo ini_get("extension_dir");')
+    [ -n "$pc_dir" ] && [ "$pc_dir" = "$rt_dir" ] \
+      || { echo "FAIL: php-config --extension-dir ('$pc_dir') != the runtime's extension_dir ('$rt_dir')"; exit 1; }
+    pc_ver=$(docker run --rm "$IMAGE" php-config --version)
+    [ "$pc_ver" = "$RELEASE" ] || { echo "FAIL: php-config --version is '$pc_ver', expected $RELEASE"; exit 1; }
+    echo "ok: php-config matches the runtime ($pc_ver, extension_dir $pc_dir)"
+
+    # The real thing, small: compile tests/fixtures/ext-hello with
+    # phpize/configure/make, install it under a scratch root and load that .so
+    # into this image's own php. The cross-image half (copy into fpm and cli,
+    # PHP_EXT_ENABLE) is tests/test-ext-builder.sh, which needs all three
+    # images of a version and so cannot run from one build leg.
+    hello_out=$(docker run --rm --init -v "$HERE/fixtures/ext-hello":/src:ro "$IMAGE" \
+      timeout 600 sh -c '/src/build.sh /out >/tmp/build.log 2>&1 || { cat /tmp/build.log; exit 1; }
+        so=$(find /out -name hello.so); test -n "$so" || exit 1
+        php -d "extension=$so" -r "echo hello_world(), \"|\", hello_api();"') \
+      || { echo "FAIL: the ext-hello fixture did not build or load in ext-builder: $hello_out"; exit 1; }
+    [ "${hello_out%%|*}" = "hello from ext-builder" ] \
+      || { echo "FAIL: hello_world() returned '$hello_out'"; exit 1; }
+    echo "ok: ext-builder compiles an extension with phpize/configure/make and its php loads it ($hello_out)"
+    ;;
+  cli-builder)
+    no_toolchain cli-builder
+    echo "ok: cli-builder carries no compiler, autoconf, phpize/php-config or PHP headers"
+
+    for tool in git rsync patch make brotli sqlite3 jq less nano ps unzip zip zstd composer node npm npx corepack semantic-release mariadb mariadb-dump; do
+      docker run --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
+        || { echo "FAIL: cli-builder is missing $tool (Dockerfile's cli-builder stage should provide it)"; exit 1; }
+    done
+    node_major=$(docker run --rm "$IMAGE" node -p 'process.versions.node.split(".")[0]')
+    [ "$node_major" = "24" ] || { echo "FAIL: cli-builder's node major is '$node_major', expected 24 (copied from the node:24 image)"; exit 1; }
+    for cmd in "npm --version" "npx --version" "corepack --version" "composer --version" "semantic-release --version"; do
+      docker run --rm "$IMAGE" sh -c "$cmd" >/dev/null 2>&1 \
+        || { echo "FAIL: cli-builder: '$cmd' does not run as the image user"; exit 1; }
+    done
+    # npm and corepack cache under HOME by default, and uid 33's HOME (/var/www)
+    # does not exist: `npm ci` as the image user fails unless both caches point
+    # somewhere writable.
+    for probe in "npm config get cache" 'printenv COREPACK_HOME'; do
+      cache_dir=$(docker run --rm "$IMAGE" sh -c "$probe") \
+        || { echo "FAIL: cli-builder: '$probe' failed as the image user"; exit 1; }
+      [ -n "$cache_dir" ] && [ "$cache_dir" != undefined ] \
+        || { echo "FAIL: cli-builder: '$probe' printed '$cache_dir'"; exit 1; }
+      docker run --rm "$IMAGE" sh -c 'mkdir -p "$1" && t=$(mktemp -p "$1") && rm -f "$t"' sh "$cache_dir" \
+        || { echo "FAIL: cli-builder: $cache_dir ('$probe') is not writable as the image user (uid $(docker run --rm "$IMAGE" id -u))"; exit 1; }
+    done
+    echo "ok: cli-builder's npm and corepack caches are writable as the image user"
+    # npm is pinned to 11.21.0 in the node-tools stage (the node image bundles
+    # an older one with a vulnerable tar/ip-address). The finished tree must hold
+    # exactly one npm of its own: a second copy left under node_modules is the
+    # 11.19 tree an in-place upgrade used to strand underneath the new one. The
+    # copy semantic-release carries for @semantic-release/npm is a dependency of
+    # that package and expected; the pattern is the exact node_modules/npm path,
+    # so @semantic-release/npm/package.json is not a match.
+    npm_version=$(docker run --rm "$IMAGE" npm --version)
+    [ "$npm_version" = "11.21.0" ] || { echo "FAIL: cli-builder: npm --version is '$npm_version', expected 11.21.0"; exit 1; }
+    npm_pkgs=$(docker run --rm "$IMAGE" find /usr/local/lib/node_modules -path '*/node_modules/npm/package.json' -not -path '/usr/local/lib/node_modules/semantic-release/*')
+    [ "$npm_pkgs" = "/usr/local/lib/node_modules/npm/package.json" ] \
+      || { echo "FAIL: cli-builder: expected exactly one npm outside semantic-release's own tree, found: $npm_pkgs"; exit 1; }
+    npm_pkg_version=$(docker run --rm "$IMAGE" node -p 'require("/usr/local/lib/node_modules/npm/package.json").version')
+    [ "$npm_pkg_version" = "11.21.0" ] || { echo "FAIL: cli-builder: the installed npm package.json says $npm_pkg_version, expected 11.21.0"; exit 1; }
+    sr_npm=$(docker run --rm "$IMAGE" find /usr/local/lib/node_modules/semantic-release -path '*/node_modules/npm/package.json')
+    [ -n "$sr_npm" ] || { echo "FAIL: cli-builder: the control find saw no npm inside semantic-release's tree -- the exclusion above is untested, so its result proves nothing"; exit 1; }
+    echo "ok: cli-builder's npm is 11.21.0 and the only npm outside semantic-release's tree (control: its own nested copy is found)"
+    # VEX drift: vex/php.openvex.json names the bundled npm packages we accepted a
+    # finding in, by exact version (purl). When an npm or semantic-release bump
+    # moves them, the statement is describing a package that is no longer there
+    # (or, worse, a different version nobody reviewed). Read from the VEX file at
+    # test time; a package may be installed in several copies (npm's own and the
+    # one inside semantic-release), the pinned version must be one of them.
+    vex_pkgs=$(python3 - "$ROOT/vex/php.openvex.json" <<'PY'
+import json, sys, urllib.parse
+seen = set()
+for st in json.load(open(sys.argv[1]))["statements"]:
+    for p in st["products"]:
+        for sub in p.get("subcomponents", []):
+            purl = sub["@id"]
+            if purl.startswith("pkg:npm/") and purl not in seen:
+                seen.add(purl)
+                name, _, version = urllib.parse.unquote(purl[len("pkg:npm/"):]).rpartition("@")
+                print(name, version)
+PY
+    )
+    [ -n "$vex_pkgs" ] || { echo "FAIL: cli-builder: vex/php.openvex.json names no npm package -- the drift check below would prove nothing"; exit 1; }
+    while read -r vex_name vex_want; do
+      vex_have=$(docker run --rm "$IMAGE" find /usr/local/lib/node_modules -path "*/node_modules/$vex_name/package.json" \
+        -exec node -p 'require(process.argv[1]).version' {} \;)
+      grep -qxF "$vex_want" <<<"$vex_have" \
+        || { echo "FAIL: cli-builder: vex/php.openvex.json says $vex_name@$vex_want but the image has: ${vex_have:-no copy of it} -- update vex/php.openvex.json (and run: python3 ci/vex.py trivyignore --write)"; exit 1; }
+    done <<<"$vex_pkgs"
+    echo "ok: cli-builder carries the npm packages vex/php.openvex.json names, at the versions it pins: $(paste -sd, - <<<"${vex_pkgs// /@}")"
+    echo "ok: cli-builder carries node $node_major, npm, npx, corepack, composer, semantic-release, git, rsync, patch, make, brotli, sqlite3, jq, less, nano, procps, unzip, zip, zstd and the mariadb client"
     ;;
   cli|fpm)
-    if docker run --rm "$IMAGE" sh -c 'command -v gcc || command -v cc || command -v clang' >/dev/null 2>&1; then
-      echo "FAIL: $FLAVOR carries a compiler -- expected only in cli-builder"; exit 1
-    fi
+    no_toolchain "$FLAVOR"
     echo "ok: $FLAVOR carries no compiler"
     ;;
 esac
@@ -1066,7 +1471,18 @@ echo "ok: mariadb-server binaries (mariadbd, mysqld, mariadb-install-db, mysql_i
 # fpm-only, unchanged -- out of T19-I's scope, and its own probes already
 # branch on the image's flavor (cli-builder-only system()/eval_blacklist
 # cases) when it is called directly for those.
-bash "$HERE/test-entrypoint.sh" "$IMAGE" "$FLAVOR"
+if [ "$FLAVOR" = ext-builder ]; then
+  # Same entrypoint and same cli ini as the cli flavor, which test-entrypoint.sh
+  # already covers; its assertions are written for the uid-33 runtime flavors
+  # and ext-builder runs as root, so they are not repeated here.
+  echo "ok: test-entrypoint.sh skipped for ext-builder (identical entrypoint to cli, runs as root)"
+else
+  bash "$HERE/test-entrypoint.sh" "$IMAGE" "$FLAVOR"
+  # `--read-only --tmpfs /tmp` end to end (ext-builder runs as root and is not
+  # a runtime shape): the documented deployment, with a control wherever the
+  # assertion depends on /tmp (see the header of test-readonly.sh).
+  bash "$HERE/test-readonly.sh" "$IMAGE" "$FLAVOR"
+fi
 # Only where the registry builds it at all (ext.json: php >=7.2) -- 7.0 and
 # 7.1 ship without it, so there is nothing to exercise there.
 if [ "$FLAVOR" = fpm ] && grep -qw snuffleupagus <<<"$SHARED_EXTS"; then

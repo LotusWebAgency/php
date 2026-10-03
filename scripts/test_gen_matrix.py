@@ -16,18 +16,82 @@ class TestTargets(unittest.TestCase):
         self.matrix = json.loads((ROOT / "matrix.json").read_text())
         self.targets = gen_matrix.build_targets(self.matrix)
 
-    def test_thirtynine_image_targets(self):
-        self.assertEqual(len(self.targets), 39)
+    def test_fifty_image_targets(self):
+        self.assertEqual(len(self.targets), 50)
 
     def test_v3_only_for_84_and_85(self):
         v3 = {t["php"] for t in self.targets if t["uarch"] == "v3"}
         self.assertEqual(v3, {"8.4", "8.5"})
 
-    def test_every_version_has_three_flavors(self):
+    def test_ext_builder_has_no_v3_variant(self):
+        ext = [t for t in self.targets if t["flavor"] == "ext-builder"]
+        self.assertEqual(len(ext), len(self.matrix["versions"]))
+        self.assertEqual({t["uarch"] for t in ext}, {"baseline"})
+        self.assertEqual({t["flavor"] for t in self.targets if t["uarch"] == "v3"},
+                         {"fpm", "cli", "cli-builder"})
+
+    def test_ext_builder_tags(self):
+        t = next(t for t in self.targets if t["php"] == "8.5" and t["flavor"] == "ext-builder")
+        self.assertEqual(t["name"], "php-8_5-ext-builder")
+        self.assertEqual(t["tags"], ["lotuswebagency/php:8.5-ext-builder"])
+
+    def test_pr_subset_names_exist(self):
+        out = subprocess.run([sys.executable, str(GEN), "--github", "pr"],
+                             capture_output=True, text=True, check=True).stdout
+        names = {t["name"] for t in json.loads(out)["include"]}
+        self.assertEqual(names, {"php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm",
+                                 "php-8_5-cli-builder", "php-8_5-cli"})
+        self.assertEqual(len(names), 5, "ext-builder rides with cli, so it adds no leg")
+
+    def run_github(self, which):
+        out = subprocess.run([sys.executable, str(GEN), "--github", which],
+                             capture_output=True, text=True, check=True).stdout
+        return json.loads(out)["include"]
+
+    def test_every_target_is_a_leg_or_exactly_one_riders(self):
+        legs = self.run_github("build")
+        covered = []
+        for leg in legs:
+            covered += leg["bake"].split()
+            self.assertEqual(leg["bake"].split()[0], leg["name"])
+        self.assertEqual(sorted(covered), sorted(t["name"] for t in self.targets))
+        self.assertEqual(len(legs), 50 - len(self.matrix["versions"]))
+
+    def test_ext_builder_rides_with_cli_not_alone(self):
+        legs = self.run_github("build")
+        self.assertNotIn("ext-builder", {leg["flavor"] for leg in legs})
+        riding = [leg for leg in legs if leg["rider_name"]]
+        self.assertEqual({leg["flavor"] for leg in riding}, {"cli"})
+        self.assertEqual({leg["rider_flavor"] for leg in riding}, {"ext-builder"})
+        self.assertEqual(len(riding), len(self.matrix["versions"]))
+        for leg in riding:
+            self.assertEqual(leg["uarch"], "baseline")
+            self.assertEqual(leg["rider_name"], leg["name"].replace("-cli", "-ext-builder"))
+            self.assertEqual(leg["rider_tag"], f"lotuswebagency/php:{leg['php']}-ext-builder")
+            self.assertEqual(leg["bake"], f"{leg['name']} {leg['rider_name']}")
+
+    def test_legs_without_a_rider_carry_empty_rider_strings(self):
+        for leg in self.run_github("build"):
+            if not leg["rider_name"]:
+                self.assertEqual((leg["rider_flavor"], leg["rider_tag"], leg["bake"]),
+                                 ("", "", leg["name"]))
+
+    def test_rider_without_a_host_is_rejected(self):
+        only_ext = [t for t in self.targets if t["name"] == "php-8_5-ext-builder"]
+        with self.assertRaises(SystemExit):
+            gen_matrix.build_legs(only_ext)
+
+    def test_pr_subset_covers_every_flavor_incl_the_ext_builder_rider(self):
+        legs = self.run_github("pr")
+        baked = {n for leg in legs for n in leg["bake"].split()}
+        self.assertIn("php-8_5-ext-builder", baked)
+        self.assertEqual(baked, gen_matrix.PR_SUBSET)
+
+    def test_every_version_has_four_flavors(self):
         for ver in self.matrix["versions"]:
             flavors = {t["flavor"] for t in self.targets
                        if t["php"] == ver and t["uarch"] == "baseline"}
-            self.assertEqual(flavors, {"fpm", "cli", "cli-builder"}, ver)
+            self.assertEqual(flavors, {"fpm", "cli", "cli-builder", "ext-builder"}, ver)
 
     def test_default_version_carries_aliases(self):
         default = self.matrix["default_version"]
@@ -77,6 +141,7 @@ class TestTargets(unittest.TestCase):
                 self.assertTrue(t["corpus"], t["name"])
 
     def test_compile_job_count_is_26(self):
+        """ext-builder shares its version's compile, so it adds no job."""
         jobs = gen_matrix.build_compile_jobs(self.matrix)
         self.assertEqual(len(jobs), 26)
 
@@ -102,6 +167,18 @@ class TestValidateSupportFields(unittest.TestCase):
         self.matrix["versions"]["8.5"]["eol_date"] = "31 Dec 2029"
         with self.assertRaises(SystemExit):
             gen_matrix.validate_support_fields(self.matrix)
+
+
+class TestValidateBaselineOnlyFlavors(unittest.TestCase):
+    def test_current_matrix_is_valid(self):
+        matrix = json.loads((ROOT / "matrix.json").read_text())
+        gen_matrix.validate_baseline_only_flavors(matrix)  # must not raise
+
+    def test_unknown_flavor_rejected(self):
+        matrix = json.loads((ROOT / "matrix.json").read_text())
+        matrix["baseline_only_flavors"] = ["nope"]
+        with self.assertRaises(SystemExit):
+            gen_matrix.validate_baseline_only_flavors(matrix)
 
 
 class TestDrift(unittest.TestCase):

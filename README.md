@@ -61,8 +61,8 @@ image compiles PHP itself, per version:
 
 ## Tags
 
-Every one of the 11 PHP versions ships all three flavors — `fpm`, `cli`,
-`cli-builder` — for `linux/amd64` and `linux/arm64`:
+Every one of the 11 PHP versions ships all four flavors — `fpm`, `cli`,
+`cli-builder`, `ext-builder` — for `linux/amd64` and `linux/arm64`:
 
 | PHP | Release | Era | Compiler | `-v3` variant | Support | EOL date |
 |---|---|---|---|---|---|---|
@@ -90,16 +90,16 @@ Tag scheme (`scripts/gen_matrix.py`):
 | Tag shape | Example | Meaning |
 |---|---|---|
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
-| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Compiled for `x86-64-v3` / `armv8.2-a+crypto` instead of the `x86-64`/`armv8-a` baseline — 8.4 and 8.5 only. Newer instruction set, older CPUs (pre-Haswell/Excavator on amd64) can't run it. |
+| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Compiled for `x86-64-v3` / `armv9-a` instead of the `x86-64`/`armv8-a` baseline — 8.4 and 8.5 only, and not for `ext-builder` (an extension built against baseline headers loads on the v3 runtime). Newer instruction set, older CPUs can't run it: pre-Haswell/Excavator on amd64; on arm64 anything before Neoverse N2/V2 (it runs on Graviton4, Google Axion, Azure Cobalt 100, NVIDIA Grace — not on Graviton2/3, Ampere Altra/AmpereOne or Apple silicon). Apple M4–M6 are armv9 chips but implement SVE only in SME streaming mode, and `armv9-a` code uses SVE2 in normal mode, so `-v3` dies with SIGILL in Docker Desktop, OrbStack and the like (which may still advertise `sve2` in `/proc/cpuinfo`). On a Mac, use the baseline tag. |
 | `{version}` and `latest` | `8.5`, `latest` | The default version's (`matrix.json`'s `default_version`, currently 8.5) `fpm` image only. |
-| `{release}-{flavor}[-v3]` | `8.5.11-fpm`, `8.4.26-cli-v3` | Full patch version, pinned. Read from the built image (`PHP_VERSION`) and required to match `matrix.json`, so the tag can't claim a version the image doesn't contain. |
+| `{release}-{flavor}[-v3]` | `8.5.11-fpm`, `8.5.11-ext-builder`, `8.4.26-cli-v3` | Full patch version, pinned. Read from the built image (`PHP_VERSION`) and required to match `matrix.json`, so the tag can't claim a version the image doesn't contain. |
 
 Version tags are read out of the built image after tests and the Trivy gate,
 never out of the Dockerfile — see [SUPPORT.md](SUPPORT.md) for the full
 lifecycle policy and what "supported" means for the end-of-life tags below.
 
-39 images ship in total: 11 versions × 3 flavors, +6 for the two `-v3`
-variants (2 versions × 3 flavors).
+50 images ship in total: 11 versions × 4 flavors, +6 for the two `-v3`
+variants (2 versions × 3 flavors; `ext-builder` has none).
 
 ## Flavors
 
@@ -107,7 +107,8 @@ variants (2 versions × 3 flavors).
 |---|---|
 | `fpm` | PHP-FPM on `:9000`, behind nginx / Angie / another reverse proxy speaking FastCGI. `CMD php-fpm -F`, `STOPSIGNAL SIGQUIT` for a graceful worker drain, a FastCGI-native `HEALTHCHECK` (`php-fpm-healthcheck`, no front web server needed). |
 | `cli` | `php -a` by default — one-shot scripts, cron jobs, queue workers. |
-| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, Node.js/npm, gcc + build tools, and [Composer](https://getcomposer.org/) (installed with the vendor's own signature verification). Meant for a build stage, not for runtime. |
+| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, the MariaDB client (`mariadb`, `mariadb-dump`), Node.js 24 LTS with npm and corepack, [semantic-release](https://github.com/semantic-release/semantic-release), and [Composer](https://getcomposer.org/) (installed with the vendor's own signature verification). No compiler and no `phpize`: it is the asset/test/deploy stage. Meant for a build stage, not for runtime. |
+| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, libc6-dev and the PHP headers with `phpize`/`php-config`, for compiling your own extension and copying the `.so` into `fpm`/`cli` of the same PHP version — see [Adding your own extension](#adding-your-own-extension). Runs as root; no Composer, no Node.js. Meant for a build stage, not for runtime. |
 
 ## Quick start
 
@@ -156,8 +157,8 @@ reason rather than silently falling back to the image default.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `PHP_MEMORY_LIMIT` | fpm `256M` · cli `512M` · cli-builder `-1` | `memory_limit`. Unset keeps the flavor's baked value. |
-| `PHP_MAX_EXECUTION_TIME` | fpm `300` · cli and cli-builder `0` (no limit) | `max_execution_time`. |
+| `PHP_MEMORY_LIMIT` | fpm `256M` · cli and ext-builder `512M` · cli-builder `-1` | `memory_limit`. Unset keeps the flavor's baked value. |
+| `PHP_MAX_EXECUTION_TIME` | fpm `300` · cli, cli-builder and ext-builder `0` (no limit) | `max_execution_time`. |
 | `PHP_MAX_INPUT_TIME` | `120` | `max_input_time`. |
 | `PHP_MAX_INPUT_VARS` | `10000` | `max_input_vars`. |
 | `PHP_UPLOAD_MAX_FILESIZE` | `128M` | `upload_max_filesize`. |
@@ -174,7 +175,7 @@ reason rather than silently falling back to the image default.
 | `PHP_OPCACHE_JIT` | `tracing` | `opcache.jit`. PHP 8+ only; no-op on 7.x. |
 | `PHP_OPCACHE_JIT_BUFFER` | `64M` | `opcache.jit_buffer_size`. |
 | `PHP_EXT_ENABLE` | _(unset)_ | Comma-separated list of shared extensions to turn on — see [Extensions](#extensions). |
-| `PHP_SNUFFLEUPAGUS` | _(unset)_ | Name of a ruleset (`default`, `wordpress`, `prestashop`, `laravel`) to load — see [Hardening](#hardening). |
+| `PHP_SNUFFLEUPAGUS` | _(unset)_ | Name of a ruleset (`default`, `wordpress`, `prestashop`, `laravel`, or a [custom one](#custom-rulesets) you mounted) to load — see [Hardening](#hardening). |
 | `PHP_CHMOD_SHIM` | `0` | `1`/`true`/`yes`/`on` `LD_PRELOAD`s the PrestaShop `chmod(0)` cache-bug shim (see below); any other spelling than the accepted on/off ones refuses to start. |
 | `PHP_INI_SCAN_DIR` | _(image default)_ | Standard PHP variable; setting it *replaces* the default scan path. The entrypoint always splices the baked conf.d and its own writable/private directory back in, unless you explicitly set it to the empty string (PHP's own "scan nothing"). |
 | `PHP_FPM_PM` | `dynamic` | `fpm` flavor only. `pm`. |
@@ -194,10 +195,72 @@ the entrypoint overwrites them on every start and refuses to start if you set
 one to something other than the image's own baked default, naming the real
 knob to use instead.
 
-A **read-only rootfs is supported**: `docker run --read-only --tmpfs /tmp …`
-still autotunes the FPM pool and applies `PHP_EXT_ENABLE`/ini overrides,
-falling back to a private, mode-0700, `mktemp`-named directory under `/tmp`
-for anything that would otherwise need to write into `conf.d`.
+### Read-only root filesystem
+
+`fpm`, `cli` and `cli-builder` run with a read-only root filesystem and one
+writable mount, `/tmp`:
+
+```sh
+docker run --read-only --tmpfs /tmp:size=256m lotuswebagency/php:8.5-fpm
+```
+
+```yaml
+services:
+  php:
+    image: lotuswebagency/php:8.5-fpm
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    environment:
+      PHP_MEMORY_LIMIT: 512M
+      PHP_EXT_ENABLE: ldap,uuid
+```
+
+In Kubernetes the same shape should map to `readOnlyRootFilesystem: true` plus an
+`emptyDir` mounted at `/tmp` (not exercised by our tests).
+
+`/tmp` is the only path the image writes at runtime (checked with `docker
+diff` after a full workload, and by `tests/test-readonly.sh` on every image):
+
+- PHP sessions (`session.save_path` defaults to `/tmp`) and upload temp files
+  (`upload_tmp_dir` defaults to `/tmp`). Size the tmpfs as your largest upload
+  (`upload_max_filesize` is 128M) times the number of concurrent uploads, plus
+  the session files. A tmpfs counts against the container's memory limit (an
+  `emptyDir` with `medium: Memory` does too), so it has to fit inside that
+  budget, not on top of it.
+- The env-driven ini: when `conf.d` is not writable the entrypoint generates
+  it in a private, mode-0700, `mktemp`-named directory under `/tmp`, so
+  `PHP_MEMORY_LIMIT`, the opcache variables, `PHP_EXT_ENABLE` and
+  `PHP_SNUFFLEUPAGUS` apply exactly as on a writable rootfs, and the FPM pool is
+  still autotuned.
+- `sys_get_temp_dir()`, `tempnam()`, Xdebug output and, in `cli-builder`, the
+  Composer, npm and Corepack caches (`COMPOSER_HOME`, `npm_config_cache`,
+  `COREPACK_HOME` already point into `/tmp`).
+
+Nothing else needs a mount. FPM logs to stderr and writes no pid file; opcache
+and the JIT live in shared memory; on PHP 7.x opcache's lock file goes to
+`/dev/shm`, which Docker and Kubernetes both provide writable; net-snmp's
+`/var/lib/snmp` is pre-created and stays untouched. For `fpm` and `cli` the tmpfs
+may keep Docker's default `noexec`: nothing runs from `/tmp`. `cli-builder` is
+the exception: `npx <package>` unpacks the package into `/tmp/npm/_npx` and runs
+it from there, which fails with `EACCES` under `noexec`. Mount it executable,
+`--tmpfs /tmp:exec,size=256m` (compose: `/tmp:exec,size=256m`).
+
+What does not work read-only, and how it fails:
+
+- **No writable `/tmp`.** `PHP_EXT_ENABLE` and `PHP_SNUFFLEUPAGUS` refuse to
+  start the container rather than run without the extension or the ruleset.
+  The other `PHP_*` ini variables are ignored with a warning that names the
+  variable. Sessions and uploads fail with `Read-only file system` in the
+  error log, not silently.
+- **Your application's own writes** (PrestaShop's `var/cache`, Laravel's
+  `storage`, WordPress uploads, `cli-builder`'s project directory for
+  `composer install` / `npm install`) need a volume or tmpfs of their own.
+- **A FastCGI unix socket** needs a writable directory: leave `PHP_FPM_LISTEN`
+  on its TCP default or put the socket on a mount you provide.
+- **`docker exec <container> php …`** does not see the env-driven ini (true
+  on a writable rootfs too); use `docker exec <container> docker-php-entrypoint
+  php …` to apply it.
 
 ### `PHP_EXT_ENABLE`
 
@@ -246,7 +309,7 @@ zlib, igbinary, redis, imagick, memcached, apcu, zstd
 | `msgpack` | ≥7.0 | Compact queue serialization. |
 | `pcov` | ≥7.1 | PHPUnit coverage driver. |
 | `protobuf` | ≥8.2 | gRPC clients; pinned build refuses below 8.2. |
-| `snmp` | ≥7.0 | Legacy server monitoring. |
+| `snmp` | ≥7.0 | Legacy server monitoring. Links a vendored, client-only net-snmp (`/opt/net-snmp`) instead of Debian's `libsnmp40t64`, which hard-depends on perl (~49 MB). The MIB files ship in `/opt/net-snmp/share/snmp/mibs` but none load automatically, as on Debian; set `MIBS=ALL` or `mibs +ALL` in `/etc/snmp/snmp.conf` to load them. The search path is Debian's (`$HOME/.snmp/mibs`, `/usr/share/snmp/mibs` and its `iana` and `ietf` subdirectories) plus the shipped directory, so MIBs mounted where they would be on a Debian host are found; `MIBDIRS` replaces it (prefix `+` to extend it) and `MIBS=+NAME` loads one. |
 | `snuffleupagus` | ≥7.2 | Virtual patching — see [Hardening](#hardening). |
 | `ssh2` | ≥7.0 | Deployment tooling SFTP/SSH. |
 | `swoole` | ≥8.2 | Laravel Octane's async server; needs PHP Fibers. |
@@ -260,6 +323,65 @@ A handful of extensions are version-gated because upstream itself gates
 them (`imap` left core in 8.4, `xmlrpc` in 8.0, `mongodb`/`swoole`/`protobuf`
 refuse to build below their stated floor) — `php-ext-enable` on an
 unavailable name fails with the same "no such extension" message as a typo.
+
+### Adding your own extension
+
+The images carry no `pecl`, `pear` or `docker-php-ext-install`. An extension
+that is not in the table above is compiled in a build stage with `ext-builder`
+— `cli` plus gcc, g++, make, autoconf, pkg-config, libc6-dev and the PHP headers
+with `phpize`/`php-config` — and only the resulting `.so` is copied into the
+`fpm` or `cli` image:
+
+```dockerfile
+# 1. Compile. Same PHP version tag as the runtime stage below.
+FROM lotuswebagency/php:8.5-ext-builder AS ext
+ARG MYEXT_VERSION=1.2.3
+ARG MYEXT_SHA256=<sha256 of the tarball>
+# -dev packages the extension needs at build time go in this stage (root here).
+RUN apt-get update && apt-get install -y --no-install-recommends libmyext-dev
+RUN set -eux; \
+    curl -fsSLo /tmp/myext.tgz "https://example.com/myext-${MYEXT_VERSION}.tgz"; \
+    echo "${MYEXT_SHA256}  /tmp/myext.tgz" | sha256sum -c -; \
+    mkdir /src; \
+    tar -xzf /tmp/myext.tgz -C /src --strip-components=1; \
+    cd /src; \
+    phpize; \
+    ./configure; \
+    make -j"$(nproc)"; \
+    make install INSTALL_ROOT=/out
+
+# 2. Ship. Copy the .so (installed under /out at its real extension_dir path),
+#    add the runtime libraries it links against, switch it on.
+FROM lotuswebagency/php:8.5-fpm
+COPY --from=ext /out/ /
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libmyext1 \
+    && rm -rf /var/lib/apt/lists/*
+USER www-data
+ENV PHP_EXT_ENABLE=myext
+```
+
+- **One PHP version tag for both stages**, ideally pinned by digest
+  (`lotuswebagency/php:8.5-ext-builder@sha256:…` and the same for `8.5-fpm`).
+  The extension directory is named after the Zend module API number, and an
+  extension compiled against one PHP minor does not load in another.
+  `php-config --extension-dir` in `ext-builder` is the directory the `fpm`/`cli`
+  image of that version loads from; `make install INSTALL_ROOT=/out` plus
+  `COPY --from=ext /out/ /` puts the `.so` there without you spelling it out.
+- **Fetch a source tarball and verify its checksum**, as above — there is no
+  `pecl install` to do it for you.
+- **Runtime libraries are yours to install.** The runtime images run as UID 33,
+  so the final stage needs `USER root` for `apt-get install` and a `USER www-data`
+  after it. Install the shared libraries (`libmyext1`), not the `-dev` packages.
+- **`PHP_EXT_ENABLE=myext`** works for any `myext.so` in the extension
+  directory. Only `xdebug`, `opcache` and `snuffleupagus` are known to be Zend
+  extensions; for another `zend_extension`, drop a `zend_extension=myext.so`
+  ini file into `/usr/local/etc/php/conf.d/` instead.
+- `ext-builder` runs as root (it is a build stage; `make install` writes into
+  the extension directory), has no Composer and no Node.js, and has no `-v3`
+  variant: an extension built against the baseline headers loads in the `-v3`
+  runtime too. The repository's own end-to-end test for this flow is
+  `tests/test-ext-builder.sh` with the fixture in `tests/fixtures/ext-hello`.
 
 ## Hardening
 
@@ -295,17 +417,49 @@ environment:
 The PrestaShop ruleset deliberately leaves `readonly_exec` off — enabling it
 blocks PrestaShop's own cache-rebuild writes.
 
+Snuffleupagus's XXE feature (`sp.xxe_protection`) is not enabled in any of
+them. It turns libxml's entity loader off from an INI handler at startup, which
+does not carry into requests, so `LIBXML_NOENT` still expands `file://`
+entities with it on — and on PHP 7 it also nops the application's own
+`libxml_disable_entity_loader(true)`. libxml2 ≥ 2.9 does not load external
+entities unless the application opts in with `LIBXML_NOENT` / `LIBXML_DTDLOAD`;
+on PHP 7, call `libxml_disable_entity_loader(true)` yourself.
+
 Each ruleset runs its application unmodified: the exemptions it needs over
 upstream's defaults (framework includes, WordPress's own loopback requests,
 Symfony Console's terminal probe) are scoped to the framework file that makes
 the call, not opened up for everyone. Rulesets are for serving; build and
 deploy (Composer included) with `cli-builder` and no ruleset.
 
+#### Custom rulesets
+
+To run your own rules, mount the file read-only into the ruleset directory and
+select it by name:
+
+```yaml
+services:
+  php:
+    image: lotuswebagency/php:8.5-fpm
+    environment:
+      PHP_SNUFFLEUPAGUS: my-site
+    volumes:
+      - ./my-site.rules:/usr/local/etc/php/snuffleupagus/my-site.rules:ro
+```
+
+`PHP_SNUFFLEUPAGUS` is a bare name, never a path: it must match
+`^[a-z0-9][a-z0-9_-]*$` (lowercase letters, digits, `-` and `_`, starting with a
+letter or digit), and the container refuses to start otherwise. A name with no
+matching `.rules` file is refused too.
+
+Start from a copy of `default.rules` (`docker run --rm lotuswebagency/php:8.5-fpm
+cat /usr/local/etc/php/snuffleupagus/default.rules`) rather than an empty file:
+a custom file replaces the baked ruleset instead of adding to it.
+
 **Every setuid/setgid bit the runtime image inherited from the base image is
 stripped** at build time (`find / -perm /6000 -exec chmod a-s`).
 
 **Read-only rootfs** is a supported deployment shape — see
-[Configuration](#configuration) above.
+[Read-only root filesystem](#read-only-root-filesystem) above.
 
 **The PrestaShop `chmod(0)` cache-bug shim** — PrestaShop's cache
 regeneration calls `chmod($file, 0000)` and then rewrites the file; if the
@@ -398,8 +552,10 @@ doesn't mean in practice.
 
 ## Verifying images
 
-Every published digest carries an SBOM, max-mode SLSA provenance, and a
-keyless Cosign signature bound to this repository's GitHub Actions identity:
+Every published digest carries an SBOM, max-mode SLSA provenance, a
+keyless Cosign signature bound to this repository's GitHub Actions identity
+and signed test results, plus OpenVEX statements where an accepted finding
+applies:
 
 ```sh
 cosign verify \
@@ -415,13 +571,93 @@ docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --format '{{ json .S
 docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --format '{{ json .Provenance }}'
 ```
 
-A pull request builds and tests without publishing; a Trivy gate fails the
+Two more keyless attestations, from the same workflow identity, sit on the
+platform images and on the multi-arch tag: signed test results on every one of
+them, and OpenVEX where an accepted finding applies. The test-result one is
+attached only after the smoke tests and the Trivy gate passed against the pushed
+digest, and records the digest, PHP version, flavor, uarch, inputs hash, git
+commit, workflow run URL, and per architecture the smoke verdict with every check
+that passed and the Trivy verdict (taken from the Trivy step's own outcome, with
+the scanner version and database date when the runner could read them). The
+OpenVEX one carries the findings we accepted instead of fixing, each with its
+reason and a re-review date (the source is [`vex/php.openvex.json`](vex/php.openvex.json)). Only an
+image a statement applies to has one: today that is `cli-builder`, whose bundled
+npm ships a `brace-expansion` and an `undici` with no fixed release yet.
+
+```sh
+cosign verify-attestation --type openvex \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity 'https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main' \
+  lotuswebagency/php:8.5-cli-builder | jq -r .payload | head -n1 | base64 -d | jq .predicate
+
+cosign verify-attestation --type https://github.com/LotusWebAgency/php/attestation/test-result/v1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity 'https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main' \
+  lotuswebagency/php:8.5-fpm | jq -r .payload | head -n1 | base64 -d | jq .predicate
+```
+
+`cosign verify-attestation` prints one line per attestation on the digest, and a
+re-run of the release adds another rather than replacing the first, which is why
+the commands above take `head -n1`. On a tag it checks the attestation on the
+manifest list, which covers both architectures. To check one platform's own attestation,
+resolve its digest first and verify `lotuswebagency/php@sha256:...` instead:
+
+```sh
+docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --raw \
+  | jq -r '.manifests[] | select(.platform.architecture == "arm64") | .digest'
+```
+
+Trivy can in principle apply the VEX document too
+(`trivy image --vex oci lotuswebagency/php:8.5-cli-builder`); that is expected to
+work against these attestations and will be verified after the first release.
+Trivy only suppresses `not_affected` and `fixed` statements, and ours are
+`affected` (accepted, no upstream fix, not claimed unreachable), so the findings
+still show. The CI gate honors them through a `.trivyignore` generated from the
+same file, which expires on the same date.
+
+A pull request or a push to `develop` builds and tests without publishing to Docker Hub; a Trivy gate fails the
 build on any fixable CRITICAL or HIGH finding before anything can reach a
-registry (`.trivyignore` at the repo root records accepted risks with a
-reason). Trivy scans the Debian package layer -- it can't see the statically
-linked libraries (OpenSSL, ICU and similar) vendored into the 7.0–8.0 builds,
-which are tracked through `deps/versions.lock`'s pins instead. See
+registry (accepted risks are recorded with a reason and a re-review date in
+[`vex/php.openvex.json`](vex/php.openvex.json); `.trivyignore` is generated from it). Trivy scans the Debian package layer -- it can't see the libraries
+built from source and vendored under `/opt`: ImageMagick and net-snmp in every
+build, plus the vendored OpenSSL and ICU (static) and curl (7.0–7.2) of the
+7.0–8.0 builds. Those are tracked through `deps/versions.lock`'s pins instead. See
 [SECURITY.md](SECURITY.md) for the reporting channel and what's automated.
+
+## Branches and releases
+
+Work lands on `develop` through pull requests. A pull request (to `develop` or
+`main`) builds, tests and Trivy-gates a representative subset on amd64. A push
+to `develop` builds every image natively on amd64 and arm64 and runs the smoke
+tests, the extension end-to-end test and the Trivy gate on each, but never
+publishes to Docker Hub. A pull request from `develop` to `main` is the release:
+merging it builds, tests, publishes and signs every image. The weekly rebuild
+runs on `main` only, to pick up base-image and package updates.
+
+### Develop images in GHCR
+
+Every image of a `develop` push that passed all of those tests is also pushed to
+GitHub Container Registry, so it can be pulled and tested further before a release:
+
+```
+ghcr.io/lotuswebagency/php/dev:<tag>            # floating: the latest develop run in which every image passed
+ghcr.io/lotuswebagency/php/dev:<tag>-<sha>      # multi-arch list for one commit (first 12 characters of the SHA)
+ghcr.io/lotuswebagency/php/dev:<tag>-<sha>-<arch>   # single-arch image, amd64 or arm64
+```
+
+`<tag>` is the tag the release image carries on Docker Hub (`8.5-fpm`,
+`8.4-cli-builder-v3`, `8.5-ext-builder`). Who can pull is whatever the package
+settings of `php/dev` say (GHCR packages are private unless changed); for a
+private package, `docker login ghcr.io` with a token that has `read:packages`.
+These are unpublished test builds -- unsigned, without SBOM or provenance
+attestations, not for production. Versions older than 14 days are deleted daily
+(`dev-prune.yml`), except the commits the floating tags point at and the newest
+one. The floating tags are only moved by a run whose commit is still the head of
+`develop`, and only when every image of that run passed.
+
+For the prune to delete anything, the `php` repository needs the Admin role on
+the `php/dev` package (package settings, Manage Actions access); without it the
+daily run is expected to fail on its deletions.
 
 ## Building locally
 
@@ -444,6 +680,8 @@ done
 ./tests/build-all.sh          # every fpm target, resumable, --only/--flavor/
                                # --platform/--dry-run to narrow it
 ./tests/smoke.sh lotuswebagency/php:8.5-fpm 8.5 fpm   # one already-built image
+./tests/test-ext-builder.sh 8.5   # ext-builder end to end; needs that version's
+                                   # ext-builder, fpm and cli images built
 ```
 
 `tests/smoke.sh` fails an image whose `com.lotuswebagency.inputs-hash` label
@@ -451,6 +689,135 @@ doesn't match the working tree's current hash — a green gate on a stale
 image proves nothing. `tests/build-all.sh` feeds that label automatically;
 a manual `docker buildx bake` needs `INPUTS_HASH="$(./scripts/inputs-hash.sh)"`
 set first.
+
+### Testing develop images locally
+
+Every image a `develop` run tests is also pushed to the private GHCR package
+`ghcr.io/lotuswebagency/php/dev` as `<tag>-<first 12 of the sha>`, so the tests
+CI doesn't run (the Laravel/WordPress/PrestaShop suites in `tests/apps/`, the
+`-v3` instruction-set check, the corpus-tier replay and the benchmark) can run
+against exactly those images instead of a local rebuild of all 50 targets; the
+smoke suite and the ext-builder end to end, which CI does run, can be repeated
+on them the same way. Log in once, with a token that can read packages:
+
+```sh
+gh auth refresh -s read:packages
+gh auth token | docker login ghcr.io -u <github-user> --password-stdin
+
+tests/extended.sh pull && tests/extended.sh all     # HEAD's images, this daemon's arch
+tests/extended.sh pull --only 8.4,8.5 --flavor fpm,cli && tests/extended.sh apps --only 8.4,8.5 --flavor fpm,cli
+tests/extended.sh pull --latest                     # the last fully green develop run instead
+```
+
+`pull` retags what it fetched to the `lotuswebagency/php:<tag>` names the
+other scripts expect and prints every tag it replaces. The other subcommands
+(`uarch`, `ext-builder`, `corpus-tiers`, `apps`, `smoke`, `bench`) don't
+remember what was pulled, so repeat `--only`/`--flavor`; one that finds an
+image absent says `MISSING`, and one from another tree says `STALE`. `all` runs
+`uarch`, `ext-builder`, `corpus-tiers` and `apps` (not `smoke`, not `bench`:
+those are subcommands of their own) even after a failure and ends with a table.
+A step whose script passed without running its main check (the `-v3`
+instruction-mix check on arm64, the corpus-tier control when no image below the
+floor is present) is `PARTIAL`, and a run in which every row is `SKIP` fails: it
+tested nothing. After a retag the `dev:` tag is removed again, the canonical
+`lotuswebagency/php:<tag>` keeps the layers. `tests/extended.sh --help` has the
+rest.
+
+To spread a run over several machines or sessions, give `pull` and every test
+the same `--only`/`--flavor` selection per shard:
+
+```sh
+tests/extended.sh pull --only 8.0,8.1 && tests/extended.sh all --skip-pull --only 8.0,8.1
+tests/extended.sh pull --only 8.2,8.3 && tests/extended.sh all --skip-pull --only 8.2,8.3
+```
+
+(`pull --no-corpus` is for a shard that runs neither `corpus-tiers` nor
+`smoke`, e.g. `uarch`, `ext-builder` and `apps` one by one.)
+
+The images have to be the tree you are standing in. Each carries the
+`inputs-hash` of the commit it was built from, and `tests/smoke.sh` and
+`tests/test-pgo.sh` refuse an image whose hash differs from the working tree's
+(that check has no override here). `pull` therefore refuses when the hashes
+differ, and prints the command that fixes it: check the commit out in its own
+worktree and run `tests/extended.sh` from there. Uncommitted changes in a
+hashed path change the hash too (`git status`), and when HEAD has no images
+because its develop run was cancelled, `pull --latest` takes the last green
+run, which carries the same hash when only unhashed files changed since. If
+the very first image cannot be pulled (not in the registry, or no access) `pull`
+stops there instead of trying the other fifty.
+
+```sh
+git worktree add ../php-<sha12> <sha>
+```
+
+Only the architecture of your daemon can be tested locally. arm64 under QEMU
+crashes opcache, so the arm64 images are exercised by GitHub's arm64 runners
+and `pull` refuses `--platform linux/arm64` on an amd64 daemon. The app
+fixtures can come from a registry too, see
+[tests/apps/README.md](tests/apps/README.md#fixtures-from-a-registry).
+
+#### The extended tests in CI
+
+`.github/workflows/extended.yml` runs the same `tests/extended.sh` suites
+(`-v3` check, ext-builder, corpus-tier replay, the app suites, optionally the
+benchmark) on native amd64 and arm64 runners, against the develop images in
+GHCR. It is its own workflow: it never gates develop and a newer develop push
+does not cancel it. Per PHP version and architecture one job pulls that
+version's images and runs `uarch`, `ext-builder` and `apps`; one job per
+architecture runs `corpus-tiers`; a fixtures job per architecture first
+publishes any missing or stale app fixture to
+`ghcr.io/lotuswebagency/php/apptest`; a summary job collects every
+`results.tsv` and fails when a required job did. A `plan` job fixes one image
+commit for all of them.
+
+```sh
+gh workflow run extended.yml --ref develop                    # the floating images (last green develop run), tests from the ref
+gh workflow run extended.yml --ref develop -f sha=<sha>       # that commit's images; the ref's tests if its inputs-hash matches
+gh workflow run extended.yml --ref develop -f only=8.4,8.5 -f flavor=fpm,cli -f apps=false -f bench=true
+```
+
+Without `sha` the run fails up front when the ref's `inputs-hash` differs from
+the floating images'; then dispatch with `sha=` the commit it names. With a
+`sha` whose `inputs-hash` differs from the ref's, every job runs that commit's
+own tree, so this only works for a commit that already contains the extended
+workflow's scripts (the commit that added `extended.yml`, or a later one); for
+an older commit `plan` fails up front saying so. After a
+successful `ci` run on a develop push the workflow also starts by itself, but
+GitHub only fires `workflow_run` (and only accepts `workflow_dispatch`) for
+workflow files on the default branch, so until this one is on `main` neither
+works. Push the commit whose images should be tested to the `extended-run`
+branch instead, which starts the workflow from the pushed commit's own copy of
+the file and tests that commit's images with its own tests:
+
+```sh
+git push origin <sha>:refs/heads/extended-run
+# when the run is done, so the next push is a new branch and not a rejected update:
+git push origin :extended-run
+```
+
+If develop CI pushed no images for that commit (one that only changed `tests/`
+or `ci/`, which are outside the `inputs-hash`, is never built), the run tests
+the last green develop images instead, provided their `inputs-hash` equals the
+pushed tree's; the plan log and job summary say which path was taken. With a
+differing hash it fails up front.
+
+No force push: delete the branch after each run and push a fresh one next time.
+The branch must not be protected, and `ci` does not run on it. Logs and
+`results.tsv` files are kept as artifacts for five days.
+
+Automatic runs (after `ci`, or a push to `extended-run`) share one concurrency
+group: a run in flight is never cancelled and only the newest pending one waits
+behind it. A selection without the `fpm`, `cli` or `cli-builder` flavor builds
+no fixtures and runs no app suites. Every job starts with `ci/free-disk.sh`
+(fails below 20 GB free, `FREE_DISK_MIN_GB`) and ends by logging `df` and
+`docker system df`.
+
+The app fixtures are images committed locally, labelled
+`org.opencontainers.image.source=https://github.com/LotusWebAgency/php`, which
+is what links the `php/apptest` GHCR package to this repository and lets the
+workflow's `GITHUB_TOKEN` push and pull it. If a package of that name already
+existed before it was linked, give this repository access to it (package
+settings, "Manage Actions access", role Write) or the push is denied.
 
 ## Related images
 
