@@ -8,6 +8,7 @@
 #   tests/extended.sh apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
 #   tests/extended.sh bench [--only V,..] [--flavor F,..]        report only, never fails the run
 #   tests/extended.sh all [pull flags] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, apps
+#                                                                  (not smoke, not bench: those are separate subcommands)
 #
 # Typical use:  tests/extended.sh pull && tests/extended.sh all
 #
@@ -55,6 +56,11 @@
 # to (uarch on --only 8.2: there is no 8.2 -v3 target) is SKIP, not a pass; a
 # corpus-tiers run that covers only some of a tier's versions is PARTIAL.
 #
+# Sharding: a run is split across machines (or sessions) with --only/--flavor,
+# giving pull and every test step the same selection, e.g.
+#   tests/extended.sh pull --only 8.0,8.1 && tests/extended.sh all --skip-pull --only 8.0,8.1
+# extended.yml does the same, one job per version.
+#
 # apps drops the ext-builder flavor: apps/run.sh has no suites for it and
 # run-matrix.sh does not count the resulting failure. It also compares the
 # RESULT rows run-matrix wrote against the images it was asked to run, so a
@@ -65,8 +71,11 @@
 #   EXTENDED_CORPUS_REPO   default ghcr.io/lotuswebagency/php/corpus
 #   EXTENDED_LOG_DIR       logs; default a fresh mktemp -d
 #
-# Exit status: 0 everything ran and passed (SKIP and PARTIAL included), 1 any
-# FAIL/MISSING/STALE/REFUSED, 2 usage error. All of `all` runs even after a
+# Exit status: 0 everything that ran passed (SKIP and PARTIAL included) and at
+# least one step really ran (a run whose every row is SKIP proved nothing and
+# fails), 1 any FAIL/MISSING/STALE/REFUSED or nothing ran, 2 usage error. A step
+# whose script exited 0 but skipped its main check (test-uarch.sh on a non-amd64
+# pair, test-corpus-tiers.sh with no control image) is recorded PARTIAL. All of `all` runs even after a
 # failure; the summary table at the end is the verdict. Needs a docker login
 # for ghcr.io with read:packages (see README.md, "Testing develop images
 # locally").
@@ -236,6 +245,8 @@ note_revisions() {
 # run_step <step> <subject> <logname> <command...>: run, time and record one
 # test. STEP_OK is the status a zero exit records (PARTIAL for a partial run).
 STEP_OK=ok
+# Lines a test script prints when it exits 0 without having run its main check.
+PARTIAL_MARKERS='note: skipping the x86-64-v3 instruction-mix check|UARCH TESTS PASSED \(partial|no runtime image below floor'
 run_step() {
   local step="$1" subject="$2" log="$LOG_DIR/$3.log" t0 rc=0 secs
   shift 3
@@ -244,8 +255,17 @@ run_step() {
   "$@" >"$log" 2>&1 || rc=$?
   secs=$(( $(date +%s) - t0 ))
   if [ "$rc" -eq 0 ]; then
-    echo "    $STEP_OK (${secs}s)"
-    record "$step" "$subject" "$STEP_OK" "$secs" "$log"
+    # A zero exit from a script that skipped its main check is a pass nobody
+    # should read as full coverage: record it PARTIAL, with the line that says so.
+    local status="$STEP_OK" note="$log" marker
+    marker="$(grep -m1 -E "$PARTIAL_MARKERS" "$log" || true)"
+    if [ -n "$marker" ]; then
+      status=PARTIAL
+      note="partial: $(printf '%s' "$marker" | sed 's/^ *//; s/^note: //' | cut -c1-110) -- $log"
+    fi
+    echo "    $status (${secs}s)"
+    [ -z "$marker" ] || echo "    | $marker"
+    record "$step" "$subject" "$status" "$secs" "$note"
   else
     tail -15 "$log" | sed 's/^/    | /'
     echo "    FAILED, exit $rc (${secs}s)"
@@ -275,6 +295,13 @@ summary() {  # prints the table; returns 1 when anything failed
     echo "EXTENDED: nothing ran"
     return 1
   fi
+  # At least one row must be a test that really ran. SKIP says a selection did
+  # not apply; pull's own ok row only says images were fetched (except for the
+  # pull subcommand, where that is the whole job).
+  if ! awk -F'\t' -v cmd="$CMD" '$3 ~ /^(ok|PARTIAL|report)$/ && ($1 != "pull" || cmd == "pull") { f = 1 } END { exit !f }' "$RESULTS"; then
+    echo "EXTENDED: FAILED (nothing ran: no step recorded ok, PARTIAL or report; every row is SKIP)"
+    return 1
+  fi
   if [ "$FULL_RUN" -eq 1 ]; then echo "EXTENDED: ok"
   else echo "EXTENDED: ok (subset: --only '${ONLY_CSV}' --flavor '${FLAVOR_CSV}')"
   fi
@@ -298,7 +325,8 @@ PULL_DIR=""
 # status<TAB>detail<TAB>revision<TAB>image id. A status other than ok is a
 # problem the caller reports; nothing here retags.
 pull_one() {
-  local ref="$2" kind="$3" out="$PULL_DIR/$1.status" log="$PULL_DIR/$1.log" arch rev hash id
+  local ref="$2" kind="$3" out="$PULL_DIR/$1.status" log="$PULL_DIR/$1.log" arch rev hash id info
+  rm -f "$out"
   if ! docker pull --platform "$PLATFORM" "$ref" >"$log" 2>&1; then
     if grep -qiE 'not found|manifest unknown|no matching manifest|name unknown' "$log"; then
       printf 'MISSING\t%s\t\t\n' "$ref is not in the registry for $PLATFORM" >"$out"
@@ -307,8 +335,12 @@ pull_one() {
     fi
     return 0
   fi
-  IFS='|' read -r arch rev hash id < <(docker image inspect --format \
-    '{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}|{{.Id}}' "$ref")
+  if ! info="$(docker image inspect --format \
+    '{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.revision"}}|{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}|{{.Id}}' "$ref" 2>/dev/null)"; then
+    printf 'PULL-FAILED\tinspect failed\t\t\n' >"$out"
+    return 0
+  fi
+  IFS='|' read -r arch rev hash id <<<"$info"
   [ "$rev" = "<no value>" ] && rev=""
   [ "$hash" = "<no value>" ] && hash=""
   if [ "$arch" != "${PLATFORM#linux/}" ]; then
@@ -324,8 +356,19 @@ pull_one() {
   fi
 }
 
-status_of() { cut -f1 "$PULL_DIR/$1.status"; }
-field_of() { cut -f"$2" "$PULL_DIR/$1.status"; }
+# A job that died without writing its status file is a failed pull, recorded
+# like any other, not an abort of the whole run.
+status_of() {
+  local f="$PULL_DIR/$1.status"
+  if [ -s "$f" ]; then cut -f1 "$f"; else echo PULL-FAILED; fi
+}
+field_of() {
+  local f="$PULL_DIR/$1.status"
+  if [ -s "$f" ]; then cut -f"$2" "$f"
+  elif [ "$2" = 2 ]; then echo "pull job died before writing a status"
+  else echo
+  fi
+}
 
 retag() {  # retag <ref> <canonical>
   local ref="$1" canonical="$2" old new prev
@@ -339,6 +382,12 @@ retag() {  # retag <ref> <canonical>
     [ -z "$old" ] || prev="${old:0:12}"
     echo "  retag: $canonical <- $ref (${new:0:12}; replaces $prev)"
     docker tag "$ref" "$canonical"
+  fi
+  # Drop the registry-named tag so the daemon does not list every image twice
+  # and dev: refs do not pile up across runs. Only the tag goes: the canonical
+  # one keeps the layers (and only after proving it names the same image).
+  if [ "$(docker image inspect --format '{{.Id}}' "$canonical" 2>/dev/null)" = "sha256:$new" ]; then
+    docker rmi "$ref" >/dev/null 2>&1 || echo "  note: could not untag $ref"
   fi
 }
 
@@ -385,7 +434,24 @@ cmd_pull() {
   # The first image alone, before the other ~50: every image of a commit shares
   # one inputs-hash, so a tree that differs from it differs from all of them.
   pull_one "${keys[0]}" "${refs[0]}" "${kinds[0]}"
-  if [ "$(status_of "${keys[0]}")" = INPUTS-MISMATCH ]; then
+  local first_status
+  first_status="$(status_of "${keys[0]}")"
+  if [ "$first_status" = MISSING ] || [ "$first_status" = PULL-FAILED ]; then
+    record pull "${keys[0]}" "$([ "$first_status" = MISSING ] && echo MISSING || echo FAIL)" 0 "$first_status: $(field_of "${keys[0]}" 2)"
+    {
+      echo "ABORTED: the first image, ${refs[0]}, could not be pulled ($first_status: $(field_of "${keys[0]}" 2))."
+      echo "Not trying the other $((${#keys[@]} - 1)) refs; nothing was retagged. Log: $PULL_DIR/${keys[0]}.log"
+      if [ "$first_status" = MISSING ]; then
+        echo "HEAD may have no images: its develop run was cancelled, failed or pruned, or it is not a develop commit."
+        echo "  --latest   pulls the last fully green run; it works when that run's inputs-hash equals this tree's (an earlier commit with the same inputs)"
+        echo "  --sha REF  names another commit"
+      else
+        echo "Check 'docker login ghcr.io' (a token with read:packages) and the repository name (EXTENDED_DEV_REPO, now $DEV_REPO)."
+      fi
+    } >&2
+    return 3
+  fi
+  if [ "$first_status" = INPUTS-MISMATCH ]; then
     local wt_sha
     wt_sha="${SHA_FULL:-$(field_of "${keys[0]}" 3)}"
     record pull "${keys[0]}" REFUSED 0 "inputs-hash differs from this tree"
@@ -394,6 +460,8 @@ cmd_pull() {
       echo "tests/smoke.sh and tests/test-pgo.sh fail every image on that mismatch (CF-47), and SMOKE_ALLOW_STALE would only hide it."
       echo "Nothing was retagged. Check the images' commit out in its own worktree and run tests/extended.sh from there:"
       echo "  git worktree add ../php-${wt_sha:0:12} ${wt_sha:-<sha>}"
+      echo "Or the tree is not the commit it looks like: uncommitted changes in a hashed path (scripts/inputs-hash.sh) change the hash too -- check 'git status'."
+      echo "If HEAD has no images (its develop run was cancelled), --latest pulls the last green run, which has the same inputs-hash when only unhashed files changed since."
     } >&2
     return 3
   fi
@@ -494,8 +562,8 @@ cmd_ext_builder() {
 }
 
 cmd_corpus_tiers() {
-  local floor _release _builder ctag versions v e touched=0 partial
-  local -a tier_versions in_sel sel_fpm
+  local floor _release _builder ctag versions v e touched=0 partial control
+  local -a tier_versions in_sel sel_fpm control_img
   declare -A fpm_sel=()
   for e in "${!FLAVOR_OF[@]}"; do
     [ "${FLAVOR_OF[$e]}" = fpm ] && [[ "$e" != *-v3 ]] && fpm_sel["${PHP_OF[$e]}"]="${TAG_OF[$e]}"
@@ -510,7 +578,15 @@ cmd_corpus_tiers() {
     [ "${#in_sel[@]}" -eq "${#tier_versions[@]}" ] || partial=1
     sel_fpm=()
     for v in "${in_sel[@]}"; do sel_fpm+=("${fpm_sel[$v]}"); done
-    gate corpus-tiers "tier $floor" "$ctag" "${sel_fpm[@]}" || continue
+    # The below-floor control test-corpus-tiers.sh picks up by itself, when it
+    # is on this daemon, has to be this tree's as well; a stale one would be
+    # used as if it proved something.
+    control="$(python3 "$ROOT/scripts/pgo_tiers.py" control-of "$floor")"
+    control_img=()
+    if [ -n "$control" ] && [ "$(image_state "lotuswebagency/php:$control-fpm")" != missing ]; then
+      control_img=("lotuswebagency/php:$control-fpm")
+    fi
+    gate corpus-tiers "tier $floor" "$ctag" "${sel_fpm[@]}" "${control_img[@]}" || continue
     if [ "$partial" -eq 1 ]; then
       # test-corpus-tiers.sh replays every tier version it finds locally and
       # takes no version filter; say so when that includes images outside the
@@ -536,7 +612,11 @@ cmd_corpus_tiers() {
 cmd_apps() {
   local stock=0 a
   for a in "${PASSTHRU[@]:-}"; do [ "$a" = --stock ] && stock=1; done
-  if [ "$stock" -eq 1 ]; then apps_run 1; return 0; fi
+  if [ "$stock" -eq 1 ]; then
+    [ "${#FLAVORS[@]}" -eq 0 ] || usage_die "apps --stock runs the stock baseline images, which have no flavors; --flavor does not apply"
+    apps_run 1
+    return 0
+  fi
 
   local -a keep_sel=("${SELECTED[@]}") keep_flavors=("${FLAVORS[@]:-}") fl=()
   local keep_full="$FULL_RUN" keep_only="$ONLY_CSV" keep_flavor_csv="$FLAVOR_CSV"
@@ -590,10 +670,11 @@ apps_run() {  # apps_run <stock 0|1>
     fi
     return 0
   fi
-  local -a result_files=("$LOG_DIR"/apps/results-*.tsv)
-  results="${result_files[${#result_files[@]}-1]}"
-  if [ ! -e "$results" ]; then
-    record apps "run-matrix.sh" FAIL "$secs" "exit $rc, wrote no results file, $log"
+  # The results file of THIS run, named on run-matrix.sh's plan line; a glob
+  # would also find the files of earlier runs in a reused EXTENDED_LOG_DIR.
+  results="$(sed -n 's/^plan: .* results //p' "$log" | tail -1)"
+  if [ -z "$results" ] || [ ! -e "$results" ]; then
+    record apps "run-matrix.sh" FAIL "$secs" "exit $rc, wrote no results file for this run, $log"
     return 0
   fi
   # run-matrix.sh's exit status comes from its RESULT rows alone. Compare them

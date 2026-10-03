@@ -8,8 +8,12 @@
 # each with <step>/results.tsv inside (tests/extended.sh's format: step,
 # subject, status, wall seconds, note). Prints a markdown report to
 # $GITHUB_STEP_SUMMARY and exits 1 when a required job failed, was cancelled,
-# or reported a FAIL/MISSING/STALE/REFUSED row. The bench jobs are report-only
-# and never count.
+# or reported a FAIL/MISSING/STALE/REFUSED row, or when a test leg (a php-*
+# or corpus-tiers-* artifact) has no row that really ran: at least one ok or
+# PARTIAL row from a step other than pull. Individual SKIP rows are fine (a
+# version without a -v3 target skips uarch); a leg made of SKIP rows and the
+# pull is a leg that tested nothing. The bench jobs are report-only and never
+# count.
 set -uo pipefail
 dir="${1:?usage: extended-summary.sh <artifacts-dir>}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
@@ -55,6 +59,14 @@ report="$(mktemp)"
     echo
     echo "$(awk -F'\t' '$4 == "ok"' "$rows" | wc -l) ok and $(awk -F'\t' '$4 == "SKIP"' "$rows" | wc -l) SKIP rows not listed; every row is in the uploaded extended-logs artifacts."
     if awk -F'\t' '$4 ~ /^(FAIL|MISSING|STALE|REFUSED)$/ && $1 !~ /^bench/ { f = 1 } END { exit !f }' "$rows"; then fail=1; fi
+    idle="$(awk -F'\t' '$1 ~ /^(php-|corpus-tiers)/ { seen[$1] = 1; if ($4 ~ /^(ok|PARTIAL)$/ && $2 != "pull") real[$1] = 1 }
+      END { for (l in seen) if (!(l in real)) print l }' "$rows" | sort)"
+    if [ -n "$idle" ]; then
+      fail=1
+      echo
+      echo "Legs in which no test step ran (every row is SKIP, or only the pull succeeded):"
+      while read -r leg; do echo "- \`$leg\`"; done <<<"$idle"
+    fi
   fi
   echo
   if [ "$fail" -eq 0 ]; then echo "**EXTENDED: ok**"; else echo "**EXTENDED: FAILED**"; fi
