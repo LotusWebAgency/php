@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Plan one extended.yml run: which images, which tree, which versions.
 #
-#   EXT_RUN_SHA=<workflow_run head sha> | EXT_SHA_INPUT=<dispatch sha> | neither
+#   EXT_RUN_SHA=<workflow_run head sha, or the pushed sha of an extended-run push>
+#   | EXT_SHA_INPUT=<dispatch sha> | neither
 #   EXT_ONLY=<csv of versions> EXT_FLAVOR=<csv of flavors>
 #   EXT_APPS=<true|false> EXT_BENCH=<true|false>   (empty = default: true / false)
 #   ci/extended-plan.sh
@@ -11,7 +12,7 @@
 #   sha       the commit whose images are tested; jobs pull exactly
 #             dev:<tag>-<sha12>, so one run can never mix two commits
 #   checkout  the ref whose tests/ and ci/ run. The images' own commit for a
-#             workflow_run, or for an explicit sha whose inputs-hash differs from
+#             workflow_run or an extended-run push, or for an explicit sha whose inputs-hash differs from
 #             the dispatched ref's; otherwise (a dispatch with no sha, or one
 #             whose inputs-hash matches) the dispatched ref, which may carry
 #             newer test scripts than the images -- tests/ and ci/ are outside

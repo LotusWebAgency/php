@@ -713,16 +713,38 @@ tests/extended.sh pull --latest                     # the last fully green devel
 other scripts expect and prints every tag it replaces. The other subcommands
 (`uarch`, `ext-builder`, `corpus-tiers`, `apps`, `smoke`, `bench`) don't
 remember what was pulled, so repeat `--only`/`--flavor`; one that finds an
-image absent says `MISSING`, and one from another tree says `STALE`. `all`
-runs everything even after a failure and ends with a table; `tests/extended.sh
---help` has the rest.
+image absent says `MISSING`, and one from another tree says `STALE`. `all` runs
+`uarch`, `ext-builder`, `corpus-tiers` and `apps` (not `smoke`, not `bench`:
+those are subcommands of their own) even after a failure and ends with a table.
+A step whose script passed without running its main check (the `-v3`
+instruction-mix check on arm64, the corpus-tier control when no image below the
+floor is present) is `PARTIAL`, and a run in which every row is `SKIP` fails: it
+tested nothing. After a retag the `dev:` tag is removed again, the canonical
+`lotuswebagency/php:<tag>` keeps the layers. `tests/extended.sh --help` has the
+rest.
+
+To spread a run over several machines or sessions, give `pull` and every test
+the same `--only`/`--flavor` selection per shard:
+
+```sh
+tests/extended.sh pull --only 8.0,8.1 && tests/extended.sh all --skip-pull --only 8.0,8.1
+tests/extended.sh pull --only 8.2,8.3 && tests/extended.sh all --skip-pull --only 8.2,8.3
+```
+
+(`pull --no-corpus` is for a shard that runs neither `corpus-tiers` nor
+`smoke`, e.g. `uarch`, `ext-builder` and `apps` one by one.)
 
 The images have to be the tree you are standing in. Each carries the
 `inputs-hash` of the commit it was built from, and `tests/smoke.sh` and
 `tests/test-pgo.sh` refuse an image whose hash differs from the working tree's
 (that check has no override here). `pull` therefore refuses when the hashes
 differ, and prints the command that fixes it: check the commit out in its own
-worktree and run `tests/extended.sh` from there.
+worktree and run `tests/extended.sh` from there. Uncommitted changes in a
+hashed path change the hash too (`git status`), and when HEAD has no images
+because its develop run was cancelled, `pull --latest` takes the last green
+run, which carries the same hash when only unhashed files changed since. If
+the very first image cannot be pulled (not in the registry, or no access) `pull`
+stops there instead of trying the other fifty.
 
 ```sh
 git worktree add ../php-<sha12> <sha>
@@ -757,9 +779,21 @@ gh workflow run extended.yml --ref develop -f only=8.4,8.5 -f flavor=fpm,cli -f 
 Without `sha` the run fails up front when the ref's `inputs-hash` differs from
 the floating images'; then dispatch with `sha=` the commit it names. After a
 successful `ci` run on a develop push the workflow also starts by itself, but
-GitHub only fires `workflow_run` for workflow files on the default branch, so
-until this one is on `main` it is dispatch-only. Logs and `results.tsv` files
-are kept as artifacts for five days.
+GitHub only fires `workflow_run` (and only accepts `workflow_dispatch`) for
+workflow files on the default branch, so until this one is on `main` neither
+works. Push the commit whose images should be tested to the `extended-run`
+branch instead, which starts the workflow from the pushed commit's own copy of
+the file and tests that commit's images with its own tests:
+
+```sh
+git push origin <sha>:refs/heads/extended-run
+# when the run is done, so the next push is a new branch and not a rejected update:
+git push origin :extended-run
+```
+
+No force push: delete the branch after each run and push a fresh one next time.
+The branch must not be protected, and `ci` does not run on it. Logs and
+`results.tsv` files are kept as artifacts for five days.
 
 ## Related images
 

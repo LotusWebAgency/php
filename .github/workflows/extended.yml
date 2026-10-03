@@ -17,6 +17,14 @@
 #                      ci/extended-plan.sh checks once up front. With a sha: that
 #                      commit's images, tested with the ref's scripts when the
 #                      inputs-hash matches, else with that commit's own tree.
+#   push to extended-run  the way to start a run while this file is not on main
+#                      yet (GitHub accepts neither workflow_dispatch nor workflow_run
+#                      for a workflow that is not on the default branch, but a push
+#                      trigger works from any branch's copy): the pushed commit's
+#                      images, tests and tree, as for workflow_run. Start one with
+#                      `git push origin <sha>:refs/heads/extended-run`, delete the
+#                      branch afterwards (`git push origin :extended-run`) and push a
+#                      fresh one next time. ci.yml does not run on that branch.
 #   workflow_run       after `ci` completes successfully on a develop push (or a
 #                      develop dispatch): that run's head sha, images and tree.
 #                      GitHub fires workflow_run only for a workflow file on the
@@ -83,6 +91,8 @@ on:
         description: "Also run the benchmark (cli images, report only)"
         type: boolean
         default: false
+  push:
+    branches: [extended-run]
   workflow_run:
     workflows: [ci]
     types: [completed]
@@ -128,7 +138,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # workflow_run runs as the default branch: the commit under test is
-          # named explicitly. Full history, so a dispatched abbreviated sha resolves.
+          # named explicitly (a push to extended-run already is that commit).
+          # Full history, so a dispatched abbreviated sha resolves.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
@@ -143,7 +154,7 @@ jobs:
       - name: Plan
         id: plan
         env:
-          EXT_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXT_RUN_SHA: ${{ github.event.workflow_run.head_sha || (github.event_name == 'push' && github.sha) || '' }}
           EXT_SHA_INPUT: ${{ inputs.sha }}
           EXT_ONLY: ${{ inputs.only }}
           EXT_FLAVOR: ${{ inputs.flavor }}
