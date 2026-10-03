@@ -18,8 +18,8 @@ floating tag is read from the `<tag>-<sha>` tag that version also carries.
       tag can lead to), nor of the newest sha overall, whatever their age;
     * any other tagged version goes once the newest version of every sha it
       belongs to is older than RETENTION_DAYS (default 14);
-    * an untagged version goes only if it is older than that AND no kept manifest
-      list names its digest as a child. When the children cannot be resolved the
+    * an untagged version goes only if it is older than that AND no kept version
+      lists its digest as a child manifest. When the children cannot be resolved the
       untagged versions are all kept.
 """
 import argparse
@@ -115,7 +115,7 @@ def plan(versions, now, retention_days, children_of):
     referenced = set()
     try:
         for v, _ in keep:
-            if any(p is None or p[2] is None for p in map(parse_tag, tags_of(v))):
+            if tags_of(v):  # per-arch tags too: a pushed index (containerd store) has untagged platform children
                 referenced |= children_of(v["name"])
     except Exception as exc:  # when in doubt, keep
         notes.append(f"could not resolve manifest list children ({exc}): keeping every untagged version")

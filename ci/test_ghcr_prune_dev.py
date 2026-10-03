@@ -1,4 +1,6 @@
+import contextlib
 import datetime
+import io
 import json
 import sys
 import unittest
@@ -152,7 +154,8 @@ class TestPlan(unittest.TestCase):
         self.assertEqual(ids(delete), {old_unreferenced["id"]})
         self.assertIn(fresh["id"], ids(keep))
         self.assertIn(old_referenced["id"], ids(keep))
-        self.assertEqual(asked, [floating["list"]["name"]], "per-arch images are not manifest lists")
+        self.assertEqual(sorted(asked), sorted(v["name"] for v in floating.values()),
+                         "every kept tagged version is asked, a per-arch push can be an index too")
 
     def test_children_of_a_deleted_list_do_not_protect_an_untagged_version(self):
         floating = sha_set("8.5-fpm", SHA_NEW, 1)
@@ -210,9 +213,10 @@ class TestIo(unittest.TestCase):
         stale = sha_set("8.5-fpm", SHA_OLD, 30)
         with mock.patch.object(prune, "list_versions", return_value=[*floating.values(), *stale.values()]), \
                 mock.patch.object(prune, "delete_version") as delete:
-            self.assertEqual(prune.main(["--dry-run"], now=NOW), 0)
-            delete.assert_not_called()
-            self.assertEqual(prune.main([], now=NOW), 0)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(prune.main(["--dry-run"], now=NOW), 0)
+                delete.assert_not_called()
+                self.assertEqual(prune.main([], now=NOW), 0)
             self.assertEqual(delete.call_count, 3)
 
     def test_delete_goes_to_the_dev_package_only(self):

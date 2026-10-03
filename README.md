@@ -649,8 +649,8 @@ ghcr.io/lotuswebagency/php/dev:<tag>-<sha>-<arch>   # single-arch image, amd64 o
 `8.4-cli-builder-v3`, `8.5-ext-builder`). The package is private: `docker login
 ghcr.io` with a token that has `read:packages`. These are unpublished test
 builds -- unsigned, without SBOM or provenance attestations, not for production.
-Versions older than 14 days are deleted daily, except the commit the floating
-tags point at.
+Versions older than 14 days are deleted daily, except the commits the floating
+tags point at and the newest one.
 
 ## Building locally
 
