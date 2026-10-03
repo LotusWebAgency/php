@@ -297,10 +297,18 @@ summary() {  # prints the table; returns 1 when anything failed
   fi
   # At least one row must be a test that really ran. SKIP says a selection did
   # not apply; pull's own ok row only says images were fetched (except for the
-  # pull subcommand, where that is the whole job).
+  # pull subcommand, where that is the whole job). Only `all` is held to this:
+  # one subcommand that does not apply to its selection (uarch on a version
+  # with no -v3 target) is an honest SKIP, and extended.yml runs uarch on every
+  # version job -- ci/extended-summary.sh holds each job to at least one test
+  # that really ran.
   if ! awk -F'\t' -v cmd="$CMD" '$3 ~ /^(ok|PARTIAL|report)$/ && ($1 != "pull" || cmd == "pull") { f = 1 } END { exit !f }' "$RESULTS"; then
-    echo "EXTENDED: FAILED (nothing ran: no step recorded ok, PARTIAL or report; every row is SKIP)"
-    return 1
+    if [ "$CMD" = all ]; then
+      echo "EXTENDED: FAILED (nothing ran: no step recorded ok, PARTIAL or report; every row is SKIP)"
+      return 1
+    fi
+    echo "EXTENDED: ok (nothing applicable: every row is SKIP)"
+    return 0
   fi
   if [ "$FULL_RUN" -eq 1 ]; then echo "EXTENDED: ok"
   else echo "EXTENDED: ok (subset: --only '${ONLY_CSV}' --flavor '${FLAVOR_CSV}')"

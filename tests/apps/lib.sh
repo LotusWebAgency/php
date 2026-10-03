@@ -81,12 +81,16 @@ apptest_resolve_set() {
 
 # apptest_set_field <app> <set> <min|max>
 apptest_set_field() {
-  local _a set lo hi
-  while read -r _a set lo hi; do
+  local _a set lo hi rows row
+  # Read every row first: returning from inside a `done < <(...)` loop leaves
+  # the producer writing into a closed pipe ("printf: write error").
+  mapfile -t rows < <(apptest_sets_rows "$1")
+  for row in "${rows[@]}"; do
+    read -r _a set lo hi <<<"$row"
     [ "$set" = "$2" ] || continue
     case "$3" in min) echo "$lo" ;; max) echo "$hi" ;; esac
     return 0
-  done < <(apptest_sets_rows "$1")
+  done
   echo "FAIL: no $1 set '$2' in tests/apps/sets" >&2
   return 1
 }
