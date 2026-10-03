@@ -615,7 +615,7 @@ Trivy only suppresses `not_affected` and `fixed` statements, and ours are
 still show. The CI gate honors them through a `.trivyignore` generated from the
 same file, which expires on the same date.
 
-A pull request or a push to `develop` builds and tests without publishing; a Trivy gate fails the
+A pull request or a push to `develop` builds and tests without publishing to Docker Hub; a Trivy gate fails the
 build on any fixable CRITICAL or HIGH finding before anything can reach a
 registry (accepted risks are recorded with a reason and a re-review date in
 [`vex/php.openvex.json`](vex/php.openvex.json); `.trivyignore` is generated from it). Trivy scans the Debian package layer -- it can't see the libraries
@@ -630,9 +630,27 @@ Work lands on `develop` through pull requests. A pull request (to `develop` or
 `main`) builds, tests and Trivy-gates a representative subset on amd64. A push
 to `develop` builds every image natively on amd64 and arm64 and runs the smoke
 tests, the extension end-to-end test and the Trivy gate on each, but never
-publishes anything. A pull request from `develop` to `main` is the release:
+publishes to Docker Hub. A pull request from `develop` to `main` is the release:
 merging it builds, tests, publishes and signs every image. The weekly rebuild
 runs on `main` only, to pick up base-image and package updates.
+
+### Develop images in GHCR
+
+Every image of a `develop` push that passed all of those tests is also pushed to
+GitHub Container Registry, so it can be pulled and tested further before a release:
+
+```
+ghcr.io/lotuswebagency/php/dev:<tag>            # floating: the latest develop run in which every image passed
+ghcr.io/lotuswebagency/php/dev:<tag>-<sha>      # multi-arch list for one commit (first 12 characters of the SHA)
+ghcr.io/lotuswebagency/php/dev:<tag>-<sha>-<arch>   # single-arch image, amd64 or arm64
+```
+
+`<tag>` is the tag the release image carries on Docker Hub (`8.5-fpm`,
+`8.4-cli-builder-v3`, `8.5-ext-builder`). The package is private: `docker login
+ghcr.io` with a token that has `read:packages`. These are unpublished test
+builds -- unsigned, without SBOM or provenance attestations, not for production.
+Versions older than 14 days are deleted daily, except the commit the floating
+tags point at.
 
 ## Building locally
 
