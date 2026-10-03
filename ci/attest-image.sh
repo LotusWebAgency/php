@@ -53,12 +53,18 @@ trap 'rm -rf "$work"' EXIT
 # Docker Hub's referrers listing lags a fresh push by seconds: the first
 # release's verify, ~3s after its attest, found nothing ("no matching
 # attestations: "), and the same command passed minutes later against the same
-# digest. Only the verify is retried -- attesting again would stack a duplicate.
+# digest. That lag is a verify problem, not an attest one: attest is only
+# repeated (ci/retry.sh) when cosign itself reports a registry 429/5xx/network
+# error, i.e. when it did not get its write accepted. The window where an
+# attest landed and still reported such an error is small, and a stacked
+# duplicate is harmless here (same predicate bytes, same signer; readers take the
+# first, and a re-run of the job already stacks them), whereas an unretried 429
+# fails the whole target's release.
 VERIFY_WAITS="${ATTEST_VERIFY_WAITS:-5 10 20 30 45 60}"
 
 attest() {  # attest <digest> <type> <predicate-file>
   echo "attest $2 -> $repo@$1"
-  "$COSIGN" attest --yes "${attest_flags[@]}" --type "$2" --predicate "$3" "$repo@$1"
+  "$HERE/retry.sh" "$COSIGN" attest --yes "${attest_flags[@]}" --type "$2" --predicate "$3" "$repo@$1"
   local wait err
   for wait in $VERIFY_WAITS ""; do
     if err="$("$COSIGN" verify-attestation "${verify_flags[@]}" --type "$2" "$repo@$1" 2>&1 >/dev/null)"; then
@@ -127,7 +133,7 @@ fi
 # list: the list must hold exactly the manifests that were tested and attested.
 mapfile -t have < <(result_arches)
 [ "${#have[@]}" -gt 0 ] || { echo "FAIL: no test results in $dir" >&2; exit 1; }
-raw="$(docker buildx imagetools inspect "$repo@$list" --raw)"
+raw="$("$HERE/retry.sh" docker buildx imagetools inspect "$repo@$list" --raw)"
 for arch in "${have[@]}"; do
   held="$(jq -r --arg arch "$arch" '.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' <<<"$raw")"
   want="$(jq -r '.platforms[0].image_digest' "$dir/$arch.test-result.json")"

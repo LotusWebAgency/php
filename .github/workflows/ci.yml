@@ -94,6 +94,16 @@
 # and no `docker pull` step earns its keep there either (removed; see the
 # corpus-mount steps below, which pull for a different reason: asserting the
 # inputs-hash label before the build, not making the ref resolvable).
+#
+# Docker Hub rate limits (the first release's 36 failed legs: 429 on base-image
+# digest lookups and on our own pushed digests): base-image pulls of the
+# build/verify jobs go through mirror.gcr.io (BuildKit's buildkitd-config-inline;
+# the corpus job, which builds on the runner's daemon, gets the daemon's
+# registry-mirrors instead), and every other Docker Hub call -- bake, pull-back by
+# digest, imagetools, cosign -- runs under ci/retry.sh, which retries only
+# 429/5xx/network errors with backoff. No strategy.max-parallel:
+# the runner pool already bounds concurrency and there is no measured Hub window
+# to size a cap against.
 name: ci
 
 on:
@@ -233,7 +243,7 @@ jobs:
         target: ${{ fromJson(needs.verify-matrix.outputs.legs) }}
         arch: ${{ fromJson(needs.verify-matrix.outputs.arches) }}
     runs-on: ${{ matrix.arch.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
       # GHCR: pull of the PGO corpus image and the build cache, and, on a develop
@@ -265,6 +275,16 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # Docker Hub rate-limits the base-image digest lookups of ~100 concurrent
+          # legs (429 on HEAD /v2/library/gcc/manifests/sha256:...). Every FROM in
+          # the Dockerfile is digest-pinned, so a mirror cannot change what is
+          # built: BuildKit checks the digest it gets. If the mirror lacks an
+          # image or errors, BuildKit falls back to docker.io. Pushes go to Docker
+          # Hub itself, never the mirror.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       - name: Log in to GHCR (corpus and cache pull, dev image push)
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -304,7 +324,10 @@ jobs:
         run: |
           set -euo pipefail
           read -ra bake_targets <<<"$TARGET_BAKE"
-          docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
+          # Retried on a Docker Hub 429/5xx/network error (ci/retry.sh); the second
+          # attempt is mostly layer-cache hits. Five attempts (30s to 5min waits);
+          # a build that fails for real is never retried, only a registry error.
+          RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
             --set "*.platform=$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
             --load
@@ -327,7 +350,7 @@ jobs:
         run: |
           set -euo pipefail
           slug="php-${TARGET_PHP//./_}"
-          docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm" \
+          RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm" \
             --set "*.platform=$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
             --load
@@ -528,6 +551,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # This job builds through the runner's own daemon (the `docker` driver
+      # below, and plain `docker build`), so BuildKit's own mirror setting, which
+      # the build/verify jobs use, does not reach it: the daemon's
+      # registry-mirrors does. Same reasoning as there -- every Docker Hub base
+      # is digest-pinned, the mirror cannot change what is built, and the daemon
+      # falls back to Docker Hub when the mirror cannot serve an image.
+      - name: Route Docker Hub pulls through mirror.gcr.io
+        run: |
+          set -euo pipefail
+          existing="$(cat /etc/docker/daemon.json 2>/dev/null || echo '{}')"
+          jq --argjson cur "$existing" -n '$cur + {"registry-mirrors": ["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json >/dev/null
+          sudo systemctl restart docker
+          docker info --format 'registry mirrors: {{.RegistryConfig.Mirrors}}'
+
       # docker (not the action default docker-container): Dockerfile.corpus
       # and the bootstrap cli-builder Dockerfile both FROM an image that may
       # only exist in this runner's own local daemon store -- see the module
@@ -561,7 +598,10 @@ jobs:
             # check below succeed immediately when this tier's *release*
             # cli-builder has been published already; harmless when it has
             # not (build-corpus.sh falls back to bootstrapping).
-            if docker pull "$TIER_BUILDER" >/dev/null 2>&1; then
+            # A 429 here would send the leg into the (slow) bootstrap fallback, so
+            # transient registry errors are retried; "not found" is not, and
+            # still falls through to the bootstrap.
+            if ./ci/retry.sh docker pull --quiet "$TIER_BUILDER" >/dev/null 2>&1; then
               echo "note: pulled published release builder $TIER_BUILDER"
             else
               echo "note: $TIER_BUILDER not available yet, build-corpus.sh will bootstrap"
@@ -674,7 +714,7 @@ jobs:
             platform: linux/arm64
     name: build ${{ matrix.target.name }} ${{ matrix.arch.name }}
     runs-on: ${{ matrix.arch.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
       packages: write # GHCR: corpus pull + build-cache push
@@ -708,6 +748,16 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          # Docker Hub rate-limits the base-image digest lookups of ~100 concurrent
+          # legs (429 on HEAD /v2/library/gcc/manifests/sha256:...). Every FROM in
+          # the Dockerfile is digest-pinned, so a mirror cannot change what is
+          # built: BuildKit checks the digest it gets. If the mirror lacks an
+          # image or errors, BuildKit falls back to docker.io. Pushes go to Docker
+          # Hub itself, never the mirror.
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["mirror.gcr.io"]
 
       - name: Log in to Docker Hub
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -754,7 +804,15 @@ jobs:
         run: |
           set -euo pipefail
           read -ra bake_targets <<<"$TARGET_BAKE"
-          docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
+          # Retried on a Docker Hub 429/5xx/network error (ci/retry.sh), with a warm
+          # layer cache. Safe for a push by digest: every attempt starts by deleting
+          # metadata.json, so the digest read below is always the one the attempt
+          # that succeeded wrote -- never a leftover of a failed one -- and nothing
+          # else carries a digest forward (DIGEST goes to GITHUB_ENV only after
+          # this). Whatever a failed attempt pushed stays an untagged, unreferenced
+          # orphan in the repository.
+          RETRY_ATTEMPTS=5 ./ci/retry.sh bash -c 'rm -f metadata.json; exec "$@"' retry-bake \
+            docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
             --set '*.platform='"$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
             --set "*.tags=$DOCKERHUB_IMAGE" \
@@ -792,11 +850,11 @@ jobs:
           fi
 
       - name: Pull the pushed image back by digest (I4)
-        run: docker pull "${DOCKERHUB_IMAGE}@${DIGEST}"
+        run: ./ci/retry.sh docker pull --quiet "${DOCKERHUB_IMAGE}@${DIGEST}"
 
       - name: Pull the pushed ext-builder back by digest (I4)
         if: matrix.target.rider_name != ''
-        run: docker pull "${DOCKERHUB_IMAGE}@${RIDER_DIGEST}"
+        run: ./ci/retry.sh docker pull --quiet "${DOCKERHUB_IMAGE}@${RIDER_DIGEST}"
 
       # The output is kept (tee, pipefail) for the signed test-result attestation:
       # ci/result_predicate.py reads the `ok:` lines and refuses a log that
@@ -926,7 +984,7 @@ jobs:
       matrix:
         target: ${{ fromJson(needs.release-matrix.outputs.targets) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 90
     permissions:
       contents: read # checkout, to read matrix.json for the image name (M19)
       id-token: write # cosign keyless OIDC
@@ -996,6 +1054,9 @@ jobs:
           # artifact) rather than trusting matrix.json's release field for
           # the tag: a published version tag can only ever claim what the
           # image actually contains.
+          # Pulled explicitly first so a Docker Hub 429 is retried: the pull
+          # `docker run` would do on its own is not.
+          ./ci/retry.sh docker pull --quiet "${DOCKERHUB_IMAGE}@${amd64_digest}" >/dev/null
           actual_version="$(docker run --rm "${DOCKERHUB_IMAGE}@${amd64_digest}" php -r 'echo PHP_VERSION;')"
           [ "$actual_version" = "$TARGET_RELEASE" ] || {
             echo "FAIL: $TARGET_NAME built PHP $actual_version, matrix.json says $TARGET_RELEASE" >&2
@@ -1016,14 +1077,15 @@ jobs:
           # image never gets a tag. The list gets its own attestations below.
           ./ci/attest-image.sh platforms "$DOCKERHUB_IMAGE" "$TARGET_FLAVOR" digests
 
-          docker buildx imagetools create "${tag_args[@]}" \
+          # Idempotent (same sources, same tags, same list bytes), so retried.
+          ./ci/retry.sh docker buildx imagetools create "${tag_args[@]}" \
             "${DOCKERHUB_IMAGE}@${amd64_digest}" "${DOCKERHUB_IMAGE}@${arm64_digest}"
 
           # The manifest list's own digest is the sha256 of its raw content
           # as served -- this is how registry digests are computed, so
           # hashing --raw's output here is equivalent to (and cheaper than)
           # a second registry round trip to ask for it back.
-          list_digest="sha256:$(docker buildx imagetools inspect "${DOCKERHUB_IMAGE}:${full_tag}" --raw | sha256sum | cut -d' ' -f1)"
+          list_digest="sha256:$(./ci/retry.sh docker buildx imagetools inspect "${DOCKERHUB_IMAGE}:${full_tag}" --raw | sha256sum | cut -d' ' -f1)"
           echo "manifest list digest: $list_digest"
           echo "LIST_DIGEST=$list_digest" >> "$GITHUB_ENV"
 
@@ -1032,7 +1094,11 @@ jobs:
       # which is not what SECURITY.md/README/DOCKERHUB.md promise ("every
       # published digest").
       - name: Sign the manifest, recursively (keyless)
-        run: cosign sign --yes --recursive "${DOCKERHUB_IMAGE}@${LIST_DIGEST}"
+        # Retried on a registry/Rekor/Fulcio 429, 5xx or network error. A repeat can
+        # stack a second keyless signature on a digest the first attempt already
+        # signed before it failed; a verifier needs any one valid signature, so
+        # the duplicate is harmless.
+        run: ./ci/retry.sh cosign sign --yes --recursive "${DOCKERHUB_IMAGE}@${LIST_DIGEST}"
 
       # The aggregated test results and the OpenVEX statements (vex/php.openvex.json,
       # scoped to the digest) on the manifest list the tags resolve to; the platform

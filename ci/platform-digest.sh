@@ -11,7 +11,8 @@
 set -euo pipefail
 [ "$#" -eq 2 ] || { echo "usage: $0 <repo>@<index-digest> <arch>" >&2; exit 2; }
 ref="$1" arch="$2"
-raw="$(docker buildx imagetools inspect "$ref" --raw)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+raw="$("$HERE/retry.sh" docker buildx imagetools inspect "$ref" --raw)"
 digests="$(jq -r --arg arch "$arch" \
   '.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' <<<"$raw")"
 [ -n "$digests" ] && [ "$(wc -l <<<"$digests")" -eq 1 ] || {
