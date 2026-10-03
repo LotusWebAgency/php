@@ -777,7 +777,11 @@ gh workflow run extended.yml --ref develop -f only=8.4,8.5 -f flavor=fpm,cli -f 
 ```
 
 Without `sha` the run fails up front when the ref's `inputs-hash` differs from
-the floating images'; then dispatch with `sha=` the commit it names. After a
+the floating images'; then dispatch with `sha=` the commit it names. With a
+`sha` whose `inputs-hash` differs from the ref's, every job runs that commit's
+own tree, so this only works for a commit that already contains the extended
+workflow's scripts (the commit that added `extended.yml`, or a later one); for
+an older commit `plan` fails up front saying so. After a
 successful `ci` run on a develop push the workflow also starts by itself, but
 GitHub only fires `workflow_run` (and only accepts `workflow_dispatch`) for
 workflow files on the default branch, so until this one is on `main` neither
@@ -791,9 +795,29 @@ git push origin <sha>:refs/heads/extended-run
 git push origin :extended-run
 ```
 
+If develop CI pushed no images for that commit (one that only changed `tests/`
+or `ci/`, which are outside the `inputs-hash`, is never built), the run tests
+the last green develop images instead, provided their `inputs-hash` equals the
+pushed tree's; the plan log and job summary say which path was taken. With a
+differing hash it fails up front.
+
 No force push: delete the branch after each run and push a fresh one next time.
 The branch must not be protected, and `ci` does not run on it. Logs and
 `results.tsv` files are kept as artifacts for five days.
+
+Automatic runs (after `ci`, or a push to `extended-run`) share one concurrency
+group: a run in flight is never cancelled and only the newest pending one waits
+behind it. A selection without the `fpm`, `cli` or `cli-builder` flavor builds
+no fixtures and runs no app suites. Every job starts with `ci/free-disk.sh`
+(fails below 20 GB free, `FREE_DISK_MIN_GB`) and ends by logging `df` and
+`docker system df`.
+
+The app fixtures are images committed locally, labelled
+`org.opencontainers.image.source=https://github.com/LotusWebAgency/php`, which
+is what links the `php/apptest` GHCR package to this repository and lets the
+workflow's `GITHUB_TOKEN` push and pull it. If a package of that name already
+existed before it was linked, give this repository access to it (package
+settings, "Manage Actions access", role Write) or the push is denied.
 
 ## Related images
 

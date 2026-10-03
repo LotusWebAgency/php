@@ -13,7 +13,12 @@
 # PARTIAL row from a step other than pull. Individual SKIP rows are fine (a
 # version without a -v3 target skips uarch); a leg made of SKIP rows and the
 # pull is a leg that tested nothing. The bench jobs are report-only and never
-# count.
+# count, not even towards "some results exist".
+#
+# A job that can be skipped must not have been when the plan put it in scope
+# (read from the plan outputs in NEEDS_JSON): versions whenever plan
+# succeeded, corpus-tiers when plan.outputs.fpm is true, fixtures when
+# plan.outputs.apps is true. Otherwise a skip would read as a pass.
 set -uo pipefail
 dir="${1:?usage: extended-summary.sh <artifacts-dir>}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
@@ -45,9 +50,18 @@ report="$(mktemp)"
     esac
   done
   plan="$(jq -r '.plan.result // "absent"' <<<"$needs")"
-  if [ "$plan" = success ] && [ ! -s "$rows" ]; then
-    fail=1
-    echo "- no results.tsv was uploaded by any job: nothing is known to have run"
+  if [ "$plan" = success ]; then
+    in_scope=(versions)
+    [ "$(jq -r '.plan.outputs.fpm // ""' <<<"$needs")" != true ] || in_scope+=(corpus-tiers)
+    [ "$(jq -r '.plan.outputs.apps // ""' <<<"$needs")" != true ] || in_scope+=(fixtures)
+    for j in "${in_scope[@]}"; do
+      r="$(jq -r --arg j "$j" '.[$j].result // "absent"' <<<"$needs")"
+      [ "$r" = success ] || { fail=1; echo "- job \`$j\` is in scope for this run and did not succeed: $r"; }
+    done
+    if ! awk -F'\t' '$1 !~ /^bench/ { f = 1 } END { exit !f }' "$rows"; then
+      fail=1
+      echo "- no results.tsv was uploaded by any test job: nothing is known to have run"
+    fi
   fi
   if [ -s "$rows" ]; then
     echo

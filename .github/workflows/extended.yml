@@ -17,6 +17,13 @@
 #                      ci/extended-plan.sh checks once up front. With a sha: that
 #                      commit's images, tested with the ref's scripts when the
 #                      inputs-hash matches, else with that commit's own tree.
+#                      The own-tree mode only works for a commit that already
+#                      contains this workflow's scripts (ci/extended-*.sh and
+#                      tests/extended.sh pull --no-corpus), i.e. the commit that
+#                      added extended.yml or a later one: every job runs that
+#                      commit's copies. plan fails early with a clear message for
+#                      an older one. Older commits cannot be tested from this
+#                      workflow at all unless their inputs-hash equals the ref's.
 #   push to extended-run  the way to start a run while this file is not on main
 #                      yet (GitHub accepts neither workflow_dispatch nor workflow_run
 #                      for a workflow that is not on the default branch, but a push
@@ -25,6 +32,11 @@
 #                      `git push origin <sha>:refs/heads/extended-run`, delete the
 #                      branch afterwards (`git push origin :extended-run`) and push a
 #                      fresh one next time. ci.yml does not run on that branch.
+#                      When develop CI pushed no images of the pushed commit (a
+#                      commit that only changed tests/ or ci/, outside the
+#                      inputs-hash, is never built), plan falls back to the
+#                      floating images if their inputs-hash equals the pushed
+#                      tree's, and logs which path it took.
 #   workflow_run       after `ci` completes successfully on a develop push (or a
 #                      develop dispatch): that run's head sha, images and tree.
 #                      GitHub fires workflow_run only for a workflow file on the
@@ -65,7 +77,12 @@
 # builder flavors are the heavy ones), three fixtures (MariaDB plus an installed
 # app each) and the stack's service images; the corpus-tiers job holds every fpm
 # image and 5 corpus tiers (each carries the cli-builder toolchain). None of that
-# was measured on a runner, so every job starts with ci/free-disk.sh.
+# was measured on a runner, so every job starts with ci/free-disk.sh (which also
+# fails the job early below 20 GB free) and ends with its `report`: df and
+# docker system df in the log, to size the disk from real numbers.
+#
+# Upload steps run always (a timed-out job keeps its logs) and overwrite, so a
+# re-run of a failed job replaces its artifact instead of conflicting with it.
 name: extended
 
 on:
@@ -99,9 +116,13 @@ on:
     branches: [develop]
 
 concurrency:
-  # Per image commit; never cancels a run in flight (a run is an hour or more of
-  # runner time, and nothing about a later one makes it moot).
-  group: extended-${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+  # Never cancels a run in flight (a run is an hour or more of runner time, and
+  # nothing about a later one makes it moot). Automatic runs (workflow_run, push
+  # to extended-run) share one group: a run in flight keeps going and only the
+  # newest pending one waits behind it, so a burst of develop pushes coalesces
+  # instead of queueing one full run per push. A dispatch has a group per
+  # commit, so it neither waits for nor displaces an automatic run.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('extended-{0}', inputs.sha || github.sha) || 'extended-auto' }}
   cancel-in-progress: false
 
 permissions: {}
@@ -155,6 +176,7 @@ jobs:
         id: plan
         env:
           EXT_RUN_SHA: ${{ github.event.workflow_run.head_sha || (github.event_name == 'push' && github.sha) || '' }}
+          EXT_EVENT: ${{ github.event_name }}
           EXT_SHA_INPUT: ${{ inputs.sha }}
           EXT_ONLY: ${{ inputs.only }}
           EXT_FLAVOR: ${{ inputs.flavor }}
@@ -201,13 +223,19 @@ jobs:
         run: ci/extended-fixtures.sh
 
       - name: Upload logs
-        if: ${{ !cancelled() }}
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: extended-logs-fixtures-${{ matrix.arch.name }}
           path: ${{ runner.temp }}/extended-logs
-          if-no-files-found: warn
+          if-no-files-found: ignore
+          overwrite: true
           retention-days: 5
+
+      # Last, whatever happened above: the numbers to size the runner disk from.
+      - name: Disk usage
+        if: always()
+        run: ci/free-disk.sh report
 
   # --------------------------------------------------------------- versions
   # `!cancelled()`: fixtures is skipped when apps is off, and a failed fixtures
@@ -270,13 +298,19 @@ jobs:
         run: ci/extended-run.sh apps apps
 
       - name: Upload logs
-        if: ${{ !cancelled() }}
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: extended-logs-php-${{ matrix.version }}-${{ matrix.arch.name }}
           path: ${{ runner.temp }}/extended-logs
-          if-no-files-found: warn
+          if-no-files-found: ignore
+          overwrite: true
           retention-days: 5
+
+      # Last, whatever happened above: the numbers to size the runner disk from.
+      - name: Disk usage
+        if: always()
+        run: ci/free-disk.sh report
 
   # ---------------------------------------------------------- corpus-tiers
   corpus-tiers:
@@ -324,13 +358,19 @@ jobs:
         run: ci/extended-run.sh corpus-tiers corpus-tiers
 
       - name: Upload logs
-        if: ${{ !cancelled() }}
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: extended-logs-corpus-tiers-${{ matrix.arch.name }}
           path: ${{ runner.temp }}/extended-logs
-          if-no-files-found: warn
+          if-no-files-found: ignore
+          overwrite: true
           retention-days: 5
+
+      # Last, whatever happened above: the numbers to size the runner disk from.
+      - name: Disk usage
+        if: always()
+        run: ci/free-disk.sh report
 
   # ------------------------------------------------------------------ bench
   # Report only: shared runners are noisy, and extended.sh bench records a
@@ -381,13 +421,19 @@ jobs:
         run: ci/extended-run.sh bench bench
 
       - name: Upload logs
-        if: ${{ !cancelled() }}
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: extended-logs-bench-${{ matrix.arch.name }}
           path: ${{ runner.temp }}/extended-logs
-          if-no-files-found: warn
+          if-no-files-found: ignore
+          overwrite: true
           retention-days: 5
+
+      # Last, whatever happened above: the numbers to size the runner disk from.
+      - name: Disk usage
+        if: always()
+        run: ci/free-disk.sh report
 
   # ---------------------------------------------------------------- summary
   summary:

@@ -34,6 +34,10 @@ for v in "${versions[@]}"; do
   done
 done
 [ "$bad" -eq 0 ] || apptest_die "a selected version has no fixture set (tests/apps/sets)"
+if [ "${#need[@]}" -eq 0 ]; then
+  echo "fixtures: none needed for the selected versions"
+  exit 0
+fi
 
 # registry_hash <ref> -> the fixture's recipe hash label, or "" when the image
 # is absent or unreadable (the caller then lets build-fixture.sh decide).

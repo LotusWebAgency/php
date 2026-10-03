@@ -153,6 +153,7 @@ build_one() {
   docker commit \
     --change "CMD $cmd" \
     --change "LABEL org.opencontainers.image.title=\"lotuswebagency/php application fixture: $app $app_version\"" \
+    --change 'LABEL org.opencontainers.image.source=https://github.com/LotusWebAgency/php' \
     --change "LABEL com.lotuswebagency.apptest-hash=$hash" \
     --change "LABEL com.lotuswebagency.apptest-app=$app" \
     --change "LABEL com.lotuswebagency.apptest-set=$set" \

@@ -95,6 +95,11 @@ APPTEST_FIXTURE_REPO=ghcr.io/lotuswebagency/php/apptest ./tests/apps/build-fixtu
 APPTEST_FIXTURE_REPO=ghcr.io/lotuswebagency/php/apptest ./tests/apps/run.sh lotuswebagency/php:8.4-fpm
 ```
 
+- **Package link.** Fixtures carry `org.opencontainers.image.source` pointing at
+  `https://github.com/LotusWebAgency/php`, so the first push links the GHCR
+  package to the repository and the Actions `GITHUB_TOKEN` can push and pull
+  it. A package of that name that existed before the label was set must be
+  given repository access by hand (package settings, "Manage Actions access").
 - **Tags carry the architecture**: `<app>-<set>-<arch>` (`laravel-12-amd64`).
   A fixture is MariaDB plus its datadir, so one architecture's image is no use
   on the other; a local daemon only ever holds its own, which is why local
