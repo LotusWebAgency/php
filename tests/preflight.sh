@@ -180,7 +180,7 @@ else
 fi
 
 # --------------------------------------------- 6. python unit/lock-format tests
-section "6/8 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex)"
+section "6/8 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex, retry helper)"
 # Covers, among others, the lock-file format checks that exist:
 # scripts/test_versions_lock.py (deps/versions.lock), scripts/test_release_keys.py
 # (php/release-keys.asc), scripts/test_fetch_verified_sync.py (the two
