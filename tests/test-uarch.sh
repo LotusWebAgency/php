@@ -255,14 +255,19 @@ else
   isa_note() { readelf -n "$1" 2>/dev/null | grep -i "x86 ISA needed" || true; }
   b_isa="$(isa_note "$tmp/baseline-php")"
   v_isa="$(isa_note "$tmp/v3-php")"
-  if [ -n "$b_isa" ] || [ -n "$v_isa" ]; then
+  # A note that names no level above baseline isn't evidence either: GCC only
+  # emits ISA_1_NEEDED for its own objects under -mneeded, so the linker's
+  # merged note carries whatever glibc's crt objects declared -- seen on the
+  # GCC-built 8.4 -v3 (x86-64-baseline next to 3301 AVX2/BMI2/FMA3
+  # instructions). Only a note that declares v2 or higher is checked.
+  if ! printf '%s\n%s\n' "$b_isa" "$v_isa" | grep -qiE 'x86-64-v[234]'; then
+    echo "note: the ISA notes declare no level above baseline (baseline: '${b_isa:-none}', v3: '${v_isa:-none}') -- this toolchain records the crt objects' level, not -march; relying on the instruction-count measurement above"
+  else
     echo "$v_isa" | grep -qi "x86-64-v3" || fail "v3 image's ISA note does not declare x86-64-v3: '$v_isa'"
     if echo "$b_isa" | grep -qi "x86-64-v3"; then
       fail "baseline image's ISA note declares x86-64-v3: '$b_isa'"
     fi
     echo "ok: ISA notes agree with the instruction-count measurement (baseline: '$b_isa', v3: '$v_isa')"
-  else
-    echo "note: neither binary carries a .note.gnu.property ISA-level note (this toolchain does not emit one) -- relying on the instruction-count measurement above"
   fi
 fi
 
