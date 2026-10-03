@@ -197,18 +197,29 @@ apptest_image_ids() {
   docker run --rm --entrypoint sh "$1" -c 'echo "$(id -u www-data):$(id -g www-data)"'
 }
 
+# apptest_fixture_current <tag> <recipe-hash> -> 0 when the local image carries
+# that apptest-hash label AND is this daemon's architecture (a fixture of the
+# other architecture with the right label is not usable here).
+apptest_fixture_current() {
+  local have arch
+  have="$(apptest_label "$1" com.lotuswebagency.apptest-hash)"
+  [ -n "$have" ] && [ "$have" = "$2" ] || return 1
+  arch="$(docker image inspect --format '{{.Architecture}}' "$1" 2>/dev/null || true)"
+  [ "$arch" = "$(apptest_arch)" ]
+}
+
 # apptest_fixture_try_pull <app> <set> -> 0 when the local fixture tag is
 # current afterwards, having pulled it from the registry if it was not. A
 # pulled image counts only when its apptest-hash label is this tree's recipe
-# hash and it is this daemon's architecture; anything else is reported, left
-# unused, and the caller builds. Not a registry repository: returns 1 at once.
+# hash and it is this daemon's architecture; anything else is reported, removed
+# again (so it cannot be mistaken for a current fixture later), and the caller
+# builds. Not a registry repository: returns 1 at once.
 apptest_fixture_try_pull() {
   local app="$1" set="$2" tag want have arch out
   apptest_repo_is_registry || return 1
   tag="$(apptest_fixture_tag "$app" "$set")"
   want="$(apptest_recipe_hash "$app" "$set")"
-  have="$(apptest_label "$tag" com.lotuswebagency.apptest-hash)"
-  [ "$have" != "$want" ] || return 0
+  ! apptest_fixture_current "$tag" "$want" || return 0
   if ! out="$(docker pull -q "$tag" 2>&1)"; then
     echo "note: $tag was not pulled ($(printf '%s' "$out" | tail -1 | cut -c1-120))" >&2
     return 1
@@ -217,10 +228,12 @@ apptest_fixture_try_pull() {
   arch="$(docker image inspect --format '{{.Architecture}}' "$tag")"
   if [ "$arch" != "$(apptest_arch)" ]; then
     echo "note: $tag is $arch, this daemon is $(apptest_arch) -- not used" >&2
+    docker rmi "$tag" >/dev/null 2>&1 || true
     return 1
   fi
   if [ "$have" != "$want" ]; then
     echo "note: $tag in the registry is stale (apptest-hash ${have:-none}, this tree's recipe $want) -- not used" >&2
+    docker rmi "$tag" >/dev/null 2>&1 || true
     return 1
   fi
   echo "ok: pulled $tag (apptest-hash $want)"

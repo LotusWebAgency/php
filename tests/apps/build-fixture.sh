@@ -74,11 +74,10 @@ mkdir -p "$LOG_DIR"
 
 build_one() {
   local app="$1" set="$2"
-  local tag hash have builder name net log manifest app_version builder_ref
+  local tag hash builder name net log manifest app_version builder_ref
   tag="$(apptest_fixture_tag "$app" "$set")"
   hash="$(apptest_recipe_hash "$app" "$set")"
-  have="$(apptest_label "$tag" com.lotuswebagency.apptest-hash)"
-  if [ "$FORCE" -eq 0 ] && [ "$have" = "$hash" ]; then
+  if [ "$FORCE" -eq 0 ] && apptest_fixture_current "$tag" "$hash"; then
     echo "ok: $tag is current (apptest-hash $hash)"
     [ "$PUSH" -eq 0 ] || apptest_fixture_push "$app" "$set"
     return 0

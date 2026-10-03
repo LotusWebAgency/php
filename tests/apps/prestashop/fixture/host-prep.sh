@@ -19,7 +19,10 @@ ref="${tag%%:*}@sha256:$digest"
 # three are indexes that carry arm64 too), and nothing here executes the image,
 # it is only unpacked with docker cp. On an arm64 daemon the default platform
 # would be arm64, and for 1.6 there is no such variant to pull or create from.
-docker image inspect --platform linux/amd64 "$ref" >/dev/null 2>&1 || docker pull -q --platform linux/amd64 "$ref" >/dev/null
+# `docker image inspect --platform` needs Docker 28; comparing .Architecture
+# works on every version.
+[ "$(docker image inspect --format '{{.Architecture}}' "$ref" 2>/dev/null || true)" = amd64 ] \
+  || docker pull -q --platform linux/amd64 "$ref" >/dev/null
 cid="$(docker create --platform linux/amd64 "$ref")"
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 
