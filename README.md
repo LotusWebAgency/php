@@ -670,9 +670,10 @@ set first.
 Every image a `develop` run tests is also pushed to the private GHCR package
 `ghcr.io/lotuswebagency/php/dev` as `<tag>-<first 12 of the sha>`, so the tests
 CI doesn't run (the Laravel/WordPress/PrestaShop suites in `tests/apps/`, the
-`-v3` instruction-set check, the corpus-tier replay, the ext-builder end to end
-and the benchmark) can run against exactly those images instead of a local
-rebuild of all 50 targets. Log in once, with a token that can read packages:
+`-v3` instruction-set check, the corpus-tier replay and the benchmark) can run
+against exactly those images instead of a local rebuild of all 50 targets; the
+smoke suite and the ext-builder end to end, which CI does run, can be repeated
+on them the same way. Log in once, with a token that can read packages:
 
 ```sh
 gh auth refresh -s read:packages

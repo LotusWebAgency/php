@@ -22,7 +22,7 @@
 # then retagged to the canonical lotuswebagency/php:<tag> every other script in
 # this directory expects. Each retag is printed with the image it replaces. The
 # PGO corpus tier of each target is pulled by its hash-pinned tag from
-# $EXTENDED_CORPUS_REPO, checked the same way and tagged as the floating
+# $EXTENDED_CORPUS_REPO (also under --latest), checked the same way and tagged as the floating
 # ghcr.io/lotuswebagency/php/corpus:php<tier> that tests/test-pgo.sh reads,
 # which is what ci.yml's verify job does too.
 #
@@ -368,7 +368,10 @@ cmd_pull() {
     [ -z "${seen_tier[$tier_tag]:-}" ] || continue
     seen_tier[$tier_tag]=1
     keys+=("corpus-${tier_tag#*:}")
-    if [ "$LATEST" -eq 0 ]; then refs+=("$CORPUS_REPO:${tier_tag#*:}-$TREE_HASH"); else refs+=("$CORPUS_REPO:${tier_tag#*:}"); fi
+    # Hash-pinned even under --latest, as ci.yml mounts it: the floating corpus
+    # tag is repointed before a run is green and can lag a revert. The images
+    # are required to match this tree's hash, so the corpus has to as well.
+    refs+=("$CORPUS_REPO:${tier_tag#*:}-$TREE_HASH")
     canon+=("$tier_tag"); kinds+=(corpus)
   done
 
@@ -439,7 +442,7 @@ cmd_pull() {
     echo "PULL COMPLETE: ${#keys[@]}/${#keys[@]} (${#SELECTED[@]} images, $((${#keys[@]} - ${#SELECTED[@]})) corpus tiers)"
     record pull "${#keys[@]} refs" ok 0 "$PLATFORM"
   else
-    echo "PULL INCOMPLETE: $bad of ${#keys[@]} refs not usable (see above); the rest were retagged" >&2
+    echo "PULL INCOMPLETE: $bad of ${#keys[@]} refs not usable (see above); $n retagged" >&2
   fi
   return 0
 }
