@@ -15,8 +15,12 @@ read -r digest tag < <(awk -v s="$set_name" '$1 == "prestashop-image" && $2 == s
 tag="${tag#docker://}"
 ref="${tag%%:*}@sha256:$digest"
 
-docker image inspect "$ref" >/dev/null 2>&1 || docker pull -q "$ref" >/dev/null
-cid="$(docker create "$ref")"
+# linux/amd64 explicitly: the 1.6 pin is a single amd64 manifest (the other
+# three are indexes that carry arm64 too), and nothing here executes the image,
+# it is only unpacked with docker cp. On an arm64 daemon the default platform
+# would be arm64, and for 1.6 there is no such variant to pull or create from.
+docker image inspect --platform linux/amd64 "$ref" >/dev/null 2>&1 || docker pull -q --platform linux/amd64 "$ref" >/dev/null
+cid="$(docker create --platform linux/amd64 "$ref")"
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 
 docker exec "$builder" mkdir -p /srv/src

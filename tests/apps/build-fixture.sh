@@ -5,6 +5,7 @@
 #   ./tests/apps/build-fixture.sh wordpress 7.0      one set
 #   ./tests/apps/build-fixture.sh --all              every app, every set
 #   ./tests/apps/build-fixture.sh --force ...        rebuild even when current
+#   ./tests/apps/build-fixture.sh --push ...         also push to APPTEST_FIXTURE_REPO
 #
 # A fixture is a single image, lotuswebagency/php-apptest:<app>-<set>:
 # MariaDB with the populated datadir at /var/lib/mysql-fixture, plus the
@@ -12,8 +13,13 @@
 # it as-is and it is the database; mount a fresh named volume at /srv/app and
 # Docker copies the tree into it. Every test run starts from that pristine
 # pair and throws it away afterwards, so runs never see each other's writes
-# and the same fixture serves every image, every host and CI alike (push it
-# to a registry and set APPTEST_FIXTURE_REPO to share it).
+# and the same fixture serves every image, every host and CI alike. To share
+# it, set APPTEST_FIXTURE_REPO to a registry repository (ghcr.io/<org>/<repo>/
+# apptest): the tag becomes <app>-<set>-<arch> (MariaDB is per architecture),
+# a fixture that is not current locally is pulled first and used if its label
+# matches the recipe hash, and --push uploads what is current (built here, or
+# pulled, or already local). A stale or absent registry fixture is rebuilt;
+# --force skips the pull.
 #
 # How a fixture is made: a throwaway network with MariaDB, Redis and
 # Memcached on it, and the stock image for the set's php-min
@@ -33,16 +39,21 @@ set -euo pipefail
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 FORCE=0
+PUSH=0
 ALL=0
 ARGS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift ;;
     --all) ALL=1; shift ;;
-    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    --push) PUSH=1; shift ;;
+    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
     *) ARGS+=("$1"); shift ;;
   esac
 done
+
+[ "$PUSH" -eq 0 ] || apptest_repo_is_registry \
+  || apptest_die "--push needs APPTEST_FIXTURE_REPO to be a registry repository (e.g. ghcr.io/lotuswebagency/php/apptest); it is '$APPTEST_FIXTURE_REPO', a local name"
 
 JOBS=()   # "app set"
 if [ "$ALL" -eq 1 ]; then
@@ -69,6 +80,11 @@ build_one() {
   have="$(apptest_label "$tag" com.lotuswebagency.apptest-hash)"
   if [ "$FORCE" -eq 0 ] && [ "$have" = "$hash" ]; then
     echo "ok: $tag is current (apptest-hash $hash)"
+    [ "$PUSH" -eq 0 ] || apptest_fixture_push "$app" "$set"
+    return 0
+  fi
+  if [ "$FORCE" -eq 0 ] && apptest_fixture_try_pull "$app" "$set"; then
+    [ "$PUSH" -eq 0 ] || apptest_fixture_push "$app" "$set"
     return 0
   fi
 
@@ -145,6 +161,7 @@ build_one() {
     --change "LABEL com.lotuswebagency.apptest-builder=$builder_ref" \
     "$name-db" "$tag" >/dev/null
   echo "ok: $tag ($app $app_version, $(docker image inspect --format '{{.Size}}' "$tag" | awk '{printf "%.0f MB", $1/1048576}'))"
+  [ "$PUSH" -eq 0 ] || apptest_fixture_push "$app" "$set"
 }
 
 failed=0
