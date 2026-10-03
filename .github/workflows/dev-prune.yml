@@ -31,7 +31,7 @@ permissions: {}
 jobs:
   prune:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write # list and delete versions of the php/dev package
@@ -47,7 +47,7 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       # Needed by `docker buildx imagetools inspect`, which resolves the
-      # children of the kept manifest lists.
+      # children of the kept manifest lists (eight lookups at a time).
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:

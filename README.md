@@ -646,11 +646,18 @@ ghcr.io/lotuswebagency/php/dev:<tag>-<sha>-<arch>   # single-arch image, amd64 o
 ```
 
 `<tag>` is the tag the release image carries on Docker Hub (`8.5-fpm`,
-`8.4-cli-builder-v3`, `8.5-ext-builder`). The package is private: `docker login
-ghcr.io` with a token that has `read:packages`. These are unpublished test
-builds -- unsigned, without SBOM or provenance attestations, not for production.
-Versions older than 14 days are deleted daily, except the commits the floating
-tags point at and the newest one.
+`8.4-cli-builder-v3`, `8.5-ext-builder`). Who can pull is whatever the package
+settings of `php/dev` say (GHCR packages are private unless changed); for a
+private package, `docker login ghcr.io` with a token that has `read:packages`.
+These are unpublished test builds -- unsigned, without SBOM or provenance
+attestations, not for production. Versions older than 14 days are deleted daily
+(`dev-prune.yml`), except the commits the floating tags point at and the newest
+one. The floating tags are only moved by a run whose commit is still the head of
+`develop`, and only when every image of that run passed.
+
+For the prune to delete anything, the `php` repository needs the Admin role on
+the `php/dev` package (package settings, Manage Actions access); without it the
+daily run is expected to fail on its deletions.
 
 ## Building locally
 

@@ -373,14 +373,17 @@ jobs:
   # develop only. Joins the per-arch dev images the verify legs pushed into
   # one manifest list per target, dev:<tag>-<sha> (both arches present), and
   # moves the floating dev:<tag> onto it only when every verify leg of this run
-  # succeeded, so the floating set never mixes commits. One job over all 50
-  # targets, not a matrix: the org has few concurrent runners and each target is
-  # a handful of manifest calls. A missing arch while verify claims success is a
+  # succeeded and the run's commit is still the head of develop, so the floating
+  # set mixes commits at most inside the short second pass of the script (a
+  # cancel or crash there can split it; the prune keeps both sha sets). One job
+  # over all 50 targets, not a matrix: the org has few concurrent runners and
+  # each target is a handful of manifest calls. A missing arch while verify
+  # claims success is a
   # bug and fails the job; after a failed verify leg the missing ones are only
   # reported. The logic is in ci/dev-manifest.sh.
   dev-manifest:
     needs: [verify]
-    if: ${{ !cancelled() && github.ref == 'refs/heads/develop' && github.event_name != 'pull_request' }}
+    if: ${{ !cancelled() && needs.verify.result != 'skipped' && github.ref == 'refs/heads/develop' && github.event_name != 'pull_request' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

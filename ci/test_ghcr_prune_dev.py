@@ -130,11 +130,12 @@ class TestPlan(unittest.TestCase):
         self.assertEqual(ids(delete), {v["id"] for v in old.values()})
         self.assertEqual(ids(keep), {v["id"] for v in newest.values()})
 
-    def test_floating_version_without_a_sha_tag_is_kept_and_noted(self):
+    def test_floating_version_without_a_sha_tag_is_kept_by_the_plan(self):
         lone = version(["8.5-fpm"], 90)
-        keep, delete, notes = self.run_plan([lone])
+        keep, delete, _ = self.run_plan([lone])
         self.assertEqual(delete, [])
-        self.assertEqual(len(notes), 1)
+        self.assertEqual(ids(keep), {lone["id"]})
+        self.assertEqual(prune.untraceable_floating([lone]), [lone])
 
     def test_untagged_versions(self):
         floating = sha_set("8.5-fpm", SHA_NEW, 1)
@@ -206,6 +207,50 @@ class TestIo(unittest.TestCase):
         self.assertIn("ghcr.io/lotuswebagency/php/dev@sha256:cc", run.call_args[0][0])
         with mock.patch.object(prune.subprocess, "run", return_value=mock.Mock(stdout='{"layers": []}')):
             self.assertEqual(prune.registry_children("sha256:dd"), set())
+
+    def test_floating_version_without_a_sha_tag_skips_the_delete_phase(self):
+        floating = sha_set("8.5-fpm", SHA_NEW, 1)
+        floating["list"]["metadata"]["container"]["tags"].append("8.5-fpm")
+        stale = sha_set("8.5-fpm", SHA_OLD, 30)
+        lone = version(["8.4-fpm"], 3)
+        versions = [*floating.values(), *stale.values(), lone]
+        out = io.StringIO()
+        with mock.patch.object(prune, "list_versions", return_value=versions), \
+                mock.patch.object(prune, "delete_version") as delete, \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(prune.main([], now=NOW), 1)
+            self.assertEqual(prune.main(["--dry-run"], now=NOW), 1)
+        delete.assert_not_called()
+        self.assertIn("delete phase skipped", out.getvalue())
+        self.assertIn("delete ", out.getvalue().split("FAIL")[0], "the plan is still printed")
+
+    def test_children_are_resolved_in_parallel(self):
+        floating = sha_set("8.5-fpm", SHA_NEW, 1)
+        floating["list"]["metadata"]["container"]["tags"].append("8.5-fpm")
+        old = version([], 30)
+        lookups = []
+
+        def children_of(digest):
+            lookups.append(digest)
+            return {old["name"]} if digest == floating["list"]["name"] else set()
+
+        keep, delete, _ = prune.plan([*floating.values(), old], NOW, 14, children_of)
+        self.assertEqual(delete, [])
+        self.assertEqual(len(lookups), 3)
+
+    def test_one_failed_lookup_keeps_every_untagged_version(self):
+        floating = sha_set("8.5-fpm", SHA_NEW, 1)
+        floating["list"]["metadata"]["container"]["tags"].append("8.5-fpm")
+        old = version([], 30)
+
+        def flaky(digest):
+            if digest == floating["amd64"]["name"]:
+                raise RuntimeError("timeout")
+            return set()
+
+        _, delete, notes = prune.plan([*floating.values(), old], NOW, 14, flaky)
+        self.assertEqual(delete, [])
+        self.assertEqual(len(notes), 1)
 
     def test_dry_run_deletes_nothing(self):
         floating = sha_set("8.5-fpm", SHA_NEW, 1)

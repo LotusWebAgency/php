@@ -20,9 +20,13 @@ floating tag is read from the `<tag>-<sha>` tag that version also carries.
       belongs to is older than RETENTION_DAYS (default 14);
     * an untagged version goes only if it is older than that AND no kept version
       lists its digest as a child manifest. When the children cannot be resolved the
-      untagged versions are all kept.
+      untagged versions are all kept;
+    * a version carrying a floating tag but no `<tag>-<sha>` tag cannot be tied to a
+      sha, so what the floating set protects is unknown: the plan is printed, nothing
+      is deleted and the run exits non-zero.
 """
 import argparse
+import concurrent.futures
 import datetime
 import json
 import os
@@ -34,6 +38,8 @@ ORG = "LotusWebAgency"
 PACKAGE = "php/dev"
 DEFAULT_RETENTION_DAYS = 14
 IMAGE_REPO = "ghcr.io/lotuswebagency/php/dev"
+CHILD_LOOKUP_WORKERS = 8
+CHILD_LOOKUP_TIMEOUT = 60
 
 SHA_TAG = re.compile(r"^(?P<tag>.+)-(?P<sha>[0-9a-f]{12})(?:-(?P<arch>amd64|arm64))?$")
 
@@ -67,6 +73,11 @@ def is_floating(version):
     return any(parse_tag(t) is None for t in tags_of(version))
 
 
+def untraceable_floating(versions):
+    """Floating-tagged versions that carry no <tag>-<sha> tag."""
+    return [v for v in versions if is_floating(v) and not shas_of(v)]
+
+
 def plan(versions, now, retention_days, children_of):
     """Decide every version's fate.
 
@@ -85,10 +96,7 @@ def plan(versions, now, retention_days, children_of):
     kept_shas = set()
     for v in versions:
         if is_floating(v):
-            shas = shas_of(v)
-            if not shas:
-                notes.append(f"version {v['id']} carries floating tag(s) {tags_of(v)} but no <tag>-<sha> tag")
-            kept_shas |= shas
+            kept_shas |= shas_of(v)
     if newest:
         kept_shas.add(max(newest, key=newest.get))
 
@@ -113,10 +121,10 @@ def plan(versions, now, retention_days, children_of):
         return keep, delete, notes
 
     referenced = set()
+    # per-arch tags too: a pushed index (containerd store) has untagged platform children
+    digests = [v["name"] for v, _ in keep if tags_of(v)]
     try:
-        for v, _ in keep:
-            if tags_of(v):  # per-arch tags too: a pushed index (containerd store) has untagged platform children
-                referenced |= children_of(v["name"])
+        referenced = resolve_children(digests, children_of)
     except Exception as exc:  # when in doubt, keep
         notes.append(f"could not resolve manifest list children ({exc}): keeping every untagged version")
         keep.extend((v, "untagged, children unresolved") for v in old_untagged)
@@ -127,6 +135,21 @@ def plan(versions, now, retention_days, children_of):
         else:
             delete.append((v, "untagged, older than retention, unreferenced"))
     return keep, delete, notes
+
+
+def resolve_children(digests, children_of):
+    """Union of children_of(d) over digests, looked up in parallel; the first failure raises."""
+    referenced = set()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=CHILD_LOOKUP_WORKERS) as pool:
+        futures = [pool.submit(children_of, d) for d in digests]
+        try:
+            for future in concurrent.futures.as_completed(futures):
+                referenced |= future.result()
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
+    return referenced
 
 
 def gh_json_pages(args):
@@ -149,7 +172,7 @@ def list_versions():
 def registry_children(digest):
     raw = subprocess.run(
         ["docker", "buildx", "imagetools", "inspect", "--raw", f"{IMAGE_REPO}@{digest}"],
-        check=True, capture_output=True, text=True,
+        check=True, capture_output=True, text=True, timeout=CHILD_LOOKUP_TIMEOUT,
     ).stdout
     return {m["digest"] for m in json.loads(raw).get("manifests", [])}
 
@@ -183,6 +206,12 @@ def main(argv=None, now=None):
     for v, why in delete:
         print(f"  delete {v['id']} {v['name'][:19]} [{describe(v)}] {timestamp(v):%Y-%m-%d}: {why}")
 
+    orphans = untraceable_floating(versions)
+    if orphans:
+        for v in orphans:
+            print(f"::error::version {v['id']} carries floating tag(s) {tags_of(v)} but no <tag>-<sha> tag")
+        print("FAIL: cannot tell which commits the floating tags protect: delete phase skipped, nothing deleted")
+        return 1
     if args.dry_run:
         return 0
     failed = 0
