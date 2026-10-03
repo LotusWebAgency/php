@@ -1451,6 +1451,9 @@ if [ "$FLAVOR" = ext-builder ]; then
   echo "ok: test-entrypoint.sh skipped for ext-builder (identical entrypoint to cli, runs as root)"
 else
   bash "$HERE/test-entrypoint.sh" "$IMAGE" "$FLAVOR"
+  # `--read-only --tmpfs /tmp` end to end (ext-builder runs as root and is not
+  # a runtime shape): the documented deployment, with a control per assertion.
+  bash "$HERE/test-readonly.sh" "$IMAGE" "$FLAVOR"
 fi
 # Only where the registry builds it at all (ext.json: php >=7.2) -- 7.0 and
 # 7.1 ship without it, so there is nothing to exercise there.
