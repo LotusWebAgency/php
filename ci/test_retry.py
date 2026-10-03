@@ -114,6 +114,26 @@ class RetryTest(unittest.TestCase):
         proc = subprocess.run([RETRY], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 2)
 
+    def test_platform_digest_rides_out_a_429(self):
+        # A fake `docker` that 429s twice, then serves an index: platform-digest.sh
+        # must still print exactly the platform manifest digest on stdout.
+        fake = os.path.join(self.tmp.name, "docker")
+        with open(fake, "w") as f:
+            f.write(
+                '#!/usr/bin/env bash\n'
+                'n=$(( $(cat "$STUB_COUNT" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STUB_COUNT"\n'
+                'if [ "$n" -lt 3 ]; then echo "ERROR: unexpected status from HEAD request to https://x/v2/y: '
+                '429 Too Many Requests" >&2; exit 1; fi\n'
+                'echo \'{"manifests":[{"digest":"sha256:aaa","platform":{"os":"linux","architecture":"amd64"}},'
+                '{"digest":"sha256:bbb","platform":{"os":"unknown","architecture":"unknown"}}]}\'\n'
+            )
+        os.chmod(fake, 0o755)
+        env = dict(os.environ, PATH=self.tmp.name + os.pathsep + os.environ["PATH"],
+                   STUB_COUNT=self.count, RETRY_DELAYS="0 0 0 0")
+        proc = subprocess.run([os.path.join(HERE, "platform-digest.sh"), "docker.io/x/y@sha256:1", "amd64"],
+                              env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual((proc.returncode, proc.stdout, self.calls()), (0, "sha256:aaa\n", 3))
+
     def test_what_counts_as_transient(self):
         retried = [
             "ERROR: target php-7_1-ext-builder: failed to solve: unexpected status from HEAD request to "
