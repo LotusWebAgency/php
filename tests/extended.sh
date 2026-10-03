@@ -7,7 +7,7 @@
 #   tests/extended.sh uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
 #   tests/extended.sh apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
 #   tests/extended.sh bench [--only V,..] [--flavor F,..]        report only, never fails the run
-#   tests/extended.sh all [pull flags] [--skip-pull]             pull, uarch, ext-builder, corpus-tiers, apps
+#   tests/extended.sh all [pull flags] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, apps
 #
 # Typical use:  tests/extended.sh pull && tests/extended.sh all
 #
@@ -84,7 +84,7 @@ usage: tests/extended.sh <subcommand> [options]
   uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
   apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
   bench [--only V,..] [--flavor F,..]          report only, never fails the run
-  all [pull options] [--skip-pull]             pull, uarch, ext-builder, corpus-tiers, apps
+  all [pull options] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, apps
 
   --sha REF          pull: the commit whose images to pull (default: git rev-parse HEAD)
   --latest           pull: the floating tags, i.e. the last fully green develop run
@@ -123,14 +123,15 @@ while [ "$#" -gt 0 ]; do
     --sha) [ "$#" -ge 2 ] || usage_die "--sha needs an argument"; SHA_REF="$2"; shift 2 ;;
     --jobs)
       [ "$#" -ge 2 ] || usage_die "--jobs needs an argument"
-      # run-matrix.sh has a --jobs of its own; for apps that is the one meant.
+      # run-matrix.sh has a --jobs of its own; for apps that is the one meant
+      # (and for all it is the pull's, apps keeps its default).
       if [ "$CMD" = apps ]; then PASSTHRU+=("$1" "$2"); else JOBS="$2"; fi
       shift 2 ;;
     --latest) LATEST=1; shift ;;
     --skip-pull) SKIP_PULL=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
-      [ "$CMD" = apps ] || usage_die "unknown argument '$1' for $CMD"
+      [ "$CMD" = apps ] || [ "$CMD" = all ] || usage_die "unknown argument '$1' for $CMD"
       # Anything else belongs to run-matrix.sh; a following word that is not
       # itself an option is that option's value (--jobs 4, --app laravel).
       PASSTHRU+=("$1"); shift
@@ -201,7 +202,7 @@ gate() {
       ok) ;;
       missing) bad=1; note="${note:+$note; }$img is not present locally" ;;
       nolabel) bad=1; note="${note:+$note; }$img has no inputs-hash label" ;;
-      stale:*) bad=1; note="${note:+$note; }$img is from another tree (inputs-hash ${state#stale:}, tree $TREE_HASH)" ;;
+      stale:*) bad=1; note="${note:+$note; }$img is from another tree (inputs-hash ${state:6:12}, this tree ${TREE_HASH:0:12})" ;;
     esac
   done
   [ "$bad" -eq 0 ] && return 0

@@ -40,8 +40,8 @@ entries. Values the fixture build computed are recorded in
 **Every run starts from the pristine fixture and throws it away.** The
 database is the fixture container's own layer, and the app tree is a fresh
 volume, so runs never see each other's writes. That makes the fixture
-reusable across images, hosts and CI alike: push it to a registry and set
-`APPTEST_FIXTURE_REPO`. Its `com.lotuswebagency.apptest-hash` label is the
+reusable across images, hosts and CI alike ([from a
+registry](#fixtures-from-a-registry), if you like). Its `com.lotuswebagency.apptest-hash` label is the
 content hash of the recipe (`apptest_recipe_hash`), and `run.sh` rebuilds, or
 with `--no-build` refuses, a fixture that doesn't match the tree. Suites are
 not part of that hash, so editing a test never forces a data rebuild.
@@ -78,6 +78,47 @@ resolved on the stock image of the set's php-min.
 connect to nginx's published port on 127.0.0.1 and send that Host, mapping
 redirects back onto the port, so no URL is rewritten per run. To browse a
 `--keep` stack, point `apptest.test` at 127.0.0.1 and use the printed port.
+
+## Fixtures from a registry
+
+Building the fourteen fixtures takes a while and the result is the same on
+every host of one architecture, so they can be shared. Set
+`APPTEST_FIXTURE_REPO` to a registry repository, for example
+`ghcr.io/lotuswebagency/php/apptest`, and the harness treats it as one (Docker's
+own rule: the first path component has a dot or a colon, or is `localhost`).
+Left unset, or a bare name like the default `lotuswebagency/php-apptest`,
+everything behaves as before: local tags `<app>-<set>`, never pulled, never
+pushed.
+
+```sh
+APPTEST_FIXTURE_REPO=ghcr.io/lotuswebagency/php/apptest ./tests/apps/build-fixture.sh --all --push
+APPTEST_FIXTURE_REPO=ghcr.io/lotuswebagency/php/apptest ./tests/apps/run.sh lotuswebagency/php:8.4-fpm
+```
+
+- **Tags carry the architecture**: `<app>-<set>-<arch>` (`laravel-12-amd64`).
+  A fixture is MariaDB plus its datadir, so one architecture's image is no use
+  on the other; a local daemon only ever holds its own, which is why local
+  names have no suffix.
+- **Pull before build.** `build-fixture.sh`, and `run.sh` before it refuses or
+  rebuilds, pull a fixture that is not current locally and use it only if its
+  `com.lotuswebagency.apptest-hash` label equals `apptest_recipe_hash` for
+  this tree and it is the daemon's architecture. A missing, stale or
+  unpullable one is reported (`note: ...`) and built instead. `--force`
+  skips the pull; `run.sh --no-build` still refuses what the pull did not
+  make current.
+- **`build-fixture.sh --push`** pushes every fixture it ends with, built here,
+  pulled or already current, and refuses when the repository is a local name
+  rather than a registry (a push to `lotuswebagency/php-apptest` would go to
+  Docker Hub). Run it once per architecture to publish both.
+- The recipe hash covers `build-fixture.sh`, `fetch.sh`, `install-composer.sh`
+  and `<app>/fixture/`, so an edit to the first three makes every published
+  fixture stale and one under `<app>/fixture/` that app's. `lib.sh`, `run.sh`,
+  the suites and the nginx configs are outside it.
+
+PrestaShop's release trees are unpacked out of the vendor's images. Those pins
+are multi-arch indexes except 1.6, a single amd64 manifest, so `host-prep.sh`
+asks for `linux/amd64` explicitly: nothing in it executes the image, it is
+only `docker cp`'d from, which works on an arm64 daemon too.
 
 ## Writing a suite
 
