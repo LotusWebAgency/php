@@ -1,0 +1,405 @@
+# The tests ci.yml does not run, on native amd64 and arm64 runners, against the
+# images develop CI already tested and pushed to GHCR
+# (ghcr.io/lotuswebagency/php/dev, see ci.yml and README.md): the -v3
+# instruction-set check, the ext-builder end to end, the PGO corpus-tier replay,
+# the Laravel/WordPress/PrestaShop suites and, on request, the benchmark. It is
+# the only coverage these suites get on arm64 (arm64 under QEMU crashes in
+# opcache, so they cannot be run on an amd64 workstation).
+#
+# A workflow of its own, never a job of ci.yml: it must not gate develop, and a
+# new develop push (ci.yml cancels superseded develop runs) must not cancel it.
+# The driver is tests/extended.sh; this file only schedules it.
+#
+#   workflow_dispatch  gh workflow run extended.yml --ref develop [-f sha=<sha>] [-f only=8.4,8.5] [-f flavor=fpm,cli] [-f apps=false] [-f bench=true]
+#                      With no sha: the floating dev:<tag> images (the last fully
+#                      green develop run) and the test scripts of the dispatched
+#                      ref. The images' inputs-hash must equal the ref's, which
+#                      ci/extended-plan.sh checks once up front. With a sha: that
+#                      commit's images and that commit's tree.
+#   workflow_run       after `ci` completes successfully on a develop push (or a
+#                      develop dispatch): that run's head sha, images and tree.
+#                      GitHub fires workflow_run only for a workflow file on the
+#                      default branch, so until this file is on main the trigger
+#                      is inert: dispatch it on develop.
+#
+# Job graph (every job below plan is skipped when plan is):
+#
+#   plan -> fixtures (per arch) -> versions (per version x arch) --+
+#      |                                                            +-> summary
+#      +-----> corpus-tiers (per arch) ----------------------------+
+#      +-----> bench (per arch, only when asked, report-only) ------+
+#
+#   plan          picks ONE image commit (sha) and the tree to test it from, and
+#                 the versions; every later job pulls dev:<tag>-<sha12>, never a
+#                 floating tag, so a develop run that finishes mid-way cannot
+#                 make two jobs test two commits.
+#   fixtures      builds and pushes to GHCR (ghcr.io/lotuswebagency/php/apptest,
+#                 tags <app>-<set>-<arch>) every app fixture that is missing or
+#                 stale, so the parallel version jobs only pull and never race to
+#                 build one.
+#   versions      one job per PHP version and arch: pulls that version's images
+#                 (no corpus), then uarch (a SKIP on versions without a -v3
+#                 target), ext-builder and the app suites. Not one job per
+#                 target: the org has ~5 concurrent runners.
+#   corpus-tiers  per arch, the fpm images of every version plus the corpus tiers.
+#   summary       every job's result and every results.tsv in one table; fails
+#                 when a required job did.
+#
+# Docker Hub is only touched anonymously, by the fixture builds (the stock
+# dementev/php-fpm-with-ext builder image) and by the digest-pinned mariadb,
+# nginx, redis and memcached images of the app stack. Anonymous pulls are
+# rate limited per source IP, and GitHub's runner IPs are shared: a
+# "toomanyrequests" failure in these jobs is that, not a test result; re-run
+# the failed jobs.
+#
+# Disk: a version job holds up to 7 images (-v3 variants on 8.4 and 8.5; the
+# builder flavors are the heavy ones), three fixtures (MariaDB plus an installed
+# app each) and the stack's service images; the corpus-tiers job holds every fpm
+# image and 5 corpus tiers (each carries the cli-builder toolchain). None of that
+# was measured on a runner, so every job starts with ci/free-disk.sh.
+name: extended
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit whose develop images to test, full or abbreviated (empty: the floating images, the last fully green develop run)"
+        type: string
+        default: ""
+      only:
+        description: "PHP versions, comma separated (empty: all of matrix.json)"
+        type: string
+        default: ""
+      flavor:
+        description: "Flavors, comma separated: fpm, cli, cli-builder, ext-builder (empty: all)"
+        type: string
+        default: ""
+      apps:
+        description: "Run the application suites (and build the fixtures they need)"
+        type: boolean
+        default: true
+      bench:
+        description: "Also run the benchmark (cli images, report only)"
+        type: boolean
+        default: false
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [develop]
+
+concurrency:
+  # Per image commit; never cancels a run in flight (a run is an hour or more of
+  # runner time, and nothing about a later one makes it moot).
+  group: extended-${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  APPTEST_FIXTURE_REPO: ghcr.io/lotuswebagency/php/apptest
+
+jobs:
+  # ------------------------------------------------------------------- plan
+  # Only a ci run that is a develop push or dispatch pushed dev images: a pull
+  # request from develop to main also reports head_branch develop, but its run
+  # builds the PR subset and pushes nothing.
+  plan:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       contains(fromJSON('["push","workflow_dispatch"]'), github.event.workflow_run.event))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      checkout: ${{ steps.plan.outputs.checkout }}
+      versions: ${{ steps.plan.outputs.versions }}
+      only: ${{ steps.plan.outputs.only }}
+      flavor: ${{ steps.plan.outputs.flavor }}
+      fpm: ${{ steps.plan.outputs.fpm }}
+      apps: ${{ steps.plan.outputs.apps }}
+      bench: ${{ steps.plan.outputs.bench }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # workflow_run runs as the default branch: the commit under test is
+          # named explicitly. Full history, so a dispatched abbreviated sha resolves.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Plan
+        id: plan
+        env:
+          EXT_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          EXT_SHA_INPUT: ${{ inputs.sha }}
+          EXT_ONLY: ${{ inputs.only }}
+          EXT_FLAVOR: ${{ inputs.flavor }}
+          EXT_APPS: ${{ inputs.apps }}
+          EXT_BENCH: ${{ inputs.bench }}
+        run: ci/extended-plan.sh
+
+  # --------------------------------------------------------------- fixtures
+  fixtures:
+    needs: plan
+    if: ${{ needs.plan.outputs.apps == 'true' }}
+    name: fixtures ${{ matrix.arch.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - { name: amd64, runner: ubuntu-24.04 }
+          - { name: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: write # GHCR: the app fixtures
+    env:
+      EXT_ONLY: ${{ needs.plan.outputs.only }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.checkout }}
+          persist-credentials: false
+
+      - name: Free disk
+        run: ci/free-disk.sh
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the missing or stale fixtures
+        run: ci/extended-fixtures.sh
+
+      - name: Upload logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: extended-logs-fixtures-${{ matrix.arch.name }}
+          path: ${{ runner.temp }}/extended-logs
+          if-no-files-found: warn
+          retention-days: 5
+
+  # --------------------------------------------------------------- versions
+  # `!cancelled()`: fixtures is skipped when apps is off, and a failed fixtures
+  # job must only cost the app suites (their step is skipped, and the summary
+  # fails the run), not uarch and ext-builder.
+  versions:
+    needs: [plan, fixtures]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    name: php ${{ matrix.version }} ${{ matrix.arch.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # '[""]' when plan was skipped: the matrix must still expand for the job's `if` to skip it.
+        version: ${{ fromJSON(needs.plan.outputs.versions || '[""]') }}
+        arch:
+          - { name: amd64, runner: ubuntu-24.04 }
+          - { name: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: read
+    env:
+      EXT_SHA: ${{ needs.plan.outputs.sha }}
+      EXT_ONLY: ${{ matrix.version }}
+      EXT_FLAVOR: ${{ needs.plan.outputs.flavor }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.checkout }}
+          fetch-depth: 0 # extended.sh pull --sha resolves the image commit
+          persist-credentials: false
+
+      - name: Free disk
+        run: ci/free-disk.sh
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull
+        run: ci/extended-run.sh pull pull --no-corpus
+
+      # The steps below run after a failed one on purpose: each reports on its
+      # own, a missing image is a MISSING row rather than a skipped test.
+      - name: uarch
+        if: ${{ !cancelled() }}
+        run: ci/extended-run.sh uarch uarch
+
+      - name: ext-builder
+        if: ${{ !cancelled() }}
+        run: ci/extended-run.sh ext-builder ext-builder
+
+      - name: apps
+        if: ${{ !cancelled() && needs.plan.outputs.apps == 'true' && needs.fixtures.result == 'success' }}
+        run: ci/extended-run.sh apps apps
+
+      - name: Upload logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: extended-logs-php-${{ matrix.version }}-${{ matrix.arch.name }}
+          path: ${{ runner.temp }}/extended-logs
+          if-no-files-found: warn
+          retention-days: 5
+
+  # ---------------------------------------------------------- corpus-tiers
+  corpus-tiers:
+    needs: plan
+    if: ${{ needs.plan.outputs.fpm == 'true' }}
+    name: corpus-tiers ${{ matrix.arch.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - { name: amd64, runner: ubuntu-24.04 }
+          - { name: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    env:
+      EXT_SHA: ${{ needs.plan.outputs.sha }}
+      EXT_ONLY: ${{ needs.plan.outputs.only }}
+      EXT_FLAVOR: fpm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.checkout }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Free disk
+        run: ci/free-disk.sh
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull
+        run: ci/extended-run.sh pull pull
+
+      - name: corpus-tiers
+        if: ${{ !cancelled() }}
+        run: ci/extended-run.sh corpus-tiers corpus-tiers
+
+      - name: Upload logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: extended-logs-corpus-tiers-${{ matrix.arch.name }}
+          path: ${{ runner.temp }}/extended-logs
+          if-no-files-found: warn
+          retention-days: 5
+
+  # ------------------------------------------------------------------ bench
+  # Report only: shared runners are noisy, and extended.sh bench records a
+  # report row, never a verdict. After the tests so it does not take their
+  # runners; continue-on-error so a failed pull cannot colour the run.
+  bench:
+    needs: [plan, versions, corpus-tiers]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bench == 'true' }}
+    name: bench ${{ matrix.arch.name }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - { name: amd64, runner: ubuntu-24.04 }
+          - { name: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: read
+    env:
+      EXT_SHA: ${{ needs.plan.outputs.sha }}
+      EXT_ONLY: ${{ needs.plan.outputs.only }}
+      EXT_FLAVOR: cli
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.checkout }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Free disk
+        run: ci/free-disk.sh
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull
+        run: ci/extended-run.sh pull pull --no-corpus
+
+      - name: bench
+        run: ci/extended-run.sh bench bench
+
+      - name: Upload logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: extended-logs-bench-${{ matrix.arch.name }}
+          path: ${{ runner.temp }}/extended-logs
+          if-no-files-found: warn
+          retention-days: 5
+
+  # ---------------------------------------------------------------- summary
+  summary:
+    needs: [plan, fixtures, versions, corpus-tiers, bench]
+    if: ${{ always() && needs.plan.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.checkout || github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Download logs
+        continue-on-error: true # none exist when plan failed
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: extended-logs-*
+          path: ${{ runner.temp }}/extended-artifacts
+
+      - name: Verdict
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: ci/extended-summary.sh "$RUNNER_TEMP/extended-artifacts"

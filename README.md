@@ -734,6 +734,33 @@ and `pull` refuses `--platform linux/arm64` on an amd64 daemon. The app
 fixtures can come from a registry too, see
 [tests/apps/README.md](tests/apps/README.md#fixtures-from-a-registry).
 
+#### The extended tests in CI
+
+`.github/workflows/extended.yml` runs the same `tests/extended.sh` suites
+(`-v3` check, ext-builder, corpus-tier replay, the app suites, optionally the
+benchmark) on native amd64 and arm64 runners, against the develop images in
+GHCR. It is its own workflow: it never gates develop and a newer develop push
+does not cancel it. Per PHP version and architecture one job pulls that
+version's images and runs `uarch`, `ext-builder` and `apps`; one job per
+architecture runs `corpus-tiers`; a fixtures job per architecture first
+publishes any missing or stale app fixture to
+`ghcr.io/lotuswebagency/php/apptest`; a summary job collects every
+`results.tsv` and fails when a required job did. A `plan` job fixes one image
+commit for all of them.
+
+```sh
+gh workflow run extended.yml --ref develop                    # the floating images (last green develop run), tests from the ref
+gh workflow run extended.yml --ref develop -f sha=<sha>       # that commit's images and tree
+gh workflow run extended.yml --ref develop -f only=8.4,8.5 -f flavor=fpm,cli -f apps=false -f bench=true
+```
+
+Without `sha` the run fails up front when the ref's `inputs-hash` differs from
+the floating images'; then dispatch with `sha=` the commit it names. After a
+successful `ci` run on a develop push the workflow also starts by itself, but
+GitHub only fires `workflow_run` for workflow files on the default branch, so
+until this one is on `main` it is dispatch-only. Logs and `results.tsv` files
+are kept as artifacts for five days.
+
 ## Related images
 
 One family, built by the same pipeline, meant to run together — a proxy in
