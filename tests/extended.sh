@@ -3,7 +3,7 @@
 # pushed to GHCR (ghcr.io/lotuswebagency/php/dev), instead of a from-source
 # rebuild of all 50 targets on this machine.
 #
-#   tests/extended.sh pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P]
+#   tests/extended.sh pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--no-corpus]
 #   tests/extended.sh uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
 #   tests/extended.sh apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
 #   tests/extended.sh bench [--only V,..] [--flavor F,..]        report only, never fails the run
@@ -33,6 +33,9 @@
 # command that fixes it:
 #
 #   git worktree add ../php-<sha12> <sha>      then run tests/extended.sh from there
+#
+# --no-corpus leaves the corpus tiers out of the pull, for a run that only tests
+# the images (uarch, ext-builder, apps); corpus-tiers and smoke need them.
 #
 # --latest pulls the floating <tag> refs (the last fully green develop run)
 # instead, and then requires every pulled image to agree on one revision and to
@@ -80,7 +83,7 @@ usage() {
   cat <<'EOF'
 usage: tests/extended.sh <subcommand> [options]
 
-  pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--jobs N]
+  pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--jobs N] [--no-corpus]
   uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
   apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
   bench [--only V,..] [--flavor F,..]          report only, never fails the run
@@ -93,6 +96,7 @@ usage: tests/extended.sh <subcommand> [options]
   --platform P       pull: linux/amd64 or linux/arm64, must be this daemon's architecture
   --jobs N           pull: parallel pulls (default 4)
   --skip-pull        all: do not pull first
+  --no-corpus        pull, all: do not pull the PGO corpus tiers (corpus-tiers and smoke need them)
 EOF
 }
 usage_die() { echo "FAIL: $*" >&2; echo "(tests/extended.sh --help for usage)" >&2; exit 2; }
@@ -114,6 +118,7 @@ SHA_REF=""
 LATEST=0
 JOBS=4
 SKIP_PULL=0
+NO_CORPUS=0
 PASSTHRU=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -129,6 +134,7 @@ while [ "$#" -gt 0 ]; do
       shift 2 ;;
     --latest) LATEST=1; shift ;;
     --skip-pull) SKIP_PULL=1; shift ;;
+    --no-corpus) NO_CORPUS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       [ "$CMD" = apps ] || [ "$CMD" = all ] || usage_die "unknown argument '$1' for $CMD"
@@ -141,8 +147,8 @@ done
 case "$JOBS" in ''|*[!0-9]*|0) usage_die "--jobs needs a positive integer" ;; esac
 case "$CMD" in
   pull|all) ;;
-  *) { [ -z "$PLATFORM" ] && [ -z "$SHA_REF" ] && [ "$LATEST" -eq 0 ] && [ "$SKIP_PULL" -eq 0 ]; } \
-       || usage_die "--platform/--sha/--latest/--skip-pull apply to pull and all only" ;;
+  *) { [ -z "$PLATFORM" ] && [ -z "$SHA_REF" ] && [ "$LATEST" -eq 0 ] && [ "$SKIP_PULL" -eq 0 ] && [ "$NO_CORPUS" -eq 0 ]; } \
+       || usage_die "--platform/--sha/--latest/--skip-pull/--no-corpus apply to pull and all only" ;;
 esac
 [ "$CMD" = all ] || [ "$SKIP_PULL" -eq 0 ] || usage_die "--skip-pull applies to all only"
 { [ "$LATEST" -eq 0 ] || [ -z "$SHA_REF" ]; } || usage_die "--sha and --latest are exclusive"
@@ -363,6 +369,7 @@ cmd_pull() {
   done
   declare -A seen_tier=()
   for row in "${SELECTED[@]}"; do
+    [ "$NO_CORPUS" -eq 0 ] || break
     IFS=$'\t' read -r name flavor php tag <<<"$row"
     tier_tag="$(corpus_floating "$name")"
     [ -z "${seen_tier[$tier_tag]:-}" ] || continue
