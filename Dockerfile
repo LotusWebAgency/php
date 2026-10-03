@@ -813,11 +813,12 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/* /tmp/runtime-packages.txt; \
 # Housekeeping, in this RUN because a later one would only whiteout files this
 # layer already stored. debconf keeps a *-old copy of its databases after every
-# apt run (0.8MB). mariadb-check and my_print_defaults ride along in
-# mariadb-client-core for ~10MB, and neither is a client this image documents or
-# tests: the mariadb shell is what the package is here for, and it reads its
-# option files itself.
-    rm -f /var/cache/debconf/*-old /usr/bin/mariadb-check /usr/bin/my_print_defaults
+# apt run (0.8MB). Files that belong to an installed package stay, however
+# unused here: dpkg still lists the package, so apt never puts a deleted file
+# back, and a derived image that installs mariadb-server dies in
+# mariadb-install-db on the missing my_print_defaults (the PGO corpus build hit
+# exactly that).
+    rm -f /var/cache/debconf/*-old
 
 # Everything php-build produced for the runtime, then the baked config, as two
 # layers: see the runtime-payload stages above. The config layer stays last so
@@ -1048,10 +1049,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends \
       git rsync patch make brotli sqlite3 jq mariadb-client; \
     rm -rf /var/lib/apt/lists/*; \
-# runtime-base dropped mariadb-check; the full client's mariadbcheck,
-# mariadb-analyze, mariadb-optimize and mariadb-repair symlinks (all pointing at
-# mariadb-check) would be left dangling.
-    find /usr/bin -xtype l -lname 'mariadb-check' -delete; \
     rm -f /var/cache/debconf/*-old
 COPY conf/php-builder.ini /usr/local/etc/php/conf.d/10-php.ini
 # The installer is verified against the signature Composer publishes; piping it
