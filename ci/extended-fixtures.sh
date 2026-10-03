@@ -54,7 +54,7 @@ while read -r app set; do
     continue
   fi
   echo "=== $tag: missing or stale in the registry, building"
-  if tests/apps/build-fixture.sh "$app" "$set" --push; then
+  if tests/apps/build-fixture.sh "$app" "$set" --push </dev/null; then
     printf 'fixtures\t%s\tok\t%s\tbuilt and pushed\n' "$tag" "$(( $(date +%s) - t0 ))" >>"$results"
   else
     failed=$((failed + 1))

@@ -750,7 +750,7 @@ commit for all of them.
 
 ```sh
 gh workflow run extended.yml --ref develop                    # the floating images (last green develop run), tests from the ref
-gh workflow run extended.yml --ref develop -f sha=<sha>       # that commit's images and tree
+gh workflow run extended.yml --ref develop -f sha=<sha>       # that commit's images; the ref's tests if its inputs-hash matches
 gh workflow run extended.yml --ref develop -f only=8.4,8.5 -f flavor=fpm,cli -f apps=false -f bench=true
 ```
 

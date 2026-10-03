@@ -15,7 +15,8 @@
 #                      green develop run) and the test scripts of the dispatched
 #                      ref. The images' inputs-hash must equal the ref's, which
 #                      ci/extended-plan.sh checks once up front. With a sha: that
-#                      commit's images and that commit's tree.
+#                      commit's images, tested with the ref's scripts when the
+#                      inputs-hash matches, else with that commit's own tree.
 #   workflow_run       after `ci` completes successfully on a develop push (or a
 #                      develop dispatch): that run's head sha, images and tree.
 #                      GitHub fires workflow_run only for a workflow file on the

@@ -11,9 +11,11 @@
 #   sha       the commit whose images are tested; jobs pull exactly
 #             dev:<tag>-<sha12>, so one run can never mix two commits
 #   checkout  the ref whose tests/ and ci/ run. The images' own commit for a
-#             workflow_run or an explicit sha; for a dispatch with no sha, the
-#             dispatched ref, which may carry newer test scripts than the
-#             images -- tests/ and ci/ are outside scripts/inputs-hash.sh, so
+#             workflow_run, or for an explicit sha whose inputs-hash differs from
+#             the dispatched ref's; otherwise (a dispatch with no sha, or one
+#             whose inputs-hash matches) the dispatched ref, which may carry
+#             newer test scripts than the images -- tests/ and ci/ are outside
+#             scripts/inputs-hash.sh, so
 #             the inputs-hash comparison is what proves the tree still matches
 #             the images, and it is made here first, once, rather than in
 #             every job (extended.sh pull makes it again per job)
@@ -65,10 +67,19 @@ image_config() {
 want="${EXT_RUN_SHA:-${EXT_SHA_INPUT:-}}"
 if [ -n "$want" ]; then
   sha="$(git rev-parse --verify --quiet "${want}^{commit}")" || die "'$want' is not a commit in this repository"
-  checkout="$sha"
-  err="$(docker buildx imagetools inspect "$repo:${first_tag}-${sha:0:12}" 2>&1 >/dev/null)" \
-    || die "cannot read $repo:${first_tag}-${sha:0:12} (develop CI has not pushed images for ${sha:0:12}: not a develop commit, still running, failed or pruned; or no read access): $(tail -1 <<<"$err")"
-  mode="images of ${sha:0:12}"
+  cfg="$(image_config "$repo:${first_tag}-${sha:0:12}")" \
+    || die "cannot read $repo:${first_tag}-${sha:0:12} (develop CI has not pushed images for ${sha:0:12}: not a develop commit, still running, failed or pruned; or no read access)"
+  img_hash="$(jq -r '.config.Labels["com.lotuswebagency.inputs-hash"] // empty' <<<"$cfg")"
+  if [ -n "${EXT_RUN_SHA:-}" ]; then
+    checkout="$sha"
+  elif [ "$img_hash" = "$(bash scripts/inputs-hash.sh)" ]; then
+    # Same inputs as the dispatched ref: run its (newer) test scripts. pull
+    # --sha only needs the commit in history and a matching inputs-hash.
+    checkout="${GITHUB_SHA:?GITHUB_SHA is not set}"
+  else
+    checkout="$sha"
+  fi
+  mode="images of ${sha:0:12}, tests from ${checkout:0:12}"
 else
   cfg="$(image_config "$repo:${first_tag}")" || die "cannot read $repo:${first_tag} (no green develop run yet, or no read access to the package)"
   sha="$(jq -r '.config.Labels["org.opencontainers.image.revision"] // empty' <<<"$cfg")"
