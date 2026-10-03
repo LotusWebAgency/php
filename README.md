@@ -490,8 +490,9 @@ doesn't mean in practice.
 
 ## Verifying images
 
-Every published digest carries an SBOM, max-mode SLSA provenance, and a
-keyless Cosign signature bound to this repository's GitHub Actions identity:
+Every published digest carries an SBOM, max-mode SLSA provenance, a
+keyless Cosign signature bound to this repository's GitHub Actions identity,
+OpenVEX statements and signed test results:
 
 ```sh
 cosign verify \
@@ -507,10 +508,48 @@ docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --format '{{ json .S
 docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --format '{{ json .Provenance }}'
 ```
 
+Two more keyless attestations, from the same workflow identity, sit on every
+platform image and on the multi-arch tag. The OpenVEX one carries the findings
+we accepted instead of fixing, each with its reason and a re-review date (the
+source is [`vex/php.openvex.json`](vex/php.openvex.json)). Only an
+image a statement applies to has one: today that is `cli-builder`, whose bundled
+npm ships a `brace-expansion` and an `undici` with no fixed release yet. The
+test-result one is attached only after the smoke tests and the Trivy gate passed
+against the pushed digest, and records the digest, PHP version, flavor, uarch,
+inputs hash, git commit, workflow run URL, and per architecture the smoke
+verdict with every check that passed and the Trivy verdict.
+
+```sh
+cosign verify-attestation --type openvex \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity 'https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main' \
+  lotuswebagency/php:8.5-cli-builder | jq -r .payload | base64 -d | jq .predicate
+
+cosign verify-attestation --type https://github.com/LotusWebAgency/php/attestation/test-result/v1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity 'https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main' \
+  lotuswebagency/php:8.5-fpm | jq -r .payload | base64 -d | jq .predicate
+```
+
+`cosign verify-attestation` on a tag checks the attestation on the manifest
+list, which covers both architectures. To check one platform's own attestation,
+resolve its digest first and verify `lotuswebagency/php@sha256:...` instead:
+
+```sh
+docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --raw \
+  | jq -r '.manifests[] | select(.platform.architecture == "arm64") | .digest'
+```
+
+Trivy can apply the VEX document too: `trivy image --vex oci lotuswebagency/php:8.5-cli-builder`.
+Trivy only suppresses `not_affected` and `fixed` statements, and ours are
+`affected` (accepted, no upstream fix, not claimed unreachable), so the findings
+still show. The CI gate honors them through a `.trivyignore` generated from the
+same file, which expires on the same date.
+
 A pull request or a push to `develop` builds and tests without publishing; a Trivy gate fails the
 build on any fixable CRITICAL or HIGH finding before anything can reach a
-registry (`.trivyignore` at the repo root records accepted risks with a
-reason). Trivy scans the Debian package layer -- it can't see the libraries
+registry (accepted risks are recorded with a reason and a re-review date in
+[`vex/php.openvex.json`](vex/php.openvex.json); `.trivyignore` is generated from it). Trivy scans the Debian package layer -- it can't see the libraries
 built from source and vendored under `/opt`: ImageMagick and net-snmp in every
 build, plus the vendored OpenSSL and ICU (static) and curl (7.0–7.2) of the
 7.0–8.0 builds. Those are tracked through `deps/versions.lock`'s pins instead. See
