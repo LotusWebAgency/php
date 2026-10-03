@@ -187,6 +187,9 @@ section "6/8 python unit tests (matrix/ext-registry/elf-hardening/flags/locks)"
 # fetch-verified.sh copies stay byte-identical), plus scripts/test_gen_matrix.py,
 # scripts/test_pgo_tiers.py, scripts/test_ext_registry.py and
 # scripts/test_flags.py's own unit-level assertions on cflags.sh/ldflags.sh.
+# scripts/test_vex.py is the accepted-risk gate: vex/php.openvex.json is valid
+# OpenVEX, .trivyignore is the file generated from it, and no statement is past
+# its review-by date (it goes red on that day, as .trivyignore's exp: used to).
 if python3 -m unittest discover -s scripts -p 'test_*.py' -v 2>&1 | tail -20; then
   ok "python3 -m unittest discover -s scripts"
 else

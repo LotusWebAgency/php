@@ -23,9 +23,11 @@
 #   push or manual dispatch on main, and the weekly cron (which GitHub runs on
 #     the default branch only): the same full matrix through the `build` job,
 #     which pushes every image by digest with SBOM + max-mode provenance;
-#     `merge` then assembles the multi-arch manifests and signs every manifest
-#     (index and per-platform) keylessly with cosign, and `sync-description`
-#     updates the Docker Hub page. `build`, `merge` and `sync-description` are
+#     `merge` then assembles the multi-arch manifests, signs every manifest
+#     (index and per-platform) keylessly with cosign and attaches two more
+#     keyless attestations to each: the OpenVEX statements from
+#     vex/php.openvex.json and the test results the build job recorded after
+#     smoke and Trivy passed. `sync-description` updates the Docker Hub page. `build`, `merge` and `sync-description` are
 #     the only jobs with Docker Hub access and they only run on main.
 #
 # ext-builder is not a leg of its own: it is built in the same bake invocation
@@ -592,6 +594,7 @@ jobs:
       TARGET_TAG: ${{ matrix.target.tags[0] }}
       TARGET_PHP: ${{ matrix.target.php }}
       TARGET_FLAVOR: ${{ matrix.target.flavor }}
+      TARGET_UARCH: ${{ matrix.target.uarch }}
       TARGET_CORPUS: ${{ matrix.target.corpus }}
       RIDER_NAME: ${{ matrix.target.rider_name }}
       RIDER_FLAVOR: ${{ matrix.target.rider_flavor }}
@@ -703,12 +706,19 @@ jobs:
         if: matrix.target.rider_name != ''
         run: docker pull "${DOCKERHUB_IMAGE}@${RIDER_DIGEST}"
 
+      # The output is kept (tee, pipefail) for the signed test-result attestation:
+      # scripts/result_predicate.py reads the `ok:` lines and refuses a log that
+      # does not end in SMOKE PASSED.
       - name: Smoke test the pushed digest
-        run: ./tests/smoke.sh "${DOCKERHUB_IMAGE}@${DIGEST}" "$TARGET_PHP" "$TARGET_FLAVOR"
+        run: |
+          set -euo pipefail
+          ./tests/smoke.sh "${DOCKERHUB_IMAGE}@${DIGEST}" "$TARGET_PHP" "$TARGET_FLAVOR" 2>&1 | tee "$RUNNER_TEMP/smoke-target.log"
 
       - name: Smoke test the pushed ext-builder digest
         if: matrix.target.rider_name != ''
-        run: ./tests/smoke.sh "${DOCKERHUB_IMAGE}@${RIDER_DIGEST}" "$TARGET_PHP" "$RIDER_FLAVOR"
+        run: |
+          set -euo pipefail
+          ./tests/smoke.sh "${DOCKERHUB_IMAGE}@${RIDER_DIGEST}" "$TARGET_PHP" "$RIDER_FLAVOR" 2>&1 | tee "$RUNNER_TEMP/smoke-rider.log"
 
       # A repo-root .trivyignore, if present, is honored automatically. Runs
       # against the exact digest that was pushed and will be merged, not a
@@ -732,6 +742,28 @@ jobs:
           severity: CRITICAL,HIGH
           ignore-unfixed: true
 
+      # Reached only when every smoke and Trivy step above passed. Writes the
+      # test-result predicate next to the digest file; the merge job attaches it
+      # (scripts/attest-image.sh) once the manifest list exists. No result file,
+      # no attestation: a failed run uploads nothing and the merge job fails.
+      - name: Record the test results
+        run: |
+          set -euo pipefail
+          record() {  # record <index-digest> <flavor> <smoke-log> <out>
+            local platform_digest
+            platform_digest="$(./scripts/platform-digest.sh "${DOCKERHUB_IMAGE}@$1" "$ARCH_NAME")"
+            python3 scripts/result_predicate.py platform \
+              --repository "$DOCKERHUB_IMAGE" --php "$TARGET_PHP" --flavor "$2" --uarch "$TARGET_UARCH" \
+              --arch "$ARCH_NAME" --image-digest "$platform_digest" --inputs-hash "$INPUTS_HASH" \
+              --git-sha "$GITHUB_SHA" --git-ref "$GITHUB_REF" \
+              --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+              --smoke-log "$3" --trivy-severity CRITICAL,HIGH --out "$4"
+          }
+          record "$DIGEST" "$TARGET_FLAVOR" "$RUNNER_TEMP/smoke-target.log" "/tmp/digests/$ARCH_NAME.test-result.json"
+          if [ -n "$RIDER_NAME" ]; then
+            record "$RIDER_DIGEST" "$RIDER_FLAVOR" "$RUNNER_TEMP/smoke-rider.log" "/tmp/digests-rider/$ARCH_NAME.test-result.json"
+          fi
+
       # Full name, no shared prefix pattern on the download side (C1): a
       # GitHub Actions artifact name is unique per workflow run by
       # construction (upload-artifact v4 refuses a second upload under a
@@ -744,7 +776,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: digest-${{ matrix.target.name }}-${{ matrix.arch.name }}
-          path: /tmp/digests/${{ matrix.arch.name }}
+          path: |
+            /tmp/digests/${{ matrix.arch.name }}
+            /tmp/digests/${{ matrix.arch.name }}.test-result.json
           if-no-files-found: error
           retention-days: 1
 
@@ -753,7 +787,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: digest-${{ matrix.target.rider_name }}-${{ matrix.arch.name }}
-          path: /tmp/digests-rider/${{ matrix.arch.name }}
+          path: |
+            /tmp/digests-rider/${{ matrix.arch.name }}
+            /tmp/digests-rider/${{ matrix.arch.name }}.test-result.json
           if-no-files-found: error
           retention-days: 1
 
@@ -877,6 +913,18 @@ jobs:
       # published digest").
       - name: Sign the manifest, recursively (keyless)
         run: cosign sign --yes --recursive "${DOCKERHUB_IMAGE}@${LIST_DIGEST}"
+
+      # OpenVEX statements (vex/php.openvex.json, scoped to each digest) and the
+      # build job's test results, as keyless in-toto attestations on every
+      # platform manifest and on the list. Verified in place with the identity
+      # SECURITY.md documents, so a wrong identity fails the release instead of
+      # a user's `cosign verify-attestation`.
+      - name: Attest OpenVEX and test results (keyless)
+        env:
+          COSIGN_VERIFY_FLAGS: >-
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            --certificate-identity https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main
+        run: ./scripts/attest-image.sh "$DOCKERHUB_IMAGE" "$LIST_DIGEST" "$TARGET_FLAVOR" digests
 
   # ------------------------------------------------------------ sync-description
   # Pushes DOCKERHUB.md to the Docker Hub page after a successful publish.

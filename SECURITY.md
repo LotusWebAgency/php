@@ -36,8 +36,8 @@ touch a package manager. Those are tracked by hand instead, through the
 pinned versions in `deps/versions.lock`. Only `main` publishes, and `main` is
 branch-protected: publishing requires a green pull request (work lands on
 `develop`, which builds and tests both architectures but never publishes).
-Published digests carry an SBOM, max-mode SLSA provenance and a keyless Cosign
-signature.
+Published digests carry an SBOM, max-mode SLSA provenance, a keyless Cosign
+signature, OpenVEX statements and signed test results.
 
 Verify what you pulled:
 
@@ -48,10 +48,51 @@ cosign verify \
   lotuswebagency/php:8.5-fpm
 ```
 
+Two more keyless attestations, from the same workflow identity, sit on every
+platform image and on the multi-arch tag. The OpenVEX one carries the findings
+we accepted instead of fixing, each with its reason and a re-review date (the
+source is [`vex/php.openvex.json`](vex/php.openvex.json)). Only an
+image a statement applies to has one: today that is `cli-builder`, whose bundled
+npm ships a `brace-expansion` and an `undici` with no fixed release yet. The
+test-result one is attached only after the smoke tests and the Trivy gate passed
+against the pushed digest, and records the digest, PHP version, flavor, uarch,
+inputs hash, git commit, workflow run URL, and per architecture the smoke
+verdict with every check that passed and the Trivy verdict.
+
+```sh
+cosign verify-attestation --type openvex \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity 'https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main' \
+  lotuswebagency/php:8.5-cli-builder | jq -r .payload | base64 -d | jq .predicate
+
+cosign verify-attestation --type https://github.com/LotusWebAgency/php/attestation/test-result/v1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity 'https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main' \
+  lotuswebagency/php:8.5-fpm | jq -r .payload | base64 -d | jq .predicate
+```
+
+`cosign verify-attestation` on a tag checks the attestation on the manifest
+list, which covers both architectures. To check one platform's own attestation,
+resolve its digest first and verify `lotuswebagency/php@sha256:...` instead:
+
+```sh
+docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --raw \
+  | jq -r '.manifests[] | select(.platform.architecture == "arm64") | .digest'
+```
+
+Trivy can apply the VEX document too: `trivy image --vex oci lotuswebagency/php:8.5-cli-builder`.
+Trivy only suppresses `not_affected` and `fixed` statements, and ours are
+`affected` (accepted, no upstream fix, not claimed unreachable), so the findings
+still show. The CI gate honors them through a `.trivyignore` generated from the
+same file, which expires on the same date.
+
 Findings that are accepted rather than fixed (no upstream fix available, or
-not reachable in this image) are recorded in a `.trivyignore` file in this
-repository together with the reason, so the gate stays meaningful instead of
-being switched off.
+not reachable in this image) are recorded in
+[`vex/php.openvex.json`](vex/php.openvex.json), the one source of truth, with
+the reason, the affected package as a purl and a `review-by` date. The `.trivyignore`
+the gate reads is generated from it, and a CI check fails on the review date, so
+the gate stays meaningful instead of being switched off and no acceptance
+outlives its review.
 
 ## Scope
 
@@ -64,7 +105,7 @@ upstream, and tell us so we can pin or patch around them; findings that
 require an already-compromised host or Docker daemon; the *absence* of
 upstream PHP security fixes on an end-of-life version tag, which is a
 documented property of that tag (see [SUPPORT.md](SUPPORT.md)), not a defect
-in this repository; and unfixable CVEs already listed in `.trivyignore` with
+in this repository; and unfixable CVEs already recorded in `vex/php.openvex.json` with
 a reason.
 
 Not a defect: Snuffleupagus's XXE feature (`sp.xxe_protection`) is not enabled

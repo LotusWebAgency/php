@@ -92,7 +92,7 @@ FROM lotuswebagency/php:8.4-fpm@sha256:...
 | Push to `develop` | Full build of every target on both architectures, smoke tests, Trivy gate — nothing is published |
 | Merge to `main` | Full build of every target, smoke tests, Trivy gate, publish, sign |
 | Weekly cron | Same pipeline, no source change — picks up base-image and package updates |
-| Fixable CRITICAL/HIGH CVE | The build fails and nothing is published until it is fixed or explicitly accepted in `.trivyignore` |
+| Fixable CRITICAL/HIGH CVE | The build fails and nothing is published until it is fixed or explicitly accepted in `vex/php.openvex.json` (with a review date) |
 | Real PHP version bump | A descriptive commit to `matrix.json` (and `matrix.gen.hcl`, regenerated), reviewed like any other change |
 
 ## Breaking changes
