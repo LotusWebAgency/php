@@ -1,3 +1,4 @@
+import argparse
 import copy
 import datetime
 import json
@@ -8,7 +9,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "ci"))
 
 import result_predicate  # noqa: E402
 import vex  # noqa: E402
@@ -23,25 +24,24 @@ class TestVexFile(unittest.TestCase):
     def test_the_committed_file_is_valid_openvex(self):
         self.assertEqual(vex.validate(self.doc), [])
 
-    def test_no_statement_is_past_its_review_date(self):
-        """The time bomb that replaces .trivyignore's exp:. When it goes off, look at
-        upstream again: renew the statement's review-by date or drop the statement."""
-        today = datetime.datetime.now(datetime.timezone.utc).date()
-        self.assertEqual(
-            vex.expired(self.doc, today), [],
-            "a VEX statement is past review-by -- re-check upstream, then renew or remove it",
-        )
-
     def test_review_date_is_exclusive_like_trivys_exp(self):
         due = vex.review_date(self.doc["statements"][0])
         day_before = due - datetime.timedelta(days=1)
         self.assertEqual(vex.expired(self.doc, day_before), [])
         self.assertEqual(len(vex.expired(self.doc, due)), len(self.doc["statements"]))
 
+    def test_due_within_lists_statements_inside_the_window_soonest_first(self):
+        due = vex.review_date(self.doc["statements"][0])
+        names = {st["vulnerability"]["name"] for st in self.doc["statements"]}
+        day = datetime.timedelta(days=1)
+        self.assertEqual(vex.due_within(self.doc, due - 15 * day, 14), [])
+        self.assertEqual({n for n, _ in vex.due_within(self.doc, due - 14 * day, 14)}, names)
+        self.assertEqual({n for n, _ in vex.due_within(self.doc, due + 30 * day, 14)}, names)
+
     def test_trivyignore_is_the_generated_file(self):
         self.assertEqual(
             vex.TRIVYIGNORE_PATH.read_text(), vex.trivyignore(self.doc),
-            ".trivyignore drifted from vex/php.openvex.json -- run: python3 scripts/vex.py trivyignore --write",
+            ".trivyignore drifted from vex/php.openvex.json -- run: python3 ci/vex.py trivyignore --write",
         )
 
     def test_trivyignore_lines_carry_the_statements_deadline(self):
@@ -166,8 +166,28 @@ class TestResultPredicate(unittest.TestCase):
         with self.assertRaises(ValueError):
             result_predicate.smoke_result(self.log("SMOKE PASSED\n"))
 
-    def test_e2e_not_run_says_so(self):
-        self.assertFalse(result_predicate.e2e_result(None)["ran"])
+    def predicate_args(self, outcome, info=None):
+        return argparse.Namespace(
+            trivy_outcome=outcome, trivy_severity="CRITICAL,HIGH", trivy_info=info,
+            trivyignore=str(vex.TRIVYIGNORE_PATH), vex=str(vex.VEX_PATH),
+        )
+
+    def test_trivy_verdict_comes_from_the_step_outcome(self):
+        r = result_predicate.trivy_result(self.predicate_args("success"))
+        self.assertEqual((r["verdict"], r["severity"]), ("pass", "CRITICAL,HIGH"))
+        for outcome in ("failure", "cancelled", "skipped", ""):
+            with self.assertRaises(ValueError, msg=outcome):
+                result_predicate.trivy_result(self.predicate_args(outcome))
+
+    def test_trivy_version_and_db_date_are_recorded_when_present(self):
+        info = self.log('{"Version": "0.70.0", "VulnerabilityDB": {"UpdatedAt": "2026-10-03T06:00:00Z"}}')
+        r = result_predicate.trivy_result(self.predicate_args("success", info))
+        self.assertEqual((r["version"], r["db_updated_at"]), ("0.70.0", "2026-10-03T06:00:00Z"))
+        for bad in ("not json", "[]", "{}"):
+            r = result_predicate.trivy_result(self.predicate_args("success", self.log(bad)))
+            self.assertNotIn("version", r)
+            self.assertNotIn("db_updated_at", r)
+        self.assertNotIn("version", result_predicate.trivy_result(self.predicate_args("success", "/nonexistent")))
 
     def platform(self, arch, **over):
         p = {k: f"{k}-v" for k in result_predicate.COMMON}
@@ -190,7 +210,7 @@ class TestResultPredicate(unittest.TestCase):
 
 class TestWiring(unittest.TestCase):
     def test_the_predicate_type_is_spelled_the_same_in_the_signing_script(self):
-        script = (ROOT / "scripts" / "attest-image.sh").read_text()
+        script = (ROOT / "ci" / "attest-image.sh").read_text()
         m = re.search(r'^TEST_RESULT_TYPE="([^"]+)"', script, re.M)
         self.assertIsNotNone(m)
         self.assertEqual(m.group(1), result_predicate.PREDICATE_TYPE)

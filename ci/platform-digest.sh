@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The digest of one platform's image manifest inside a multi-platform index.
 #
-#   scripts/platform-digest.sh <repo>@<index-digest> <amd64|arm64>
+#   ci/platform-digest.sh <repo>@<index-digest> <amd64|arm64>
 #
 # A buildx push with provenance/SBOM is an index (image manifest plus
 # attestation manifests, which carry platform unknown/unknown), so the digest

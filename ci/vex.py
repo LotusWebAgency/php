@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """The OpenVEX source of truth (vex/php.openvex.json) and what is derived from it.
 
-    python3 scripts/vex.py check                   # schema + review deadlines, exit 1 on a problem
-    python3 scripts/vex.py trivyignore --write     # regenerate .trivyignore
-    python3 scripts/vex.py trivyignore --check     # fail on drift (what preflight runs)
-    python3 scripts/vex.py emit --digest sha256:.. --flavor cli-builder
+    python3 ci/vex.py check                   # schema + review deadlines, exit 1 on a problem
+    python3 ci/vex.py check --warn-within 14  # CI: ::warning:: annotations, exit 1 only on a schema problem
+    python3 ci/vex.py trivyignore --write     # regenerate .trivyignore
+    python3 ci/vex.py trivyignore --check     # fail on drift (what preflight runs)
+    python3 ci/vex.py emit --digest sha256:.. --flavor cli-builder
                                                    # the document scoped to one image, for cosign attest
 
 One file holds every accepted-risk decision. Two things come out of it:
@@ -13,7 +14,7 @@ One file holds every accepted-risk decision. Two things come out of it:
     --vex only suppresses not_affected/fixed, and our decisions are mostly
     `affected` (accepted, no upstream fix), so the gate keeps using an ignore file
     -- generated, so it cannot disagree with the VEX file.
-  * the per-image OpenVEX attestation (emit), which scripts/attest-image.sh signs
+  * the per-image OpenVEX attestation (emit), which ci/attest-image.sh signs
     onto every published digest.
 
 Statements in the source file name their product as the repository purl plus a
@@ -22,8 +23,14 @@ statement applies to and is replaced by the real image digest purl in emit).
 
 The re-review deadline is the token `review-by: YYYY-MM-DD` inside status_notes
 (OpenVEX statements are closed objects, there is no field for it). It is
-exclusive, like Trivy's `exp:`: from that day on `check` fails and the generated
-.trivyignore line has expired, so the gate fails on the finding again.
+exclusive, like Trivy's `exp:`: from that day on the generated .trivyignore line
+has expired, so the Trivy gate itself fails on the finding again (that is the
+only thing that gates a build). Nothing else does: the unit tests deliberately
+do not look at the date, because tests/preflight.sh runs before every build job
+and a date-triggered failure there would stop the whole publish. `check` is the
+tool people and CI use to see the date coming: plain, it exits 1 once a deadline
+has passed; with --warn-within N it prints GitHub ::warning:: lines for every
+statement due within N days (or already due) and still exits 0.
 """
 import argparse
 import datetime
@@ -183,9 +190,16 @@ def expired(doc, today):
     return out
 
 
+def due_within(doc, today, days):
+    """[(vulnerability, review date)] due on or before today + days, soonest first."""
+    horizon = today + datetime.timedelta(days=days)
+    out = [(st["vulnerability"]["name"], review_date(st)) for st in doc["statements"] if review_date(st) <= horizon]
+    return sorted(out, key=lambda x: x[1])
+
+
 def trivyignore(doc):
     lines = [
-        "# GENERATED from vex/php.openvex.json by scripts/vex.py -- do not edit.",
+        "# GENERATED from vex/php.openvex.json by ci/vex.py -- do not edit.",
         "# Accepted risks for the Trivy gate in .github/workflows/ci.yml. Each line",
         "# expires on its statement's review-by date, so the gate re-asks the question.",
         "",
@@ -240,7 +254,7 @@ def emit(doc, repository, digest, flavor, now):
         "author": doc["author"],
         "timestamp": now,
         "version": 1,
-        "tooling": "scripts/vex.py",
+        "tooling": "ci/vex.py",
         "statements": statements,
     }
 
@@ -250,6 +264,8 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check")
     c.add_argument("--today", type=datetime.date.fromisoformat, default=None)
+    c.add_argument("--warn-within", type=int, default=None, metavar="DAYS",
+                   help="annotate deadlines within DAYS days (or past) as ::warning:: and do not fail on them")
     t = sub.add_parser("trivyignore")
     g = t.add_mutually_exclusive_group(required=True)
     g.add_argument("--write", action="store_true")
@@ -269,6 +285,13 @@ def main(argv=None):
 
     if args.cmd == "check":
         today = args.today or datetime.datetime.now(datetime.timezone.utc).date()
+        if args.warn_within is not None:
+            soon = due_within(doc, today, args.warn_within)
+            for name, due in soon:
+                when = f"is due for re-review on {due}" if due > today else f"was due for re-review on {due} and the Trivy gate no longer ignores it"
+                print(f"::warning title=VEX review-by::{name} {when} -- re-check upstream, then renew or remove it in vex/php.openvex.json")
+            print(f"ok: {len(doc['statements'])} VEX statements valid, {len(soon)} due within {args.warn_within} days as of {today}")
+            return 0
         late = expired(doc, today)
         for name, due in late:
             print(f"FAIL: {name} was due for re-review on {due} -- re-check upstream, then renew or remove it", file=sys.stderr)
@@ -284,7 +307,7 @@ def main(argv=None):
             return 0
         have = TRIVYIGNORE_PATH.read_text() if TRIVYIGNORE_PATH.exists() else ""
         if have != want:
-            print("FAIL: .trivyignore is stale -- run: python3 scripts/vex.py trivyignore --write", file=sys.stderr)
+            print("FAIL: .trivyignore is stale -- run: python3 ci/vex.py trivyignore --write", file=sys.stderr)
             return 1
         print("ok: .trivyignore matches vex/php.openvex.json")
         return 0

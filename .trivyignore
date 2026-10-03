@@ -1,4 +1,4 @@
-# GENERATED from vex/php.openvex.json by scripts/vex.py -- do not edit.
+# GENERATED from vex/php.openvex.json by ci/vex.py -- do not edit.
 # Accepted risks for the Trivy gate in .github/workflows/ci.yml. Each line
 # expires on its statement's review-by date, so the gate re-asks the question.
 

@@ -8,9 +8,19 @@
 #
 #   ./tests/test-readonly.sh <image> <flavor>      flavor: fpm | cli | cli-builder
 #
-# Each assertion that the image works read-only has a control that proves the
-# same assertion fails when /tmp is not writable, so a green run cannot mean the
-# check was blind.
+# Where an assertion depends on /tmp being writable it has a control that proves
+# the same check fails without it: PHP_EXT_ENABLE's refusal, the cli session and
+# temp file program, the cli-builder project directory, the fpm request, and
+# npx's need for an exec /tmp. Two checks have no such control and say so:
+# opcache (shared memory, needs no path at all) and net-snmp (its state
+# directory is pre-created in the image), so they show only that nothing there
+# writes to the read-only rootfs, not that the check could have caught it.
+#
+# Every container command runs under `timeout` inside the container (a host-side
+# timeout would only kill the docker client). The two detached fpm containers
+# are the exception: the entrypoint branches on php-fpm being its first argument,
+# so wrapping it would skip the very startup checks under test; the EXIT trap
+# removes them.
 set -euo pipefail
 IMAGE="${1:?usage: test-readonly.sh <image> <flavor>}"
 FLAVOR="${2:?usage: test-readonly.sh <image> <flavor>}"
@@ -21,19 +31,22 @@ esac
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 RO=(--read-only --tmpfs /tmp -m 512m)
+# /tmp mounted exec: cli-builder's npx unpacks packages to /tmp/npm/_npx and runs
+# them from there; the Docker default (noexec) makes that fail with EACCES.
+RO_EXEC=(--read-only --tmpfs /tmp:exec -m 512m)
 # What a failed write under a read-only rootfs looks like in PHP, net-snmp,
 # npm and composer output alike.
 WRITE_ERR='read-only file system|permission denied|failed to open stream|unable to (create|write|open)|cannot (create|open|write)|EROFS|Created directory'
 
-EXTDIR=$(docker run --rm "$IMAGE" php -r 'echo ini_get("extension_dir");')
-has_ext() { docker run --rm "$IMAGE" test -f "${EXTDIR}/$1.so"; }
+EXTDIR=$(docker run --rm "$IMAGE" timeout 20 php -r 'echo ini_get("extension_dir");')
+has_ext() { docker run --rm "$IMAGE" timeout 20 test -f "${EXTDIR}/$1.so"; }
 
 # Every flavor, every combination: refusing loudly is the documented failure
 # mode when there is nowhere to put the env-driven ini. Control for everything
 # below -- without /tmp, PHP_EXT_ENABLE cannot be honored and the container says
 # so and exits instead of starting without the extension.
 set +e
-out=$(docker run --rm --read-only -m 512m -e PHP_EXT_ENABLE=bz2 "$IMAGE" php -v 2>&1)
+out=$(docker run --rm --read-only -m 512m -e PHP_EXT_ENABLE=bz2 "$IMAGE" timeout 20 php -v 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "$FLAVOR: --read-only without a writable /tmp started although PHP_EXT_ENABLE=bz2 could not be applied: $out"
@@ -55,7 +68,7 @@ echo "MEM=", ini_get("memory_limit"), "\n";
 echo "BZ2=", extension_loaded("bz2") ? "y" : "n", "\n";
 '
 if [ "$FLAVOR" != fpm ]; then
-  out=$(docker run --rm "${RO[@]}" -e PHP_MEMORY_LIMIT=321M -e PHP_EXT_ENABLE=bz2 "$IMAGE" php -d session.use_cookies=0 -r "$cli_php" 2>&1)
+  out=$(docker run --rm "${RO[@]}" -e PHP_MEMORY_LIMIT=321M -e PHP_EXT_ENABLE=bz2 "$IMAGE" timeout 20 php -d session.use_cookies=0 -r "$cli_php" 2>&1)
   for want in "SESSION=v" "TEMPFILE=ok" "MEM=321M" "BZ2=y"; do
     grep -qx "$want" <<<"$out" || fail "$FLAVOR: read-only cli: expected '$want': $out"
   done
@@ -64,13 +77,13 @@ if [ "$FLAVOR" != fpm ]; then
 
   # Control: the same program without /tmp. The session cannot be written and
   # PHP says why; if it passed here the assertions above would prove nothing.
-  out=$(docker run --rm --read-only -m 512m "$IMAGE" php -d session.use_cookies=0 -r "$cli_php" 2>&1 || true)
+  out=$(docker run --rm --read-only -m 512m "$IMAGE" timeout 20 php -d session.use_cookies=0 -r "$cli_php" 2>&1 || true)
   grep -qx "SESSION=lost" <<<"$out" || fail "$FLAVOR: control: the session survived a read-only rootfs without /tmp: $out"
   grep -qi "read-only file system" <<<"$out" || fail "$FLAVOR: control: a failed session write was not reported: $out"
   echo "ok: $FLAVOR -- control: without /tmp the same program loses its session and says 'Read-only file system'"
 
   # opcache is a shared-memory mapping, not a file: it needs no writable path.
-  out=$(docker run --rm "${RO[@]}" "$IMAGE" sh -c '
+  out=$(docker run --rm "${RO[@]}" "$IMAGE" timeout 20 sh -c '
     echo "<?php function ro_probe() { return 1; }" > /tmp/ro-inc.php
     cat > /tmp/ro-main.php <<"EOF"
 <?php
@@ -84,7 +97,7 @@ EOF
   echo "ok: $FLAVOR -- opcache caches scripts under --read-only"
 
   if has_ext snmp; then
-    out=$(docker run --rm "${RO[@]}" -e PHP_EXT_ENABLE=snmp "$IMAGE" php -r '
+    out=$(docker run --rm "${RO[@]}" -e PHP_EXT_ENABLE=snmp "$IMAGE" timeout 20 php -r '
       $s = new SNMP(SNMP::VERSION_3, "127.0.0.1", "u");
       $s->setSecurity("authPriv", "SHA", "authpass12345", "AES", "privpass12345");
       $s->timeout = 100000; $s->retries = 0;
@@ -100,7 +113,7 @@ if [ "$FLAVOR" = cli-builder ]; then
   # The documented builder tasks: composer and npm, caches in /tmp
   # (COMPOSER_HOME/npm_config_cache/COREPACK_HOME), the project on a writable
   # volume. /app stands in for the bind mount; no network needed.
-  out=$(docker run --rm "${RO[@]}" --tmpfs /app:exec,uid=33,gid=33 "$IMAGE" bash -c '
+  out=$(docker run --rm "${RO[@]}" --tmpfs /app:exec,uid=33,gid=33 "$IMAGE" timeout 60 bash -c '
     set -e
     cd /app
     mkdir lp && printf "{\"name\":\"lp\",\"version\":\"1.0.0\",\"bin\":{\"lp\":\"cli.js\"}}" > lp/package.json
@@ -123,12 +136,36 @@ if [ "$FLAVOR" = cli-builder ]; then
 
   # Control: same task with the project directory left read-only fails loudly.
   set +e
-  out=$(docker run --rm "${RO[@]}" "$IMAGE" bash -c 'cd /app && npm init -y' 2>&1)
+  out=$(docker run --rm "${RO[@]}" "$IMAGE" timeout 20 bash -c 'cd /app && npm init -y' 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "cli-builder: control: npm init succeeded in a read-only /app: $out"
   grep -qiE "EROFS|read-only file system" <<<"$out" || fail "cli-builder: control: npm init in a read-only /app failed without naming the cause: $out"
   echo "ok: cli-builder -- control: a read-only project directory fails loudly (EROFS), so /app must be a volume"
+
+  # npx unpacks a package into /tmp/npm/_npx and executes its bin from there, so
+  # cli-builder is the one flavor whose /tmp has to be mounted exec. Offline: the
+  # package is packed from a local directory and installed from its tarball.
+  npx_task='set -e
+    cd /app
+    mkdir lp && printf "{\"name\":\"lp\",\"version\":\"1.0.0\",\"bin\":{\"lp\":\"cli.js\"}}" > lp/package.json
+    printf "#!/usr/bin/env node\nconsole.log(\"LP_RAN\")\n" > lp/cli.js && chmod +x lp/cli.js
+    (cd lp && npm pack --silent >/dev/null)
+    npx --yes --offline --package=/app/lp/lp-1.0.0.tgz lp'
+  out=$(docker run --rm "${RO_EXEC[@]}" --tmpfs /app:exec,uid=33,gid=33 "$IMAGE" timeout 60 bash -c "$npx_task" 2>&1) \
+    || fail "cli-builder: offline npx failed with --tmpfs /tmp:exec: $out"
+  grep -qx LP_RAN <<<"$out" || fail "cli-builder: npx ran but the package's bin did not print LP_RAN: $out"
+  echo "ok: cli-builder -- npx runs a package's bin from /tmp with --tmpfs /tmp:exec (offline, from a local tarball)"
+
+  # Negative control: the very same task on Docker's default noexec /tmp.
+  set +e
+  out=$(docker run --rm "${RO[@]}" --tmpfs /app:exec,uid=33,gid=33 "$IMAGE" timeout 60 bash -c "$npx_task" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cli-builder: control: npx ran from a noexec /tmp, so the exec requirement is not what the docs say: $out"
+  grep -qiE "permission denied|EACCES" <<<"$out" || fail "cli-builder: control: npx failed on a noexec /tmp without naming a permission error: $out"
+  ! grep -qx LP_RAN <<<"$out" || fail "cli-builder: control: the package's bin ran although /tmp is noexec: $out"
+  echo "ok: cli-builder -- control: on a noexec /tmp the same npx task fails with a permission error, so cli-builder needs --tmpfs /tmp:exec"
 fi
 
 # ------------------------------------------------------------------ fpm side
@@ -165,12 +202,12 @@ body=$(printf -- '--B\r\nContent-Disposition: form-data; name="f"; filename="a.t
 # $1 container, $2 dir the probe script is written to. Prints the response body.
 fpm_probe() {
   local c="$1" dir="$2" out rc
-  docker exec -i "$c" sh -c "cat > ${dir}/ro-probe.php" <<<"$probe_php"
+  docker exec -i "$c" timeout 20 sh -c "cat > ${dir}/ro-probe.php" <<<"$probe_php"
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     set +e
     out=$(printf '%s' "$body" | docker exec -i -e SCRIPT_FILENAME="${dir}/ro-probe.php" -e SCRIPT_NAME=/ro-probe.php \
       -e REQUEST_METHOD=POST -e CONTENT_TYPE='multipart/form-data; boundary=B' -e CONTENT_LENGTH="${#body}" \
-      "$c" cgi-fcgi -bind -connect 127.0.0.1:9000 2>&1)
+      "$c" timeout 20 cgi-fcgi -bind -connect 127.0.0.1:9000 2>&1)
     rc=$?
     set -e
     [ "$rc" -eq 0 ] && break
@@ -183,7 +220,7 @@ fpm_probe() {
 wait_healthy() {
   local c="$1"
   for _ in $(seq 1 40); do
-    docker exec "$c" php-fpm-healthcheck >/dev/null 2>&1 && return 0
+    docker exec "$c" timeout 20 php-fpm-healthcheck >/dev/null 2>&1 && return 0
     sleep 0.5
   done
   docker logs "$c" >&2 2>&1 || true

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # End-to-end check of the publish-time attestations, without Docker Hub or
 # Sigstore: a throwaway registry:3 on localhost, a local cosign key, and the same
-# scripts the merge job runs (scripts/result_predicate.py, scripts/vex.py,
-# scripts/platform-digest.sh, scripts/attest-image.sh).
+# scripts the merge job runs (ci/result_predicate.py, ci/vex.py,
+# ci/platform-digest.sh, ci/attest-image.sh), in the merge job's order: platform
+# manifests are attested before the manifest list (and any tag) exists.
 #
 #   COSIGN=/path/to/cosign ./tests/test-attest.sh        # cosign on PATH by default
 #   ATTEST_TEST_PORT=5077                                 # registry port on 127.0.0.1
@@ -10,10 +11,13 @@
 #
 # It builds a two-platform image shaped like the CI one (per-arch pushes by
 # digest with provenance, merged into a list), then checks that:
-#   - a failed or unfinished smoke run cannot produce a result predicate;
-#   - a platform with no result, or a result for another digest, attests nothing;
-#   - both attestation types verify on the platform manifests and on the list,
-#     and carry what the docs say they carry;
+#   - a failed or unfinished smoke run, or a Trivy step that did not succeed,
+#     cannot produce a result predicate;
+#   - a platform with no result, or a result for another digest, attests nothing
+#     and stops the release before a tag exists;
+#   - both attestation types verify on the platform manifests (attested before
+#     the list is created) and on the list, and carry what the docs say;
+#   - re-running adds duplicates that `| head -n1` reads past;
 #   - a flavor with no applicable VEX statement gets only the test result.
 #
 # Not a Docker-image test: it needs docker (buildx), cosign, jq and python3, and
@@ -50,7 +54,7 @@ pass() { echo "ok: $*"; }
 die()  { echo "FAIL: $*" >&2; exit 1; }
 
 # A local key and no transparency log; the CI path is keyless and identical
-# otherwise (see the header of scripts/attest-image.sh).
+# otherwise (see the header of ci/attest-image.sh).
 export COSIGN_PASSWORD=""
 (cd "$WORK" && "$COSIGN" generate-key-pair >/dev/null 2>&1) || die "cosign generate-key-pair"
 export COSIGN_ATTEST_FLAGS="--key $WORK/cosign.key --use-signing-config=false --tlog-upload=false"
@@ -71,16 +75,24 @@ build_arch() {  # build_arch <content> <arch> -> the pushed index digest
   jq -r '."containerimage.digest"' "$WORK/meta-$1-$2.json"
 }
 
-# publish_list <content> -> sets LIST and IDX_amd64/IDX_arm64; per-arch pushes
-# by digest with provenance (so each is an index with an attestation manifest),
-# then merged into one list, as build + merge do.
-publish_list() {
+# push_arches <content> -> sets IDX_amd64/IDX_arm64 and PLAT_amd64/PLAT_arm64;
+# per-arch pushes by digest with provenance (so each is an index with an
+# attestation manifest), as the build job does. No tag exists afterwards.
+push_arches() {
   local content="$1"
   mkdir -p "$WORK/ctx-$content"
   echo "$content" > "$WORK/ctx-$content/f"
   printf 'FROM scratch\nCOPY f /f\n' > "$WORK/ctx-$content/Dockerfile"
   IDX_amd64="$(build_arch "$content" amd64)" || die "building $content for amd64"
   IDX_arm64="$(build_arch "$content" arm64)" || die "building $content for arm64"
+  PLAT_amd64="$("$ROOT/ci/platform-digest.sh" "$REPO@$IDX_amd64" amd64)"
+  PLAT_arm64="$("$ROOT/ci/platform-digest.sh" "$REPO@$IDX_arm64" arm64)"
+}
+
+# create_list <content> -> sets LIST; merges the per-arch pushes into one list
+# under a tag, as the merge job does.
+create_list() {
+  local content="$1"
   docker buildx imagetools create -t "$REPO:$content" "$REPO@$IDX_amd64" "$REPO@$IDX_arm64" >/dev/null 2>&1 \
     || die "imagetools create"
   LIST="sha256:$(docker buildx imagetools inspect "$REPO:$content" --raw | sha256sum | cut -d' ' -f1)"
@@ -99,32 +111,55 @@ smoke_log() {  # smoke_log <file> <passing|failing|unfinished>
 }
 
 predicate() {  # predicate <arch> <image-digest> <smoke-log> <out>
-  python3 scripts/result_predicate.py platform \
+  python3 ci/result_predicate.py platform \
     --repository docker.io/lotuswebagency/php --php 8.2 --flavor "$FLAVOR" --uarch baseline \
     --arch "$1" --image-digest "$2" --inputs-hash "$(./scripts/inputs-hash.sh)" \
     --git-sha 0123456789abcdef0123456789abcdef01234567 --git-ref refs/heads/main \
     --run-url https://github.com/LotusWebAgency/php/actions/runs/1/attempts/1 \
-    --smoke-log "$3" --out "$4"
+    --smoke-log "$3" --trivy-outcome "${TRIVY_OUTCOME:-success}" --trivy-severity CRITICAL,HIGH \
+    --trivy-info "$WORK/trivy-info.json" --out "$4"
+}
+
+# index_files <dir>: the index digest files, as the
+# build job uploads them (<arch>), next to the <arch>.test-result.json files.
+index_files() {  # index_files <dir>
+  printf '%s' "$IDX_amd64" > "$1/amd64"
+  printf '%s' "$IDX_arm64" > "$1/arm64"
+}
+
+tag_exists() { docker buildx imagetools inspect "$1" >/dev/null 2>&1; }
+
+no_attestations() {  # no_attestations <what> <ref>...
+  local what="$1" ref type
+  shift
+  for ref in "$@"; do
+    for type in "$RESULT_TYPE" openvex; do
+      ! attested "$ref" "$type" >/dev/null || die "$what still left a $type attestation on $ref"
+    done
+  done
+}
+
+attested_raw() {  # attested_raw <ref> <type> -> cosign's verify-attestation output, non-zero when none verify
+  local -a flags
+  read -ra flags <<<"$COSIGN_VERIFY_FLAGS"
+  "$COSIGN" verify-attestation "${flags[@]}" --type "$2" "$1" 2>/dev/null
 }
 
 attested() {  # attested <ref> <type> -> predicate JSON lines on stdout, non-zero when none verify
   local out
-  out="$("$COSIGN" verify-attestation $COSIGN_VERIFY_FLAGS --type "$2" "$1" 2>/dev/null)" || return 1
+  out="$(attested_raw "$1" "$2")" || return 1
   jq -r '.payload' <<<"$out" | while IFS= read -r p; do base64 -d <<<"$p"; echo; done
 }
 
-# ------------------------------------------------ 1. a bad smoke run writes nothing
+printf '%s\n' '{"Version":"0.70.0","VulnerabilityDB":{"Version":2,"UpdatedAt":"2026-10-03T06:00:00Z"}}' > "$WORK/trivy-info.json"
+
+# ------------------------------------------------ 1. a bad smoke run or Trivy outcome writes nothing
 FLAVOR=cli-builder
-publish_list cli-builder
-PLAT_amd64="$("$ROOT/scripts/platform-digest.sh" "$REPO@$IDX_amd64" amd64)"
-PLAT_arm64="$("$ROOT/scripts/platform-digest.sh" "$REPO@$IDX_arm64" arm64)"
+push_arches cli-builder
 [ "$PLAT_amd64" != "$PLAT_arm64" ] || die "both platforms resolved to one digest"
 [ "$PLAT_amd64" != "$IDX_amd64" ] || die "platform-digest.sh returned the index digest"
 pass "platform-digest.sh resolves the platform manifest out of a per-arch index ($PLAT_amd64)"
-LIST_ARCHES="$(docker buildx imagetools inspect "$REPO@$LIST" --raw | jq -r '.manifests[].digest')"
-grep -q "$PLAT_amd64" <<<"$LIST_ARCHES" || die "the platform manifest is not in the merged list"
-! grep -q "$IDX_amd64" <<<"$LIST_ARCHES" || die "the per-arch index digest is in the merged list (expected only its children)"
-pass "the merged list holds the platform manifests, not the per-arch indexes"
+! tag_exists "$REPO:cli-builder" || die "the tag exists before the list was created"
 
 mkdir -p "$WORK/results"
 smoke_log "$WORK/smoke-fail.log" failing
@@ -134,36 +169,62 @@ if predicate amd64 "$PLAT_amd64" "$WORK/smoke-fail.log" "$WORK/results/bad.json"
 [ ! -e "$WORK/results/bad.json" ] || die "a failing smoke log left a file behind"
 if predicate amd64 "$PLAT_amd64" "$WORK/smoke-unfinished.log" "$WORK/results/bad.json" 2>/dev/null; then die "an unfinished smoke log produced a predicate"; fi
 [ ! -e "$WORK/results/bad.json" ] || die "an unfinished smoke log left a file behind"
-pass "failed and unfinished smoke runs produce no predicate"
+for outcome in failure cancelled skipped; do
+  if TRIVY_OUTCOME="$outcome" predicate amd64 "$PLAT_amd64" "$WORK/smoke-pass.log" "$WORK/results/bad.json" 2>/dev/null; then die "a Trivy outcome of $outcome produced a predicate"; fi
+  [ ! -e "$WORK/results/bad.json" ] || die "a Trivy outcome of $outcome left a file behind"
+done
+pass "failed and unfinished smoke runs, and a Trivy step that did not succeed, produce no predicate"
 
 predicate amd64 "$PLAT_amd64" "$WORK/smoke-pass.log" "$WORK/results/amd64.test-result.json"
 predicate arm64 "$PLAT_arm64" "$WORK/smoke-pass.log" "$WORK/results/arm64.test-result.json"
+index_files "$WORK/results"
 
-# ------------------------------------------------ 2. refusals leave no attestation
+# ------------------------------------------------ 2. refusals leave no attestation, and no tag
 mkdir -p "$WORK/partial"
 cp "$WORK/results/amd64.test-result.json" "$WORK/partial/"
-if scripts/attest-image.sh "$REPO" "$LIST" cli-builder "$WORK/partial" >/dev/null 2>&1; then die "attested a list with an untested platform"; fi
+index_files "$WORK/partial"
+if ci/attest-image.sh platforms "$REPO" cli-builder "$WORK/partial" >/dev/null 2>&1; then die "attested with an untested platform"; fi
 mkdir -p "$WORK/swapped"
 cp "$WORK/results/amd64.test-result.json" "$WORK/swapped/amd64.test-result.json"
 cp "$WORK/results/amd64.test-result.json" "$WORK/swapped/arm64.test-result.json"
-if scripts/attest-image.sh "$REPO" "$LIST" cli-builder "$WORK/swapped" >/dev/null 2>&1; then die "attested a result recorded for another digest"; fi
-for ref in "$REPO@$LIST" "$REPO@$PLAT_amd64" "$REPO@$PLAT_arm64"; do
-  for type in "$RESULT_TYPE" openvex; do
-    ! attested "$ref" "$type" >/dev/null || die "refused runs still left a $type attestation on $ref"
-  done
-done
+index_files "$WORK/swapped"
+if ci/attest-image.sh platforms "$REPO" cli-builder "$WORK/swapped" >/dev/null 2>&1; then die "attested a result recorded for another digest"; fi
+no_attestations "refused runs" "$REPO@$PLAT_amd64" "$REPO@$PLAT_arm64"
 pass "a missing platform result or a result for another digest attests nothing"
 
-# ------------------------------------------------ 3. cli-builder: both types, everywhere
-scripts/attest-image.sh "$REPO" "$LIST" cli-builder "$WORK/results" >"$WORK/attest.log" 2>&1 || { cat "$WORK/attest.log"; die "attest-image.sh failed"; }
-grep -c '^ok: .* attestation on ' "$WORK/attest.log" | grep -qx 6 || { cat "$WORK/attest.log"; die "expected 6 verified attestations (2 types x 2 platforms + list)"; }
-pass "attest-image.sh attached and verified 6 attestations (test-result and openvex on each platform and on the list)"
-
-for ref in "$REPO:cli-builder" "$REPO@$PLAT_amd64" "$REPO@$PLAT_arm64"; do
+# ------------------------------------------------ 3. platforms are attested before the list exists
+attest_log="$WORK/attest-platforms.log"
+ci/attest-image.sh platforms "$REPO" cli-builder "$WORK/results" >"$attest_log" 2>&1 || { cat "$attest_log"; die "attest-image.sh platforms failed"; }
+grep -c '^ok: .* attestation on ' "$attest_log" | grep -qx 4 || { cat "$attest_log"; die "expected 4 verified attestations (2 types x 2 platforms)"; }
+! tag_exists "$REPO:cli-builder" || die "the tag exists although only platforms were attested"
+for ref in "$REPO@$PLAT_amd64" "$REPO@$PLAT_arm64"; do
   attested "$ref" "$RESULT_TYPE" >/dev/null || die "no verifying test-result attestation on $ref"
   attested "$ref" openvex >/dev/null || die "no verifying openvex attestation on $ref"
 done
-pass "cosign verify-attestation succeeds for both types on the tag and on each platform digest"
+pass "both attestation types verify on each platform manifest before any tag or list exists"
+
+create_list cli-builder
+LIST_ARCHES="$(docker buildx imagetools inspect "$REPO@$LIST" --raw | jq -r '.manifests[].digest')"
+grep -q "$PLAT_amd64" <<<"$LIST_ARCHES" || die "the platform manifest is not in the merged list"
+! grep -q "$IDX_amd64" <<<"$LIST_ARCHES" || die "the per-arch index digest is in the merged list (expected only its children)"
+pass "the merged list holds the platform manifests, not the per-arch indexes"
+no_attestations "creating the list" "$REPO@$LIST"
+for ref in "$REPO@$PLAT_amd64" "$REPO@$PLAT_arm64"; do
+  attested "$ref" "$RESULT_TYPE" >/dev/null || die "the platform attestation on $ref did not survive the list"
+done
+
+if ci/attest-image.sh list "$REPO" "$LIST" cli-builder "$WORK/partial" >/dev/null 2>&1; then die "attested a list that holds an untested platform"; fi
+no_attestations "a refused list run" "$REPO@$LIST"
+pass "a list holding a platform without a result attests nothing"
+
+attest_log="$WORK/attest-list.log"
+ci/attest-image.sh list "$REPO" "$LIST" cli-builder "$WORK/results" >"$attest_log" 2>&1 || { cat "$attest_log"; die "attest-image.sh list failed"; }
+grep -c '^ok: .* attestation on ' "$attest_log" | grep -qx 2 || { cat "$attest_log"; die "expected 2 verified attestations on the list"; }
+for ref in "$REPO:cli-builder" "$REPO@$LIST"; do
+  attested "$ref" "$RESULT_TYPE" >/dev/null || die "no verifying test-result attestation on $ref"
+  attested "$ref" openvex >/dev/null || die "no verifying openvex attestation on $ref"
+done
+pass "attest-image.sh attached and verified both types on the list; cosign verify-attestation works on the tag"
 
 list_result="$(attested "$REPO:cli-builder" "$RESULT_TYPE")"
 jq -e --arg list "$LIST" --arg rt "$RESULT_TYPE" '
@@ -175,12 +236,12 @@ jq -e --arg list "$LIST" --arg rt "$RESULT_TYPE" '
   and (.predicate.workflow_run_url | startswith("https://github.com/"))
   and (.predicate.platforms | map(.arch) == ["amd64","arm64"])
   and (.predicate.platforms | all(.smoke.verdict == "pass" and .smoke.check_count == 3 and (.smoke.passed_checks | length == 3)))
-  and (.predicate.platforms | all(.ext_builder_e2e.ran == false))
-  and (.predicate.platforms | all(.trivy.verdict == "pass" and (.trivy.ignorefile_sha256 | startswith("sha256:"))))
+  and (.predicate.platforms | all(has("ext_builder_e2e") | not))
+  and (.predicate.platforms | all(.trivy.verdict == "pass" and .trivy.severity == "CRITICAL,HIGH" and .trivy.version == "0.70.0" and .trivy.db_updated_at == "2026-10-03T06:00:00Z" and (.trivy.ignorefile_sha256 | startswith("sha256:"))))
   and .predicate.platforms[0].image_digest == "'"$PLAT_amd64"'"
   and .predicate.platforms[1].image_digest == "'"$PLAT_arm64"'"' <<<"$list_result" >/dev/null \
   || { jq . <<<"$list_result"; die "the list's test-result predicate is not what the docs promise"; }
-pass "list test-result predicate: subject, versions, hashes, run URL, both platforms' passed checks and digests"
+pass "list test-result predicate: subject, versions, hashes, run URL, Trivy scanner/db, both platforms' passed checks and digests"
 
 plat_result="$(attested "$REPO@$PLAT_arm64" "$RESULT_TYPE")"
 jq -e --arg d "$PLAT_arm64" '.subject[0].digest.sha256 == ($d | ltrimstr("sha256:")) and (.predicate.platforms | length == 1 and .[0].arch == "arm64")' \
@@ -200,15 +261,25 @@ jq -e --arg d "$PLAT_amd64" '
   <<<"$vex" >/dev/null || { jq . <<<"$vex"; die "the openvex predicate is not scoped to the platform digest"; }
 pass "openvex predicate: 3 affected statements, product = the platform digest purl, review-by and action present"
 
-# ------------------------------------------------ 4. a flavor with no statement gets only the result
+# ------------------------------------------------ 4. a re-run adds duplicates; the documented read takes the first
+ci/attest-image.sh list "$REPO" "$LIST" cli-builder "$WORK/results" >/dev/null 2>&1 || die "re-running attest-image.sh list failed"
+dupes="$(attested_raw "$REPO:cli-builder" "$RESULT_TYPE" | wc -l)"
+[ "$dupes" -ge 2 ] || die "expected the re-run to leave two test-result attestations, saw $dupes"
+# the exact pipeline the docs give (head closes the pipe early, so no pipefail here)
+first="$(set +o pipefail; attested_raw "$REPO:cli-builder" "$RESULT_TYPE" | jq -r .payload | head -n1 | base64 -d | jq -r .predicate.flavor)"
+[ "$first" = cli-builder ] || die "the documented '| jq -r .payload | head -n1 | base64 -d' did not decode the first attestation"
+pass "after a re-run ($dupes attestations) the documented verify | head -n1 read still decodes"
+
+# ------------------------------------------------ 5. a flavor with no statement gets only the result
 FLAVOR=fpm
-publish_list fpm
-FPM_amd64="$("$ROOT/scripts/platform-digest.sh" "$REPO@$IDX_amd64" amd64)"
-FPM_arm64="$("$ROOT/scripts/platform-digest.sh" "$REPO@$IDX_arm64" arm64)"
+push_arches fpm
 mkdir -p "$WORK/results-fpm"
-predicate amd64 "$FPM_amd64" "$WORK/smoke-pass.log" "$WORK/results-fpm/amd64.test-result.json"
-predicate arm64 "$FPM_arm64" "$WORK/smoke-pass.log" "$WORK/results-fpm/arm64.test-result.json"
-scripts/attest-image.sh "$REPO" "$LIST" fpm "$WORK/results-fpm" >"$WORK/attest-fpm.log" 2>&1 || { cat "$WORK/attest-fpm.log"; die "attest-image.sh failed for fpm"; }
+predicate amd64 "$PLAT_amd64" "$WORK/smoke-pass.log" "$WORK/results-fpm/amd64.test-result.json"
+predicate arm64 "$PLAT_arm64" "$WORK/smoke-pass.log" "$WORK/results-fpm/arm64.test-result.json"
+index_files "$WORK/results-fpm"
+ci/attest-image.sh platforms "$REPO" fpm "$WORK/results-fpm" >"$WORK/attest-fpm.log" 2>&1 || { cat "$WORK/attest-fpm.log"; die "attest-image.sh platforms failed for fpm"; }
+create_list fpm
+ci/attest-image.sh list "$REPO" "$LIST" fpm "$WORK/results-fpm" >>"$WORK/attest-fpm.log" 2>&1 || { cat "$WORK/attest-fpm.log"; die "attest-image.sh list failed for fpm"; }
 attested "$REPO:fpm" "$RESULT_TYPE" >/dev/null || die "fpm has no test-result attestation"
 ! attested "$REPO:fpm" openvex >/dev/null || die "fpm got an openvex attestation although no statement applies"
 grep -q '^skip: no VEX statement applies to fpm' "$WORK/attest-fpm.log" || die "no skip line for fpm"

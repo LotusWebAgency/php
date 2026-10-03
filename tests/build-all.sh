@@ -2,9 +2,9 @@
 # Build the PGO corpus tiers, then every bake target in matrix.gen.hcl (all
 # 50: 4 flavors x 11 versions + v3 of fpm/cli/cli-builder for 8.4/8.5), and run
 # tests/smoke.sh against each image with the flavor-correct invocation
-# (test-pgo.sh/test-fpm-health.sh/test-entrypoint.sh/test-snuffleupagus.sh are
-# all reached through it). Phase 3 then runs tests/test-ext-builder.sh for
-# every version whose ext-builder, fpm and cli images all built and passed.
+# (test-pgo.sh/test-fpm-health.sh/test-entrypoint.sh/test-readonly.sh/
+# test-snuffleupagus.sh are all reached through it). Phase 3 then runs
+# tests/test-ext-builder.sh for every version whose ext-builder, fpm and cli images all built and passed.
 #
 #   ./tests/build-all.sh                              every target, amd64
 #   ./tests/build-all.sh --only 8.5                    one version, every flavor

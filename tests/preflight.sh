@@ -180,20 +180,30 @@ else
 fi
 
 # --------------------------------------------- 6. python unit/lock-format tests
-section "6/8 python unit tests (matrix/ext-registry/elf-hardening/flags/locks)"
+section "6/8 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex)"
 # Covers, among others, the lock-file format checks that exist:
 # scripts/test_versions_lock.py (deps/versions.lock), scripts/test_release_keys.py
 # (php/release-keys.asc), scripts/test_fetch_verified_sync.py (the two
 # fetch-verified.sh copies stay byte-identical), plus scripts/test_gen_matrix.py,
 # scripts/test_pgo_tiers.py, scripts/test_ext_registry.py and
 # scripts/test_flags.py's own unit-level assertions on cflags.sh/ldflags.sh.
-# scripts/test_vex.py is the accepted-risk gate: vex/php.openvex.json is valid
-# OpenVEX, .trivyignore is the file generated from it, and no statement is past
-# its review-by date (it goes red on that day, as .trivyignore's exp: used to).
 if python3 -m unittest discover -s scripts -p 'test_*.py' -v 2>&1 | tail -20; then
   ok "python3 -m unittest discover -s scripts"
 else
   fail "scripts/test_*.py unittest suite failed"
+fi
+# ci/test_vex.py (the release tooling, kept out of scripts/ so it is not a build
+# input): vex/php.openvex.json is valid OpenVEX, .trivyignore is the file
+# generated from it, the attestation predicate refuses a Trivy step that did not
+# succeed. It does NOT assert that no review-by date has passed: preflight gates
+# every build job, so a date-triggered failure here would stop the whole publish
+# on the deadline Monday. The deadline gate is Trivy itself (the generated
+# .trivyignore lines carry exp:); `python3 ci/vex.py check --warn-within 14`
+# warns in CI ahead of time.
+if python3 -m unittest discover -s ci -p 'test_*.py' -v 2>&1 | tail -20; then
+  ok "python3 -m unittest discover -s ci"
+else
+  fail "ci/test_*.py unittest suite failed"
 fi
 
 # ----------------------------------------------- 7. matrix <-> label consistency

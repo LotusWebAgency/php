@@ -216,15 +216,18 @@ services:
       PHP_EXT_ENABLE: ldap,uuid
 ```
 
-In Kubernetes the same shape is `readOnlyRootFilesystem: true` plus an
-`emptyDir` mounted at `/tmp`.
+In Kubernetes the same shape should map to `readOnlyRootFilesystem: true` plus an
+`emptyDir` mounted at `/tmp` (not exercised by our tests).
 
 `/tmp` is the only path the image writes at runtime (checked with `docker
 diff` after a full workload, and by `tests/test-readonly.sh` on every image):
 
 - PHP sessions (`session.save_path` defaults to `/tmp`) and upload temp files
-  (`upload_tmp_dir` defaults to `/tmp`). Size the tmpfs for your largest upload
-  (`upload_max_filesize` is 128M) plus the session files.
+  (`upload_tmp_dir` defaults to `/tmp`). Size the tmpfs as your largest upload
+  (`upload_max_filesize` is 128M) times the number of concurrent uploads, plus
+  the session files. A tmpfs counts against the container's memory limit (an
+  `emptyDir` with `medium: Memory` does too), so it has to fit inside that
+  budget, not on top of it.
 - The env-driven ini: when `conf.d` is not writable the entrypoint generates
   it in a private, mode-0700, `mktemp`-named directory under `/tmp`, so
   `PHP_MEMORY_LIMIT`, the opcache variables, `PHP_EXT_ENABLE` and
@@ -237,8 +240,11 @@ diff` after a full workload, and by `tests/test-readonly.sh` on every image):
 Nothing else needs a mount. FPM logs to stderr and writes no pid file; opcache
 and the JIT live in shared memory; on PHP 7.x opcache's lock file goes to
 `/dev/shm`, which Docker and Kubernetes both provide writable; net-snmp's
-`/var/lib/snmp` is pre-created and stays untouched. The tmpfs may keep Docker's
-default `noexec`: nothing runs from `/tmp`.
+`/var/lib/snmp` is pre-created and stays untouched. For `fpm` and `cli` the tmpfs
+may keep Docker's default `noexec`: nothing runs from `/tmp`. `cli-builder` is
+the exception: `npx <package>` unpacks the package into `/tmp/npm/_npx` and runs
+it from there, which fails with `EACCES` under `noexec`. Mount it executable,
+`--tmpfs /tmp:exec,size=256m` (compose: `/tmp:exec,size=256m`).
 
 What does not work read-only, and how it fails:
 
@@ -547,8 +553,9 @@ doesn't mean in practice.
 ## Verifying images
 
 Every published digest carries an SBOM, max-mode SLSA provenance, a
-keyless Cosign signature bound to this repository's GitHub Actions identity,
-OpenVEX statements and signed test results:
+keyless Cosign signature bound to this repository's GitHub Actions identity
+and signed test results, plus OpenVEX statements where an accepted finding
+applies:
 
 ```sh
 cosign verify \
@@ -564,31 +571,35 @@ docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --format '{{ json .S
 docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --format '{{ json .Provenance }}'
 ```
 
-Two more keyless attestations, from the same workflow identity, sit on every
-platform image and on the multi-arch tag. The OpenVEX one carries the findings
-we accepted instead of fixing, each with its reason and a re-review date (the
-source is [`vex/php.openvex.json`](vex/php.openvex.json)). Only an
+Two more keyless attestations, from the same workflow identity, sit on the
+platform images and on the multi-arch tag: signed test results on every one of
+them, and OpenVEX where an accepted finding applies. The test-result one is
+attached only after the smoke tests and the Trivy gate passed against the pushed
+digest, and records the digest, PHP version, flavor, uarch, inputs hash, git
+commit, workflow run URL, and per architecture the smoke verdict with every check
+that passed and the Trivy verdict (taken from the Trivy step's own outcome, with
+the scanner version and database date when the runner could read them). The
+OpenVEX one carries the findings we accepted instead of fixing, each with its
+reason and a re-review date (the source is [`vex/php.openvex.json`](vex/php.openvex.json)). Only an
 image a statement applies to has one: today that is `cli-builder`, whose bundled
-npm ships a `brace-expansion` and an `undici` with no fixed release yet. The
-test-result one is attached only after the smoke tests and the Trivy gate passed
-against the pushed digest, and records the digest, PHP version, flavor, uarch,
-inputs hash, git commit, workflow run URL, and per architecture the smoke
-verdict with every check that passed and the Trivy verdict.
+npm ships a `brace-expansion` and an `undici` with no fixed release yet.
 
 ```sh
 cosign verify-attestation --type openvex \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity 'https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main' \
-  lotuswebagency/php:8.5-cli-builder | jq -r .payload | base64 -d | jq .predicate
+  lotuswebagency/php:8.5-cli-builder | jq -r .payload | head -n1 | base64 -d | jq .predicate
 
 cosign verify-attestation --type https://github.com/LotusWebAgency/php/attestation/test-result/v1 \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity 'https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main' \
-  lotuswebagency/php:8.5-fpm | jq -r .payload | base64 -d | jq .predicate
+  lotuswebagency/php:8.5-fpm | jq -r .payload | head -n1 | base64 -d | jq .predicate
 ```
 
-`cosign verify-attestation` on a tag checks the attestation on the manifest
-list, which covers both architectures. To check one platform's own attestation,
+`cosign verify-attestation` prints one line per attestation on the digest, and a
+re-run of the release adds another rather than replacing the first, which is why
+the commands above take `head -n1`. On a tag it checks the attestation on the
+manifest list, which covers both architectures. To check one platform's own attestation,
 resolve its digest first and verify `lotuswebagency/php@sha256:...` instead:
 
 ```sh
@@ -596,7 +607,9 @@ docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --raw \
   | jq -r '.manifests[] | select(.platform.architecture == "arm64") | .digest'
 ```
 
-Trivy can apply the VEX document too: `trivy image --vex oci lotuswebagency/php:8.5-cli-builder`.
+Trivy can in principle apply the VEX document too
+(`trivy image --vex oci lotuswebagency/php:8.5-cli-builder`); that is expected to
+work against these attestations and will be verified after the first release.
 Trivy only suppresses `not_affected` and `fixed` statements, and ours are
 `affected` (accepted, no upstream fix, not claimed unreachable), so the findings
 still show. The CI gate honors them through a `.trivyignore` generated from the

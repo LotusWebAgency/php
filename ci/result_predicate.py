@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """The signed test-result predicate attached to every published digest.
 
-    python3 scripts/result_predicate.py platform ... --out amd64.test-result.json
-    python3 scripts/result_predicate.py aggregate amd64.json arm64.json --out list.json
+    python3 ci/result_predicate.py platform ... --trivy-outcome success --trivy-severity CRITICAL,HIGH --out amd64.test-result.json
+    python3 ci/result_predicate.py aggregate amd64.json arm64.json --out list.json
 
 `platform` runs in the build job once smoke and the Trivy gate have passed
 against the pushed digest, and refuses to write anything if the captured smoke
 log does not show a passing run. `aggregate` merges the per-architecture files
-into the one that goes on the multi-arch manifest list. scripts/attest-image.sh
+into the one that goes on the multi-arch manifest list. ci/attest-image.sh
 signs the results with cosign (in-toto predicate type PREDICATE_TYPE).
 """
 import argparse
@@ -50,19 +50,39 @@ def smoke_result(log_path):
     return {"verdict": "pass", "script": "tests/smoke.sh", "check_count": len(checks), "passed_checks": checks}
 
 
-def e2e_result(log_path):
-    if not log_path:
-        return {
-            "ran": False,
-            "reason": "the ext-builder end-to-end test runs in the verify job on develop, against local builds of these inputs, not against pushed digests",
-        }
-    lines = Path(log_path).read_text(errors="replace").splitlines()
-    if any(FAIL_LINE.match(ln) for ln in lines):
-        raise ValueError(f"{log_path}: ext-builder e2e output has a failure")
-    checks = [m.group(1) for ln in lines if (m := OK_LINE.match(ln))]
-    if not checks:
-        raise ValueError(f"{log_path}: no 'ok:' lines captured")
-    return {"ran": True, "verdict": "pass", "script": "tests/test-ext-builder.sh", "passed_checks": checks}
+def trivy_info(path):
+    """{version, db_updated_at} from `trivy --version --format json`, whatever of it
+    is there. Best effort: the scan itself is gated by the Trivy step, this only
+    says which scanner and database produced the verdict."""
+    out = {}
+    if not path or not Path(path).is_file():
+        return out
+    try:
+        info = json.loads(Path(path).read_text())
+    except ValueError:
+        return out
+    if isinstance(info, dict):
+        if info.get("Version"):
+            out["version"] = info["Version"]
+        db = info.get("VulnerabilityDB")
+        if isinstance(db, dict) and db.get("UpdatedAt"):
+            out["db_updated_at"] = db["UpdatedAt"]
+    return out
+
+
+def trivy_result(args):
+    """The verdict is the outcome GitHub recorded for the Trivy step, not a constant:
+    anything but `success` (failure, cancelled, skipped) refuses the predicate."""
+    if args.trivy_outcome != "success":
+        raise ValueError(f"the Trivy step's outcome is {args.trivy_outcome!r}, not 'success' -- not recording a pass")
+    return {
+        "verdict": "pass",
+        "severity": args.trivy_severity,
+        "ignore_unfixed": True,
+        **trivy_info(args.trivy_info),
+        "ignorefile_sha256": sha256_file(args.trivyignore),
+        "vex_sha256": sha256_file(args.vex),
+    }
 
 
 def platform_predicate(args, now):
@@ -82,14 +102,7 @@ def platform_predicate(args, now):
             "arch": args.arch,
             "image_digest": args.image_digest,
             "smoke": smoke_result(args.smoke_log),
-            "ext_builder_e2e": e2e_result(args.e2e_log),
-            "trivy": {
-                "verdict": "pass",
-                "severity": args.trivy_severity,
-                "ignore_unfixed": True,
-                "ignorefile_sha256": sha256_file(args.trivyignore),
-                "vex_sha256": sha256_file(args.vex),
-            },
+            "trivy": trivy_result(args),
         }],
     }
 
@@ -133,8 +146,9 @@ def main(argv=None):
     p.add_argument("--git-ref", required=True)
     p.add_argument("--run-url", required=True)
     p.add_argument("--smoke-log", required=True)
-    p.add_argument("--e2e-log", default=None)
-    p.add_argument("--trivy-severity", default="CRITICAL,HIGH")
+    p.add_argument("--trivy-outcome", required=True, help="steps.<id>.outcome of the Trivy gate step; only 'success' is accepted")
+    p.add_argument("--trivy-severity", required=True, help="the severity list the gate ran with")
+    p.add_argument("--trivy-info", default=None, help="JSON from `trivy --version --format json` (optional)")
     p.add_argument("--trivyignore", default=".trivyignore")
     p.add_argument("--vex", default="vex/php.openvex.json")
     p.add_argument("--now", default=None)

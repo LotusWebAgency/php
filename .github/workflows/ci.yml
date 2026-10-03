@@ -24,10 +24,11 @@
 #     the default branch only): the same full matrix through the `build` job,
 #     which pushes every image by digest with SBOM + max-mode provenance;
 #     `merge` then assembles the multi-arch manifests, signs every manifest
-#     (index and per-platform) keylessly with cosign and attaches two more
-#     keyless attestations to each: the OpenVEX statements from
-#     vex/php.openvex.json and the test results the build job recorded after
-#     smoke and Trivy passed. `sync-description` updates the Docker Hub page. `build`, `merge` and `sync-description` are
+#     (index and per-platform) keylessly with cosign and attaches keyless
+#     attestations to each: the test results the build job recorded after
+#     smoke and Trivy passed, and the OpenVEX statements from
+#     vex/php.openvex.json where one applies to the flavor. `sync-description`
+#     updates the Docker Hub page. `build`, `merge` and `sync-description` are
 #     the only jobs with Docker Hub access and they only run on main.
 #
 # ext-builder is not a leg of its own: it is built in the same bake invocation
@@ -142,6 +143,20 @@ jobs:
 
       - name: tests/preflight.sh
         run: ./tests/preflight.sh
+
+      # Not a gate: the Trivy step is what fails on an expired accepted risk.
+      # This only puts the date in front of people two weeks ahead.
+      - name: VEX review deadlines
+        run: python3 ci/vex.py check --warn-within 14
+
+      # tests/test-attest.sh: the publish-time attestation scripts against a
+      # throwaway registry and a local key, in the same platforms-then-list order
+      # as the merge job.
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: tests/test-attest.sh
+        run: ./tests/test-attest.sh
 
   # ----------------------------------------------------------- verify-matrix
   # What the verify job below builds, and on which architectures. A pull
@@ -362,6 +377,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Not a gate (see preflight): a warning on every push to main and cron run
+      # within 14 days of a VEX review-by date.
+      - name: VEX review deadlines
+        run: python3 ci/vex.py check --warn-within 14
 
       - id: matrix
         run: |
@@ -602,6 +622,8 @@ jobs:
       ARCH_NAME: ${{ matrix.arch.name }}
       REVISION: ${{ github.sha }}
       CACHE_REGISTRY: ghcr.io/lotuswebagency/php
+      # One severity list for the Trivy gate steps and the recorded predicate.
+      TRIVY_SEVERITY: CRITICAL,HIGH
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -707,7 +729,7 @@ jobs:
         run: docker pull "${DOCKERHUB_IMAGE}@${RIDER_DIGEST}"
 
       # The output is kept (tee, pipefail) for the signed test-result attestation:
-      # scripts/result_predicate.py reads the `ok:` lines and refuses a log that
+      # ci/result_predicate.py reads the `ok:` lines and refuses a log that
       # does not end in SMOKE PASSED.
       - name: Smoke test the pushed digest
         run: |
@@ -724,44 +746,59 @@ jobs:
       # against the exact digest that was pushed and will be merged, not a
       # separately-built local copy (I4).
       - name: Trivy vulnerability gate (pushed digest)
+        id: trivy_target
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.DOCKERHUB_IMAGE }}@${{ env.DIGEST }}
           format: table
           exit-code: "1"
-          severity: CRITICAL,HIGH
+          severity: ${{ env.TRIVY_SEVERITY }}
           ignore-unfixed: true
 
       - name: Trivy vulnerability gate (pushed ext-builder digest)
+        id: trivy_rider
         if: matrix.target.rider_name != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.DOCKERHUB_IMAGE }}@${{ env.RIDER_DIGEST }}
           format: table
           exit-code: "1"
-          severity: CRITICAL,HIGH
+          severity: ${{ env.TRIVY_SEVERITY }}
           ignore-unfixed: true
+
+      # Which scanner and database gave the verdict, for the test-result predicate.
+      # Best effort and never a gate: the actions above own the scan; the binary
+      # setup-trivy put on PATH and the action's default cache dir are where this
+      # looks, and a miss only leaves the two fields out of the predicate.
+      - name: Record the Trivy version
+        run: |
+          trivy --version --format json --cache-dir "$GITHUB_WORKSPACE/.cache/trivy" > "$RUNNER_TEMP/trivy-info.json" \
+            || echo '{}' > "$RUNNER_TEMP/trivy-info.json"
 
       # Reached only when every smoke and Trivy step above passed. Writes the
       # test-result predicate next to the digest file; the merge job attaches it
-      # (scripts/attest-image.sh) once the manifest list exists. No result file,
+      # (ci/attest-image.sh) once the manifest list exists. No result file,
       # no attestation: a failed run uploads nothing and the merge job fails.
       - name: Record the test results
+        env:
+          TRIVY_TARGET_OUTCOME: ${{ steps.trivy_target.outcome }}
+          TRIVY_RIDER_OUTCOME: ${{ steps.trivy_rider.outcome }}
         run: |
           set -euo pipefail
-          record() {  # record <index-digest> <flavor> <smoke-log> <out>
+          record() {  # record <index-digest> <flavor> <smoke-log> <trivy-outcome> <out>
             local platform_digest
-            platform_digest="$(./scripts/platform-digest.sh "${DOCKERHUB_IMAGE}@$1" "$ARCH_NAME")"
-            python3 scripts/result_predicate.py platform \
+            platform_digest="$(./ci/platform-digest.sh "${DOCKERHUB_IMAGE}@$1" "$ARCH_NAME")"
+            python3 ci/result_predicate.py platform \
               --repository "$DOCKERHUB_IMAGE" --php "$TARGET_PHP" --flavor "$2" --uarch "$TARGET_UARCH" \
               --arch "$ARCH_NAME" --image-digest "$platform_digest" --inputs-hash "$INPUTS_HASH" \
               --git-sha "$GITHUB_SHA" --git-ref "$GITHUB_REF" \
               --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
-              --smoke-log "$3" --trivy-severity CRITICAL,HIGH --out "$4"
+              --smoke-log "$3" --trivy-outcome "$4" --trivy-severity "$TRIVY_SEVERITY" \
+              --trivy-info "$RUNNER_TEMP/trivy-info.json" --out "$5"
           }
-          record "$DIGEST" "$TARGET_FLAVOR" "$RUNNER_TEMP/smoke-target.log" "/tmp/digests/$ARCH_NAME.test-result.json"
+          record "$DIGEST" "$TARGET_FLAVOR" "$RUNNER_TEMP/smoke-target.log" "$TRIVY_TARGET_OUTCOME" "/tmp/digests/$ARCH_NAME.test-result.json"
           if [ -n "$RIDER_NAME" ]; then
-            record "$RIDER_DIGEST" "$RIDER_FLAVOR" "$RUNNER_TEMP/smoke-rider.log" "/tmp/digests-rider/$ARCH_NAME.test-result.json"
+            record "$RIDER_DIGEST" "$RIDER_FLAVOR" "$RUNNER_TEMP/smoke-rider.log" "$TRIVY_RIDER_OUTCOME" "/tmp/digests-rider/$ARCH_NAME.test-result.json"
           fi
 
       # Full name, no shared prefix pattern on the download side (C1): a
@@ -830,6 +867,12 @@ jobs:
       TARGET_FLAVOR: ${{ matrix.target.flavor }}
       TARGET_UARCH: ${{ matrix.target.uarch }}
       TARGET_TAGS: ${{ toJson(matrix.target.tags) }}
+      # What `cosign verify-attestation` is held to in ci/attest-image.sh: the
+      # identity SECURITY.md documents, so a wrong identity fails the release
+      # instead of a user.
+      COSIGN_VERIFY_FLAGS: >-
+        --certificate-oidc-issuer https://token.actions.githubusercontent.com
+        --certificate-identity https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -865,6 +908,9 @@ jobs:
           name: digest-${{ matrix.target.name }}-arm64
           path: digests
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
       - name: Assemble multi-arch manifest and verify the full-version tag
         run: |
           set -euo pipefail
@@ -893,6 +939,13 @@ jobs:
           tag_args=(-t "${DOCKERHUB_IMAGE}:${full_tag}")
           while IFS= read -r t; do tag_args+=(-t "docker.io/${t}"); done < <(jq -r '.[]' <<<"$TARGET_TAGS")
 
+          # Test results and OpenVEX go onto each platform manifest first, while
+          # no tag exists yet: they are addressable from the per-arch index
+          # digests in digests/, and ci/attest-image.sh refuses (before attesting
+          # anything) an architecture without a passing result, so an untested
+          # image never gets a tag. The list gets its own attestations below.
+          ./ci/attest-image.sh platforms "$DOCKERHUB_IMAGE" "$TARGET_FLAVOR" digests
+
           docker buildx imagetools create "${tag_args[@]}" \
             "${DOCKERHUB_IMAGE}@${amd64_digest}" "${DOCKERHUB_IMAGE}@${arm64_digest}"
 
@@ -904,9 +957,6 @@ jobs:
           echo "manifest list digest: $list_digest"
           echo "LIST_DIGEST=$list_digest" >> "$GITHUB_ENV"
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-
       # --recursive (M14): without it, only the index digest gets a
       # signature and the per-platform manifests underneath stay unsigned,
       # which is not what SECURITY.md/README/DOCKERHUB.md promise ("every
@@ -914,17 +964,12 @@ jobs:
       - name: Sign the manifest, recursively (keyless)
         run: cosign sign --yes --recursive "${DOCKERHUB_IMAGE}@${LIST_DIGEST}"
 
-      # OpenVEX statements (vex/php.openvex.json, scoped to each digest) and the
-      # build job's test results, as keyless in-toto attestations on every
-      # platform manifest and on the list. Verified in place with the identity
-      # SECURITY.md documents, so a wrong identity fails the release instead of
-      # a user's `cosign verify-attestation`.
-      - name: Attest OpenVEX and test results (keyless)
-        env:
-          COSIGN_VERIFY_FLAGS: >-
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
-            --certificate-identity https://github.com/LotusWebAgency/php/.github/workflows/ci.yml@refs/heads/main
-        run: ./scripts/attest-image.sh "$DOCKERHUB_IMAGE" "$LIST_DIGEST" "$TARGET_FLAVOR" digests
+      # The aggregated test results and the OpenVEX statements (vex/php.openvex.json,
+      # scoped to the digest) on the manifest list the tags resolve to; the platform
+      # manifests got theirs before the list was created. Verified in place with the
+      # identity above.
+      - name: Attest OpenVEX and test results on the list (keyless)
+        run: ./ci/attest-image.sh list "$DOCKERHUB_IMAGE" "$LIST_DIGEST" "$TARGET_FLAVOR" digests
 
   # ------------------------------------------------------------ sync-description
   # Pushes DOCKERHUB.md to the Docker Hub page after a successful publish.

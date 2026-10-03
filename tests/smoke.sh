@@ -1354,6 +1354,33 @@ case "$FLAVOR" in
     sr_npm=$(docker run --rm "$IMAGE" find /usr/local/lib/node_modules/semantic-release -path '*/node_modules/npm/package.json')
     [ -n "$sr_npm" ] || { echo "FAIL: cli-builder: the control find saw no npm inside semantic-release's tree -- the exclusion above is untested, so its result proves nothing"; exit 1; }
     echo "ok: cli-builder's npm is 11.21.0 and the only npm outside semantic-release's tree (control: its own nested copy is found)"
+    # VEX drift: vex/php.openvex.json names the bundled npm packages we accepted a
+    # finding in, by exact version (purl). When an npm or semantic-release bump
+    # moves them, the statement is describing a package that is no longer there
+    # (or, worse, a different version nobody reviewed). Read from the VEX file at
+    # test time; a package may be installed in several copies (npm's own and the
+    # one inside semantic-release), the pinned version must be one of them.
+    vex_pkgs=$(python3 - "$ROOT/vex/php.openvex.json" <<'PY'
+import json, sys, urllib.parse
+seen = set()
+for st in json.load(open(sys.argv[1]))["statements"]:
+    for p in st["products"]:
+        for sub in p.get("subcomponents", []):
+            purl = sub["@id"]
+            if purl.startswith("pkg:npm/") and purl not in seen:
+                seen.add(purl)
+                name, _, version = urllib.parse.unquote(purl[len("pkg:npm/"):]).rpartition("@")
+                print(name, version)
+PY
+    )
+    [ -n "$vex_pkgs" ] || { echo "FAIL: cli-builder: vex/php.openvex.json names no npm package -- the drift check below would prove nothing"; exit 1; }
+    while read -r vex_name vex_want; do
+      vex_have=$(docker run --rm "$IMAGE" find /usr/local/lib/node_modules -path "*/node_modules/$vex_name/package.json" \
+        -exec node -p 'require(process.argv[1]).version' {} \;)
+      grep -qxF "$vex_want" <<<"$vex_have" \
+        || { echo "FAIL: cli-builder: vex/php.openvex.json says $vex_name@$vex_want but the image has: ${vex_have:-no copy of it} -- update vex/php.openvex.json (and run: python3 ci/vex.py trivyignore --write)"; exit 1; }
+    done <<<"$vex_pkgs"
+    echo "ok: cli-builder carries the npm packages vex/php.openvex.json names, at the versions it pins: $(paste -sd, - <<<"${vex_pkgs// /@}")"
     echo "ok: cli-builder carries node $node_major, npm, npx, corepack, composer, semantic-release, git, rsync, patch, make, brotli, sqlite3, jq, less, nano, procps, unzip, zip, zstd and the mariadb client"
     ;;
   cli|fpm)
@@ -1452,7 +1479,8 @@ if [ "$FLAVOR" = ext-builder ]; then
 else
   bash "$HERE/test-entrypoint.sh" "$IMAGE" "$FLAVOR"
   # `--read-only --tmpfs /tmp` end to end (ext-builder runs as root and is not
-  # a runtime shape): the documented deployment, with a control per assertion.
+  # a runtime shape): the documented deployment, with a control wherever the
+  # assertion depends on /tmp (see the header of test-readonly.sh).
   bash "$HERE/test-readonly.sh" "$IMAGE" "$FLAVOR"
 fi
 # Only where the registry builds it at all (ext.json: php >=7.2) -- 7.0 and
