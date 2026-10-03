@@ -14,12 +14,17 @@
 #     stop covering anything.
 #   push or manual dispatch on develop: the same `verify` job over the whole
 #     matrix, natively on amd64 and arm64 (no QEMU) -- build --load, smoke,
-#     the ext-builder end-to-end test, Trivy on the loaded image. Nothing is
-#     pushed to Docker Hub: no job that runs here logs in to it, holds the
-#     `release` environment or the Docker Hub secrets, or sets a push output.
-#     The PGO corpus is still built and published to GHCR (it is internal and
-#     every build mounts it), and the build cache is read from GHCR but only
-#     the publishing job writes it.
+#     the ext-builder end-to-end test, Trivy on the loaded image. Every image
+#     that passed all of it is then pushed to GHCR (not Docker Hub) as
+#     ghcr.io/lotuswebagency/php/dev:<tag>-<sha>-<arch>, so it can be pulled and
+#     tested further; `dev-manifest` assembles the two arches into
+#     dev:<tag>-<sha> and, when every verify leg of the run succeeded, moves the
+#     floating dev:<tag> onto it. They are unpublished test builds, pruned by
+#     dev-prune.yml. Nothing reaches Docker Hub: no job that runs here logs in
+#     to it, holds the `release` environment or the Docker Hub secrets, or sets
+#     a push output on a bake build. The PGO corpus is still built and
+#     published to GHCR (it is internal and every build mounts it), and the
+#     build cache is read from GHCR but only the publishing job writes it.
 #   push or manual dispatch on main, and the weekly cron (which GitHub runs on
 #     the default branch only): the same full matrix through the `build` job,
 #     which pushes every image by digest with SBOM + max-mode provenance;
@@ -107,7 +112,8 @@ on:
 concurrency:
   group: ci-${{ github.ref }}
   # Superseded PR and develop runs are cancelled (the org's runners are scarce
-  # and a develop push is never published); a main run, which publishes, is not.
+  # and a develop push only produces GHCR test images, never a release); a main
+  # run, which publishes, is not.
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/develop' }}
 
 # Deny-by-default; every job below grants back only what its own steps need
@@ -195,11 +201,14 @@ jobs:
   # ------------------------------------------------------------------ verify
   # Build the leg's bake targets for this architecture with --load, smoke.sh
   # each image, the ext-builder end-to-end test where the leg carries it, and
-  # the Trivy gate on the loaded images. Never pushes: no Docker Hub login, no
-  # `release` environment, `packages: read` only (the corpus pull and the
-  # build-cache read), and no PUSH variable, so there is no output a registry
-  # could receive. This is the whole of what runs for a pull request and for
-  # develop; main's publishing counterpart is the `build` job below.
+  # the Trivy gate on the loaded images. On develop, once all of that passed,
+  # the tested images are pushed to ghcr.io/lotuswebagency/php/dev under
+  # per-arch tags (the last step; dev-manifest below joins them). Never reaches
+  # Docker Hub: no Docker Hub login, no `release` environment, and no PUSH
+  # variable, so the bake build itself has no output a registry could receive --
+  # the dev push is a plain `docker push` of the image that was just tested.
+  # This is the whole of what runs for a pull request and for develop; main's
+  # publishing counterpart is the `build` job below.
   #
   # Mounts each target's tier corpus by its hash-pinned GHCR ref (I3) and
   # asserts the pulled image's own inputs-hash label matches -- never the
@@ -227,7 +236,10 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
-      packages: read # GHCR pull of the published PGO corpus image and the build cache
+      # GHCR: pull of the PGO corpus image and the build cache, and, on a develop
+      # push only, the dev image push. A pull request never reaches the push
+      # step (and a fork's token is read-only whatever is asked for here).
+      packages: write
     env:
       TARGET_NAME: ${{ matrix.target.name }}
       TARGET_BAKE: ${{ matrix.target.bake }}
@@ -244,6 +256,9 @@ jobs:
       # drops cache-to in docker-bake.hcl); a pull request uses no cache.
       CACHE_REGISTRY: ${{ github.event_name != 'pull_request' && 'ghcr.io/lotuswebagency/php' || '' }}
       CACHE_PUSH: "false"
+      # Only the org.opencontainers.image.revision label (and the dev tag's sha).
+      REVISION: ${{ github.sha }}
+      DEV_REPO: ghcr.io/lotuswebagency/php/dev
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -251,7 +266,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Log in to GHCR (corpus and cache pull)
+      - name: Log in to GHCR (corpus and cache pull, dev image push)
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -337,6 +352,61 @@ jobs:
           exit-code: "1"
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+
+      # Only reached when the smoke tests and both Trivy gates above passed, so
+      # a pushed image is a tested one. Per-arch tag <tag>-<sha>-<arch>; the
+      # fpm sibling built for test-ext-builder.sh is not pushed (the fpm leg
+      # pushes its own), the ext-builder that rides on a cli leg is.
+      - name: Push the tested image to GHCR (develop)
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/develop'
+        run: |
+          set -euo pipefail
+          sha="${GITHUB_SHA::12}"
+          for local_tag in "$TARGET_TAG" ${RIDER_TAG:+"$RIDER_TAG"}; do
+            dest="${DEV_REPO}:${local_tag#*:}-${sha}-${ARCH}"
+            docker tag "$local_tag" "$dest"
+            docker push "$dest"
+            echo "ok: pushed $dest"
+          done
+
+  # ------------------------------------------------------------- dev-manifest
+  # develop only. Joins the per-arch dev images the verify legs pushed into
+  # one manifest list per target, dev:<tag>-<sha> (both arches present), and
+  # moves the floating dev:<tag> onto it only when every verify leg of this run
+  # succeeded and the run's commit is still the head of develop, so the floating
+  # set mixes commits at most inside the short second pass of the script (a
+  # cancel or crash there can split it; the prune keeps both sha sets). One job
+  # over all 50 targets, not a matrix: the org has few concurrent runners and
+  # each target is a handful of manifest calls. A missing arch while verify
+  # claims success is a
+  # bug and fails the job; after a failed verify leg the missing ones are only
+  # reported. The logic is in ci/dev-manifest.sh.
+  dev-manifest:
+    needs: [verify]
+    if: ${{ !cancelled() && needs.verify.result != 'skipped' && github.ref == 'refs/heads/develop' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # GHCR: the dev manifest lists and floating tags
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble the dev manifest lists and move the floating tags
+        env:
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: ./ci/dev-manifest.sh
 
   # ----------------------------------------------------------------- pr-gate
   # One aggregate required check (M17) instead of branch protection naming

@@ -89,7 +89,7 @@ FROM lotuswebagency/php:8.4-fpm@sha256:...
 
 | Trigger | What happens |
 |---|---|
-| Push to `develop` | Full build of every target on both architectures, smoke tests, Trivy gate — nothing is published |
+| Push to `develop` | Full build of every target on both architectures, smoke tests, Trivy gate — nothing reaches Docker Hub; the tested images go to the private GHCR `php/dev` package |
 | Merge to `main` | Full build of every target, smoke tests, Trivy gate, publish, sign |
 | Weekly cron | Same pipeline, no source change — picks up base-image and package updates |
 | Fixable CRITICAL/HIGH CVE | The build fails and nothing is published until it is fixed or explicitly accepted in `vex/php.openvex.json` (with a review date) |

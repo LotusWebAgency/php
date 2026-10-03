@@ -35,7 +35,8 @@ OpenSSL, ICU and, on 7.0–7.2, curl in the 7.0–8.0 builds), since those never
 touch a package manager. Those are tracked by hand instead, through the
 pinned versions in `deps/versions.lock`. Only `main` publishes, and `main` is
 branch-protected: publishing requires a green pull request (work lands on
-`develop`, which builds and tests both architectures but never publishes).
+`develop`, which builds and tests both architectures and only pushes unsigned
+test images to a private GHCR package, never to Docker Hub).
 Published digests carry an SBOM, max-mode SLSA provenance, a keyless Cosign
 signature and signed test results, plus OpenVEX statements where an accepted
 finding applies.

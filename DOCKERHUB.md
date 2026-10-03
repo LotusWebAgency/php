@@ -348,7 +348,7 @@ Trivy only suppresses `not_affected` and `fixed` statements, and ours are
 still show. The CI gate honors them through a `.trivyignore` generated from the
 same file, which expires on the same date.
 
-A pull request or a push to `develop` builds and tests without publishing; a Trivy gate fails the
+A pull request or a push to `develop` builds and tests without publishing to Docker Hub; a Trivy gate fails the
 build on any fixable CRITICAL or HIGH finding before anything reaches a
 registry. Trivy scans the Debian package layer -- it can't see the libraries
 built from source and vendored under `/opt`: ImageMagick and net-snmp in every
