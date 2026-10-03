@@ -112,7 +112,30 @@ for v in sorted(m["versions"], key=lambda s: tuple(int(x) for x in s.split("."))
 ' "$APPTEST_REPO/matrix.json"
 }
 
-apptest_fixture_tag() { echo "${APPTEST_FIXTURE_REPO}:$1-$2"; }
+# A fixture is the MariaDB of one architecture plus its datadir, so a registry
+# can hold only one image per architecture: when APPTEST_FIXTURE_REPO names a
+# registry, the tag is <app>-<set>-<arch> and the fixture is pulled before it
+# is built (and pushed with build-fixture.sh --push). A bare local name, the
+# default, keeps <app>-<set>: a local daemon only ever holds its own arch.
+# "Names a registry" is Docker's own rule for a reference: the first path
+# component holds a dot or a colon, or is localhost.
+apptest_repo_is_registry() {
+  local first="${APPTEST_FIXTURE_REPO%%/*}"
+  [ "$first" != "$APPTEST_FIXTURE_REPO" ] || return 1
+  case "$first" in *.*|*:*|localhost) return 0 ;; esac
+  return 1
+}
+
+# The daemon's architecture (amd64, arm64), not the shell's: they differ on a remote daemon.
+apptest_arch() { docker version --format '{{.Server.Arch}}'; }
+
+apptest_fixture_tag() {
+  if apptest_repo_is_registry; then
+    echo "${APPTEST_FIXTURE_REPO}:$1-$2-$(apptest_arch)"
+  else
+    echo "${APPTEST_FIXTURE_REPO}:$1-$2"
+  fi
+}
 
 # apptest_builder_image <app> <set> -> the stock image the set is built on.
 # The fpm tag, not cli-builder: the predecessor publishes fpm for every
@@ -172,4 +195,42 @@ apptest_image_php() {
 # predecessor's Alpine images use 82, the Debian ones and ours 33.
 apptest_image_ids() {
   docker run --rm --entrypoint sh "$1" -c 'echo "$(id -u www-data):$(id -g www-data)"'
+}
+
+# apptest_fixture_try_pull <app> <set> -> 0 when the local fixture tag is
+# current afterwards, having pulled it from the registry if it was not. A
+# pulled image counts only when its apptest-hash label is this tree's recipe
+# hash and it is this daemon's architecture; anything else is reported, left
+# unused, and the caller builds. Not a registry repository: returns 1 at once.
+apptest_fixture_try_pull() {
+  local app="$1" set="$2" tag want have arch out
+  apptest_repo_is_registry || return 1
+  tag="$(apptest_fixture_tag "$app" "$set")"
+  want="$(apptest_recipe_hash "$app" "$set")"
+  have="$(apptest_label "$tag" com.lotuswebagency.apptest-hash)"
+  [ "$have" != "$want" ] || return 0
+  if ! out="$(docker pull -q "$tag" 2>&1)"; then
+    echo "note: $tag was not pulled ($(printf '%s' "$out" | tail -1 | cut -c1-120))" >&2
+    return 1
+  fi
+  have="$(apptest_label "$tag" com.lotuswebagency.apptest-hash)"
+  arch="$(docker image inspect --format '{{.Architecture}}' "$tag")"
+  if [ "$arch" != "$(apptest_arch)" ]; then
+    echo "note: $tag is $arch, this daemon is $(apptest_arch) -- not used" >&2
+    return 1
+  fi
+  if [ "$have" != "$want" ]; then
+    echo "note: $tag in the registry is stale (apptest-hash ${have:-none}, this tree's recipe $want) -- not used" >&2
+    return 1
+  fi
+  echo "ok: pulled $tag (apptest-hash $want)"
+}
+
+# apptest_fixture_push <app> <set>
+apptest_fixture_push() {
+  local tag
+  apptest_repo_is_registry || apptest_die "refusing to push: APPTEST_FIXTURE_REPO ($APPTEST_FIXTURE_REPO) is a local name, not a registry repository"
+  tag="$(apptest_fixture_tag "$1" "$2")"
+  docker push -q "$tag" >/dev/null || apptest_die "docker push $tag failed"
+  echo "ok: pushed $tag"
 }

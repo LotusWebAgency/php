@@ -690,6 +690,50 @@ image proves nothing. `tests/build-all.sh` feeds that label automatically;
 a manual `docker buildx bake` needs `INPUTS_HASH="$(./scripts/inputs-hash.sh)"`
 set first.
 
+### Testing develop images locally
+
+Every image a `develop` run tests is also pushed to the private GHCR package
+`ghcr.io/lotuswebagency/php/dev` as `<tag>-<first 12 of the sha>`, so the tests
+CI doesn't run (the Laravel/WordPress/PrestaShop suites in `tests/apps/`, the
+`-v3` instruction-set check, the corpus-tier replay and the benchmark) can run
+against exactly those images instead of a local rebuild of all 50 targets; the
+smoke suite and the ext-builder end to end, which CI does run, can be repeated
+on them the same way. Log in once, with a token that can read packages:
+
+```sh
+gh auth refresh -s read:packages
+gh auth token | docker login ghcr.io -u <github-user> --password-stdin
+
+tests/extended.sh pull && tests/extended.sh all     # HEAD's images, this daemon's arch
+tests/extended.sh pull --only 8.4,8.5 --flavor fpm,cli && tests/extended.sh apps --only 8.4,8.5 --flavor fpm,cli
+tests/extended.sh pull --latest                     # the last fully green develop run instead
+```
+
+`pull` retags what it fetched to the `lotuswebagency/php:<tag>` names the
+other scripts expect and prints every tag it replaces. The other subcommands
+(`uarch`, `ext-builder`, `corpus-tiers`, `apps`, `smoke`, `bench`) don't
+remember what was pulled, so repeat `--only`/`--flavor`; one that finds an
+image absent says `MISSING`, and one from another tree says `STALE`. `all`
+runs everything even after a failure and ends with a table; `tests/extended.sh
+--help` has the rest.
+
+The images have to be the tree you are standing in. Each carries the
+`inputs-hash` of the commit it was built from, and `tests/smoke.sh` and
+`tests/test-pgo.sh` refuse an image whose hash differs from the working tree's
+(that check has no override here). `pull` therefore refuses when the hashes
+differ, and prints the command that fixes it: check the commit out in its own
+worktree and run `tests/extended.sh` from there.
+
+```sh
+git worktree add ../php-<sha12> <sha>
+```
+
+Only the architecture of your daemon can be tested locally. arm64 under QEMU
+crashes opcache, so the arm64 images are exercised by GitHub's arm64 runners
+and `pull` refuses `--platform linux/arm64` on an amd64 daemon. The app
+fixtures can come from a registry too, see
+[tests/apps/README.md](tests/apps/README.md#fixtures-from-a-registry).
+
 ## Related images
 
 One family, built by the same pipeline, meant to run together — a proxy in

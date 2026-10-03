@@ -175,6 +175,9 @@ run_app() {
   fixture="$(apptest_fixture_tag "$app" "$set")"
   want="$(apptest_recipe_hash "$app" "$set")"
   have="$(apptest_label "$fixture" com.lotuswebagency.apptest-hash)"
+  if [ "$have" != "$want" ] && apptest_fixture_try_pull "$app" "$set"; then
+    have="$(apptest_label "$fixture" com.lotuswebagency.apptest-hash)"
+  fi
   if [ "$have" != "$want" ]; then
     if [ "$NO_BUILD" -eq 1 ]; then
       result "$app" "$set" "-" FAIL "fixture $fixture is ${have:+stale}${have:-missing} and --no-build was given"
