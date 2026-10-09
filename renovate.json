@@ -4,6 +4,9 @@
     "config:best-practices"
   ],
   "baseBranchPatterns": ["develop"],
+  "schedule": ["before 6am on monday"],
+  "timezone": "Etc/UTC",
+  "prConcurrentLimit": 3,
   "ignorePaths": [
     "deps/versions.lock",
     "php/php-src.lock",
@@ -12,13 +15,15 @@
   ],
   "customManagers": [
     {
-      "description": "matrix.json's base image is a JSON string, not a Dockerfile ARG -- docker-bake.hcl always overrides the Dockerfile's own ARG BASE_IMAGE from it, so this is the only place a digest pin has any effect",
+      "description": "The base image pinned in matrix.json and in matrix.gen.hcl generated from it; both match the same dependency, so one PR updates both and the drift check stays green. docker-bake.hcl overrides the Dockerfile's own ARG BASE_IMAGE with it",
       "customType": "regex",
       "managerFilePatterns": [
-        "/^matrix\\.json$/"
+        "/^matrix\\.json$/",
+        "/^matrix\\.gen\\.hcl$/"
       ],
       "matchStrings": [
-        "\"base\": \"(?<depName>[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[a-f0-9]+)\""
+        "\"base\": \"(?<depName>[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[a-f0-9]+)\"",
+        "variable \"BASE_IMAGE\" \\{ default = \"(?<depName>[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[a-f0-9]+)\" \\}"
       ],
       "datasourceTemplate": "docker",
       "versioningTemplate": "loose"
@@ -79,7 +84,8 @@
         "custom.regex"
       ],
       "matchFileNames": [
-        "matrix.json"
+        "matrix.json",
+        "matrix.gen.hcl"
       ],
       "matchUpdateTypes": [
         "digest",
