@@ -36,8 +36,12 @@ laravel      9      8.0,8.2    hardened              mariadb
 laravel      10     8.1,8.3    hardened              mariadb
 laravel      12     8.2,8.5    hardened              mariadb
 laravel      13     8.3-8.5    builder,v3,hardened   mariadb
-wordpress    4.9    7.0,7.2    hardened              mariadb
-wordpress    5.9    7.0,8.1    hardened              mariadb
+# No hardened on 4.9 and 5.9: their sets are built on 7.0, so they carry that era's
+# code, which require_once's non-.php files the rulesets drop by design --
+# Twenty Seventeen's svg-icons.svg (4.9) and the symfony/polyfill-mbstring < 1.19
+# bundled in WPForms Lite 1.9.2.3, whose .php8 shim loads on PHP 8 (5.9 on 8.1).
+wordpress    4.9    7.0,7.2    -                     mariadb
+wordpress    5.9    7.0,8.1    -                     mariadb
 wordpress    6.9    7.2,8.5    hardened              mariadb
 wordpress    7.1    7.4-8.5    builder,v3,hardened   mariadb
 # PrestaShop. The PHP lists follow what was measured to work, not each release's

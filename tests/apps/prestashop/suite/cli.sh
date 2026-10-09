@@ -42,8 +42,8 @@ else
   esac
   check_out "console: version" "$BANNER" "${CONSOLE[@]}" --version
   check_out "console: list has the module command" "prestashop:module" "${CONSOLE[@]}" list
-  # 1.7's product list is the old catalog page; the grid route arrived with the v2 pages
-  case "$VERSION" in 1.7.*) PRODUCT_ROUTE=admin_product_catalog ;; *) PRODUCT_ROUTE=admin_products_index ;; esac
+  # 1.7 and 8.0 list products on the old catalog page; 8.0 has the grid only as admin_products_v2_index behind a feature flag, 8.1 renamed it
+  case "$VERSION" in 1.7.*|8.0.*) PRODUCT_ROUTE=admin_product_catalog ;; *) PRODUCT_ROUTE=admin_products_index ;; esac
   check_out "console: debug:router knows the product grid" "$PRODUCT_ROUTE" "${CONSOLE[@]}" debug:router
   check_out "console: debug:container finds the legacy configuration adapter" "PrestaShop\\Adapter\\Configuration" "${CONSOLE[@]}" debug:container prestashop.adapter.legacy.configuration
   check "console: cache:clear --no-warmup" "${CONSOLE[@]}" cache:clear --no-warmup

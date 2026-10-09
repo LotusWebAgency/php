@@ -86,6 +86,8 @@ skip_woo_api=()
 php -r 'exit(PHP_VERSION_ID < 80100 ? 0 : 1);' && skip_woo_api=(-path "$APP/wp-content/plugins/woocommerce/src/Api" -prune -o -path "$APP/wp-content/plugins/woocommerce/src/Internal/Api" -prune -o -path "$APP/wp-content/plugins/woocommerce/lib/packages/GraphQL/Type/Definition/PhpEnumType.php" -prune -o)
 # WooCommerce 7.x's Interactivity API classes use typed properties (7.4+) and only load there.
 php -r 'exit(PHP_VERSION_ID < 70400 ? 0 : 1);' && skip_woo_api+=(-path "$APP/wp-content/plugins/woocommerce/packages/woocommerce-blocks/src/Interactivity" -prune -o)
+# Symfony polyfills' bootstrap80.php uses union types; bootstrap.php requires it only on PHP 8+.
+php -r 'exit(PHP_VERSION_ID < 80000 ? 0 : 1);' && skip_woo_api+=(-path '*/symfony/polyfill-*/bootstrap80.php' -prune -o)
 find "$APP" -path "$APP/wp-content/uploads" -prune -o -path "$APP/.apptest" -prune -o "${skip_woo_api[@]}" -name '*.php' -print0 >"$WORK/files.lst"
 total="$(tr -cd '\0' <"$WORK/files.lst" | wc -c)"
 if [ "$total" -gt 3000 ]; then ok "found $total PHP files in WordPress + WooCommerce"; else fail "only $total PHP files under $APP (expected several thousand)"; fi
