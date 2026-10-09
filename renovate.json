@@ -3,6 +3,7 @@
   "extends": [
     "config:best-practices"
   ],
+  "baseBranchPatterns": ["develop"],
   "ignorePaths": [
     "deps/versions.lock",
     "php/php-src.lock",

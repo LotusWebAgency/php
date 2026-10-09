@@ -36,8 +36,7 @@ Only `main` publishes. A release is built, tested, signed and attested in a GHCR
 then each multi-arch list is copied to Docker Hub with its signatures and attestations and tagged
 there. `develop` builds push only unsigned test images to a private GHCR package. Two jobs use the
 Docker Hub credentials, the promotion and the description sync. Both run on `main` only, in the
-`release` deployment environment. Restricting that environment's secrets to `main` is a repository
-setting the workflow cannot enforce.
+`release` deployment environment, which holds the Docker Hub secrets and only `main` may deploy to.
 
 Published digests carry an SBOM, max-mode SLSA provenance, a keyless Cosign signature, signed test
 results, and OpenVEX statements where an accepted finding applies. Verify what you pulled:
