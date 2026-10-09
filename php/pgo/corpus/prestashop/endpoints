@@ -1,0 +1,58 @@
+# See corpus/laravel/endpoints for the format. PrestaShop has no public/ dir:
+# the docroot is the install root itself, same as WordPress.
+#
+# database is "mysql:<host>:<port>:<dbname>" rather than a sqlite file path: the
+# only app here with an external database server, because PrestaShop's
+# ObjectModel/Db layer requires the MySQL/MariaDB dialect. TCP loopback, not a
+# socket (see db-up.sh). verify.sh starts mariadbd against ${app}/db-data before
+# this line is checked and stops it after the app's http server is killed.
+#
+# Front-office only, since TTFB is what PGO trains for. The back office is left
+# out: the installer randomizes the admin folder name on every run
+# (src/PrestaShopBundle/Install/Install.php finalize()), so it is not a fixed
+# path, and fixing it would mean disabling that security behavior or adding a
+# stateful rename step no other app needs. All demo IDs below are PrestaShop's
+# own fixtures ("Hummingbird" theme + demo catalog), read from the installed
+# ps_category/ps_product/ps_product_attribute/ps_cms tables.
+#
+# PS_REWRITING_SETTINGS is forced to 0 after install (Dockerfile.corpus), so the
+# query-string URLs are canonical and are not 302'd to a rewritten path that php -S
+# (no router, no mod_rewrite) would 404. PrestaShop still 302s once to reorder its
+# query string (?controller=x&id_y=n -> ?id_y=n&controller=x), which is why
+# verify.sh and train.sh follow redirects (curl -L) for every app.
+#
+# One file serves every PrestaShop the tiers pin (9.2.0, 8.2.8, 1.7.8.11,
+# 1.6.1.24), so an expected substring may list alternatives separated by '|': 1.6's
+# demo catalog puts Women/Tops/"Faded Short Sleeves T-shirt"/"Printed Dress" at
+# the IDs where 1.7+ has Clothes/Accessories/Hummingbird/Framed poster. There is no
+# cart path: no single URL renders an empty cart on all versions (1.6 on
+# controller=order, 1.7+ on cart&action=show; each sends the other's URL home), so
+# the new-products listing stands in, with the same title everywhere.
+# id_category=6 is optional because 1.6's corpus install 404s it (its demo data
+# nests the second "Tops" differently); 1.7+ must render Accessories there
+# whenever it answers 200.
+docroot .
+# PrestaShop is not a composer package, so this is a third version kind alongside
+# "composer" and "wordpress": verify.sh reads install/install_version.php's
+# _PS_INSTALL_VERSION_ constant, which is why Dockerfile.corpus keeps that one file
+# instead of deleting install/ as the upstream entrypoint does.
+version prestashop install/install_version.php
+database mysql:127.0.0.1:13306:prestashop SELECT COUNT(*) FROM ps_product WHERE active = 1
+# Overrides verify.sh and train.sh's shared negative-control path. With rewriting
+# off, index.php dispatches only on ?controller=, so a bare nonexistent path renders
+# the catalog home (200) whenever it reaches index.php, and whether it does is a
+# built-in-server detail that differs across PHP versions (8.2 404s an unmatched
+# path with an extension at the server level; 8.4 forwards it to index.php). A
+# garbage ?controller= is a query string on a real file, so it always reaches
+# index.php, where PrestaShop's dispatcher 404s a controller it cannot resolve.
+negative-control /index.php?controller=corpus-negative-control-4f21a9
+path / required 4096 PrestaShop
+path /index.php?controller=category&id_category=3 required 4096 Clothes|Women
+path /index.php?controller=category&id_category=6 optional 4096 Accessories|Tops
+path /index.php?controller=product&id_product=1 required 4096 Hummingbird printed t-shirt|Faded Short Sleeves T-shirt
+path /index.php?controller=product&id_product=3 required 4096 Framed poster|Printed Dress
+path /index.php?controller=search&s=shirt required 2048 Search
+path /index.php?controller=cms&id_cms=3 required 2048 Terms and conditions of use
+path /index.php?controller=contact required 2048 Contact us
+path /index.php?controller=auth required 2048 Login
+path /index.php?controller=new-products required 4096 New products

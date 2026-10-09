@@ -1,0 +1,20 @@
+# Read by corpus/verify.sh at build time, by tests/test-corpus.sh against the
+# built image, and by tests/test-corpus-tiers.sh against every runtime image in
+# the tier. One source of truth for "what this app serves", so no check carries
+# a hand-written list that can drift from it.
+#
+# path <path> <required|optional> <min-bytes> <substring the body must contain>
+#
+# The substring is what makes the check an assertion rather than a formality:
+# a 200 with an empty body or a framework error page passes "answered 200" and
+# trains on nothing.
+docroot public
+version composer laravel/framework
+database database/database.sqlite SELECT COUNT(*) FROM corpus_articles
+path / required 2048 PGO training corpus
+path /articles/3 required 1024 commenter0
+path /api/articles required 4096 sit-eiusmod-3
+# /up is the health route Laravel added in 11. Older tiers 404 here; optional means
+# "record it in MANIFEST when it answers 200, do not fail the build when it does
+# not".
+path /up optional 512 PGOCorpus

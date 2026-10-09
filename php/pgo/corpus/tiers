@@ -1,0 +1,63 @@
+# Corpus tiers. One line per tier: the lowest PHP that tier's corpus runs on,
+# then the apps that corpus trains.
+#
+#   <floor> <app> <app> ...
+#
+# Membership is not listed here: scripts/pgo_tiers.py computes it from matrix.json
+# (a version belongs to the tier with the greatest floor <= it), and also derives
+# the release Composer resolves against, the builder image and the image tag. The
+# floor column only says where the boundaries fall. Most are set by what the
+# frameworks support; the two newest by which PrestaShop trains which PHP.
+#
+# The app column is the one declaration of what a tier trains
+# (`pgo_tiers.py apps-of <floor>`). Dockerfile.corpus installs Drupal only where
+# it is listed, corpus/verify.sh serves exactly these apps, and tests/test-corpus.sh
+# expects exactly these in /corpus. Apps are named after their corpus/<app>/
+# directory and listed in the order MANIFEST records them. Drupal 11.4.8 (php
+# >=8.3) trains the 8.4 and 8.5 tiers only, so the newest PHP lines are profiled on
+# the CMS stack too.
+#
+# Per tier:
+#
+#   8.5  PrestaShop 9.2.0 trains this tier alone. Laravel 12, Symfony 7 and
+#        WordPress are the 8.2 tier's pins (same releases, same locks); only the
+#        root php constraint and config.platform.php in their composer.json move
+#        to the floor (^8.5 / 8.5.11). Drupal 11.4.8 and drush 13 resolve against
+#        the same platform.
+#   8.4  PrestaShop 8.2.8 and the same pins for the rest, plus Drupal 11.4.8
+#        resolved against 8.4.26. The 8.4/8.5 split is not a framework limit; the
+#        composer.json floor constraint keeps the corpus from also running one
+#        version down, which tests/test-corpus-tiers.sh's below-floor control
+#        relies on.
+#   8.2  Laravel 12 (php ^8.2), Symfony 7 (php >=8.2), WordPress 7.0 and
+#        PrestaShop 8.2.8 (see 8.1). Serves 8.2 and 8.3. Laravel 13 needs 8.3, so
+#        8.2 is where the Laravel 12 line stops.
+#   8.1  Laravel 10 (php ^8.1) and Symfony 6.4 (php >=8.1) are the newest that
+#        install on 8.1; Laravel 11 and Symfony 7 both require 8.2. WordPress 7.0
+#        still applies (it wants 7.4). PrestaShop 8.2.8 trains this tier and every
+#        one up to 8.4 (7.2, 8.1, 8.2, 8.4): the devdocs say 8.2 supports php up to
+#        8.1, but PS 8.2 has run on PHP 8.4 in production for a long time, so the
+#        pins deliberately go beyond the docs. (The installer's numeric cap,
+#        install_version.php's _PS_INSTALL_MAXIMUM_PHP_VERSION_ID_, is 81099 --
+#        php 8.10.99, a typo for 80199 -- so it blocks nothing below php 8.10; the
+#        CLI install runs on 8.4 as shipped.)
+#   7.2  Laravel 6 (php ^7.2.5), Symfony 5.4 (php >=7.2.5, the newest Symfony that
+#        runs on PHP 7 at all) and WordPress 6.9, the last line whose
+#        $required_php_version (7.2.24) is below PHP 7.2.34. WordPress 7.0
+#        requires 7.4, so a 7.4 floor would be unusable on 7.2 and 7.3.
+#   7.1  Laravel 5.8 (php ^7.1.3), Symfony 4.4 (php >=7.1.3, the last Symfony
+#        below the 7.2.5 floor 5.4 sets) and WordPress 6.5 (7.0.0, the last line
+#        below WordPress 6.6's 7.2.24), with the 2.1 SQLite drop-in (php 7.0).
+#   7.0  Laravel 5.5 (php >=7.0.0), Symfony 3.4 (php >=7.0.8, the last branch
+#        below Symfony 4.4's 7.1.3), and the same WordPress 6.5 and 2.1 drop-in.
+#        This tier needs PHP 7.0 to link Debian's libsqlite (3.46.1) rather than
+#        its bundled 3.14.2: the drop-in writes its type cache with UPSERT, which
+#        SQLite gained in 3.24, and WordPress otherwise dies at CREATE TABLE
+#        wp_users. php/system-libs.lock asserts the linkage per image.
+8.5 laravel prestashop symfony wordpress drupal
+8.4 laravel prestashop symfony wordpress drupal
+8.2 laravel prestashop symfony wordpress
+8.1 laravel prestashop symfony wordpress
+7.2 laravel prestashop symfony wordpress
+7.1 laravel prestashop symfony wordpress
+7.0 laravel prestashop symfony wordpress

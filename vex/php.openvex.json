@@ -1,0 +1,57 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/LotusWebAgency/php/blob/main/vex/php.openvex.json",
+  "author": "Lotus Web Agency",
+  "timestamp": "2026-10-03T00:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-102276",
+        "description": "brace-expansion: denial of service via stack exhaustion from crafted brace patterns (fixed in 5.0.10)"
+      },
+      "timestamp": "2026-10-03T00:00:00Z",
+      "products": [
+        {
+          "@id": "pkg:oci/php?repository_url=index.docker.io/lotuswebagency/php&flavor=cli-builder",
+          "subcomponents": [{"@id": "pkg:npm/brace-expansion@5.0.9"}]
+        }
+      ],
+      "status": "affected",
+      "status_notes": "review-by: 2026-11-30. Found by the Trivy gate in cli-builder only, inside the npm that Node bundles (/usr/local/lib/node_modules/npm and semantic-release's own copy of it). No npm release ships the fixed brace-expansion yet: npm 12.2.0 and 11.21.0 both bundle 5.0.9. Accepted as a denial of service in a build-time tool, not shown unreachable: npm expands brace patterns from globs in package.json and ignore files.",
+      "action_statement": "Move to an npm release that bundles brace-expansion >= 5.0.11 and drop this statement. Re-checked on the review-by date."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-102278",
+        "description": "brace-expansion: denial of service via uncontrolled recursion in nested brace patterns (fixed in 5.0.11)"
+      },
+      "timestamp": "2026-10-03T00:00:00Z",
+      "products": [
+        {
+          "@id": "pkg:oci/php?repository_url=index.docker.io/lotuswebagency/php&flavor=cli-builder",
+          "subcomponents": [{"@id": "pkg:npm/brace-expansion@5.0.9"}]
+        }
+      ],
+      "status": "affected",
+      "status_notes": "review-by: 2026-11-30. Found by the Trivy gate in cli-builder only, inside the npm that Node bundles (/usr/local/lib/node_modules/npm and semantic-release's own copy of it). No npm release ships the fixed brace-expansion yet: npm 12.2.0 and 11.21.0 both bundle 5.0.9. Accepted as a denial of service in a build-time tool, not shown unreachable: npm expands brace patterns from globs in package.json and ignore files.",
+      "action_statement": "Move to an npm release that bundles brace-expansion >= 5.0.11 and drop this statement. Re-checked on the review-by date."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-19534",
+        "description": "undici: denial of service via an unrequested WebSocket subprotocol (fixed in 6.28.1)"
+      },
+      "timestamp": "2026-10-03T00:00:00Z",
+      "products": [
+        {
+          "@id": "pkg:oci/php?repository_url=index.docker.io/lotuswebagency/php&flavor=cli-builder",
+          "subcomponents": [{"@id": "pkg:npm/undici@6.28.0"}]
+        }
+      ],
+      "status": "affected",
+      "status_notes": "review-by: 2026-11-30. Found by the Trivy gate in cli-builder only, inside the npm that Node bundles (both copies, as above). No npm release ships undici >= 6.28.1 yet. Accepted as a denial of service in a build-time tool, not shown unreachable: it needs a hostile WebSocket server and npm does not use undici's WebSocket client itself.",
+      "action_statement": "Move to an npm release that bundles undici >= 6.28.1 and drop this statement. Re-checked on the review-by date."
+    }
+  ]
+}

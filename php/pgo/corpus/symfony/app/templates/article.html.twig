@@ -1,0 +1,18 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}{{ article.title }}{% endblock %}
+
+{% block body %}
+<article>
+    <h2>{{ article.title }}</h2>
+    <p>{{ article.body|nl2br }}</p>
+</article>
+<section>
+    {% for comment in comments %}
+        <blockquote>
+            <p>{{ comment.body }}</p>
+            <cite>{{ comment.author }} &mdash; {{ comment.created_at }}</cite>
+        </blockquote>
+    {% endfor %}
+</section>
+{% endblock %}

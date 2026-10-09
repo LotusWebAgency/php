@@ -1,0 +1,63 @@
+# Retention for the develop images (ghcr.io/lotuswebagency/php/dev).
+#
+# ci.yml pushes every image that passed on develop as dev:<tag>-<sha>-<arch>,
+# dev:<tag>-<sha> and the floating dev:<tag>. This deletes the versions of
+# commits that are older than RETENTION_DAYS (14) and that no floating tag points
+# at; the rules are in ci/ghcr_prune_dev.py. It only ever talks to the package
+# `php/dev`: the name is a constant there, so the hash-pinned PGO corpora
+# (`php/corpus`) that every build pulls and the build cache are out of reach.
+#
+# A scheduled run deletes; a manual run is a dry run unless dry_run is switched
+# off. (GitHub runs cron and lists dispatchable workflows only from the default
+# branch.)
+name: dev-prune
+
+on:
+  schedule:
+    - cron: "40 5 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print the plan, delete nothing
+        type: boolean
+        default: true
+
+concurrency:
+  group: dev-prune
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  prune:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write # list and delete versions of the php/dev package
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+      RETENTION_DAYS: "14"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Needed by `docker buildx imagetools inspect`, which resolves the
+      # children of the kept manifest lists (eight lookups at a time).
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prune the dev images
+        run: |
+          set -euo pipefail
+          args=()
+          [ "$DRY_RUN" = true ] && args+=(--dry-run)
+          python3 ci/ghcr_prune_dev.py "${args[@]}"

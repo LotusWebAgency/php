@@ -1,0 +1,154 @@
+# Pinned sources for the PGO training corpus. Same discipline as
+# deps/versions.lock: nothing is fetched without a version and a sha256.
+#
+# Keyed by corpus tier. A tier is a floor PHP version listed in corpus/tiers;
+# scripts/pgo_tiers.py derives which matrix.json versions it serves. Every row
+# names exactly one tier (no wildcard), so a broader row cannot shadow the one
+# that was meant, and a version appearing under two tiers is two independent pins.
+#
+# Versions follow what each tier's floor PHP supports:
+#   WordPress 7.0 needs php 7.4     ($required_php_version, checked at boot)
+#   WordPress 6.9 needs php 7.2.24
+#   WordPress 6.5 needs php 7.0.0
+#   sqlite-database-integration 3.0 needs php 7.2, 2.2 php 7.2, 2.1 php 7.0
+#   laravel/laravel v12 needs ^8.2, v10 ^8.1, v6 ^7.2.5, v5.8 ^7.1.3, v5.5 >=7.0.0
+#
+# The drop-in is pinned to the line that shipped alongside its tier's WordPress,
+# not to the newest that satisfies the PHP floor: 3.0 rewrote the driver for
+# WordPress 7.0, and its SHOW TABLES translation makes WordPress 6.9 stop at "One
+# or more database tables are unavailable" during install.
+#
+# Every version is pinned because two profiles from two builds must differ by what
+# the compiler did, not by what wordpress.org or the plugin repo shipped that
+# morning.
+#
+# PrestaShop is pinned differently. GitHub release assets and
+# download.prestashop.com are unreachable from the build network (github.com,
+# api.github.com, codeload.github.com and download.prestashop.com time out; only
+# raw.githubusercontent.com, packagist.org and Docker Hub answer). The vendor's own
+# prestashop/prestashop image is an official distribution channel, so each row
+# pins that image by its immutable manifest digest (the "sha256" column).
+# Dockerfile.corpus's FROM lines use the digest, never the tag, so a repointed tag
+# cannot change what gets built; the "url" column keeps the tag the digest was
+# resolved from, for reference. "version" is the PrestaShop release installed
+# inside the image (PS_VERSION from `docker inspect`), which is independent of the
+# docker tag's naming.
+#
+# Release per tier, the newest PrestaShop that fits:
+#   8.5 tier (php 8.5 only): PrestaShop 9.2.0, the newest line (floor php 8.1,
+#     composer config.platform.php 8.1.0); Docker Hub publishes tags -8.1 to -8.5.
+#   8.4 tier (php 8.4 only), 8.2 tier (php 8.2-8.3), 8.1 tier (php 8.1) and
+#   7.2 tier (php 7.2-8.0): PrestaShop 8.2.8, the newest 8.2.x patch. The devdocs
+#     and the installer's message say 8.2 supports php up to 8.1, and Docker Hub
+#     publishes prestashop/prestashop:8.2.8-* only up to -8.1, but PS 8.2 has run
+#     on PHP 8.4 in production for a long time, so it trains all four tiers.
+#     (The installer's numeric cap, install/install_version.php's
+#     _PS_INSTALL_MAXIMUM_PHP_VERSION_ID_, is 81099 -- php 8.10.99, a typo for
+#     80199 -- so index_cli.php enforces nothing below php 8.10 and the CLI install
+#     runs on 8.4 as shipped.) The release tree is php-independent (vendor/ is
+#     bundled), so all four tiers pin the one digest below, the -7.2-fpm image,
+#     instead of a per-php image of the same release that could differ in a byte.
+#     PrestaShop 9.x dropped PHP 7 (floor 8.1), so 8.2.8 is also the newest
+#     release usable on 7.2-8.0.
+#   7.1 tier (php 7.1 only): PrestaShop 1.7.8.11, the last 1.7.8.x patch, which
+#     publishes -7.1 to -7.4. Confirmed via
+#     raw.githubusercontent.com/PrestaShop/PrestaShop/1.7.8.11/composer.json
+#     (config.platform.php 7.1.3) and the tag's own sanity.yml CI matrix.
+#   7.0 tier (php 7.0 only): no PrestaShop 1.7.x release ever supported PHP 7.0
+#     (1.7.6.9, composer platform 5.6.0, publishes -5.6, -7.1, -7.2 only). The only
+#     PrestaShop that runs on PHP 7.0 is the 1.6 branch -- pre-Symfony-admin, a
+#     materially different codebase from the 1.7-9.x line trained elsewhere.
+#     Docker Hub carries it only as the floating tag `1.6-7.0[-fpm]` (last pushed
+#     2020-11-19); `1.6.1.24-7.0` does not exist. It is pinned by that tag's
+#     current manifest digest, with PS_VERSION=1.6.1.24 confirmed via
+#     `docker inspect`. This is a coverage gap: a real, working PrestaShop, but
+#     not re-resolvable from a version tag like every other row here.
+#
+# tier  name          version        sha256 (image digest)                                            url (docker tag, for reference -- not what is fetched)
+8.5     prestashop    9.2.0          bad534d47aa2365b3ec2ea136736a530592b8e62582607fb4129d3e8127e8756  docker://prestashop/prestashop:9.2.0-8.2
+8.4     prestashop    8.2.8          0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66  docker://prestashop/prestashop:8.2.8-7.2-fpm
+8.2     prestashop    8.2.8          0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66  docker://prestashop/prestashop:8.2.8-7.2-fpm
+8.1     prestashop    8.2.8          0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66  docker://prestashop/prestashop:8.2.8-7.2-fpm
+7.2     prestashop    8.2.8          0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66  docker://prestashop/prestashop:8.2.8-7.2-fpm
+7.1     prestashop    1.7.8.11       25a4fa68ab0529a5886f45ea9aad04d2626f7c1b861c62cbe643d2574a8e6473  docker://prestashop/prestashop:1.7.8.11-7.1-fpm
+7.0     prestashop    1.6.1.24       fd757ab1a4847abc053f19dfbf0f4885ffbf4fc06b02bce04035f30c952e234f  docker://prestashop/prestashop:1.6-7.0-fpm
+#
+# prestashop-lang: the CLI install's English language step is not
+# network-independent. PrestaShopBundle/Install/Install.php::installLanguages()
+# unconditionally calls Language::downloadXLFLanguagePack(), which hits
+# i18n.prestashop-project.org over HTTPS with no existing-cache check, English
+# included. Under `RUN --network=none` the installer fails in about 2s with
+# "Cannot download language pack \"en\"" instead of hanging.
+#
+# So the one file that call would fetch (the vendor's per-version en-US
+# translation pack, same host as the runtime call) is fetched ahead of the
+# network=none step and placed at _PS_TRANSLATIONS_DIR_/sf-en-US.zip, which
+# satisfies Language::installSfLanguagePack()'s cache check
+# (translationPackIsInCache()) with real content. Dockerfile.corpus also touches an
+# empty _PS_TRANSLATIONS_DIR_/en.gzip, the actual gate in front of the download
+# call: dead code from an older pack format that is only existence-checked, never
+# read or written (no other reference to "*.gzip" in classes/Language.php).
+#
+# No 7.0 row: PrestaShop 1.6.1.24 predates the Symfony admin and this
+# translation-pack system (its image has no install/langs/en/language.xml at the
+# path the 1.7+ installer reads), so its installer never makes the call.
+#
+# These rows are `latest`, the only unpinned rows in this file. Upstream
+# re-exports every pack in place whenever it cuts a release (the URL is per
+# version, the bytes follow its current catalog: 9.1.5's pack became
+# byte-identical to 9.2.0's the day 9.2.0 shipped, 8.2.8 changed zip metadata
+# only), and a sha256 pin broke corpus builds repeatedly. The pack is installer
+# data, not code, so fetch.sh holds it to its shape (a zip under 16 MiB of
+# en-US/*.xlf and nothing else), logs the sha256 it got, and never caches it.
+# BuildKit's layer cache still means "latest as of the last cold build of that
+# layer".
+#
+# tier  name              version     sha256   url
+8.5     prestashop-lang   9.2.0       latest   https://i18n.prestashop-project.org/translations/9.2.0/en-US/en-US.zip
+8.4     prestashop-lang   8.2.8       latest   https://i18n.prestashop-project.org/translations/8.2.8/en-US/en-US.zip
+8.2     prestashop-lang   8.2.8       latest   https://i18n.prestashop-project.org/translations/8.2.8/en-US/en-US.zip
+8.1     prestashop-lang   8.2.8       latest   https://i18n.prestashop-project.org/translations/8.2.8/en-US/en-US.zip
+7.2     prestashop-lang   8.2.8       latest   https://i18n.prestashop-project.org/translations/8.2.8/en-US/en-US.zip
+7.1     prestashop-lang   1.7.8.11    latest   https://i18n.prestashop-project.org/translations/1.7.8.11/en-US/en-US.zip
+#
+# Framework code is not here, except Laravel's app skeleton (the tarball carries
+# app files only). Every Composer package it and the Symfony app pull in is pinned
+# by the committed composer.lock files under corpus/<app>/<tier>/. Drupal (the 8.4
+# and 8.5 tiers only, see corpus/tiers) is pinned that way entirely --
+# drupal/core-recommended 11.4.8 and drush 13 from Packagist, the scaffold plugin
+# writing web/ -- so it has no row here, and neither does a tier that does not
+# train it.
+#
+# Every sha256 below was computed locally against the fetched artifact; neither
+# wordpress.org nor GitHub publishes a checksum. (wordpress.org answers 200 with
+# the tarball body for any path under the release directory, including a .sha256
+# that does not exist -- a successful fetch there proves nothing.)
+#
+# GitHub's archive/refs/tags/ tarballs are generated on demand and their gzip
+# framing has changed at least once upstream (2023), which invalidates a sha256 pin
+# without the tag moving. deps/versions.lock accepts the same risk for ImageMagick;
+# if a laravel-app row fails verification with an unchanged version, check that
+# before assuming compromise.
+#
+# tier  name          version   sha256                                                            url
+8.5     laravel-app   12.12.2   8977f1d10b7bbf53898a77b84e5e94ce0b823ccca072f5f9d0fd10b199f96cd9  https://github.com/laravel/laravel/archive/refs/tags/v12.12.2.tar.gz
+8.5     wordpress     7.0.6     5befe24ac94bf1ff18292a1a1f30fd0c711b009f91cfdcadaa8feb6e0afa75cd  https://wordpress.org/wordpress-7.0.6.tar.gz
+8.5     wp-sqlite     3.0.2     1602e75577ad9b3a7e3e4a6a44a81b9541cdee2124d48928faf61c6fd3cd4f74  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.0.2.zip
+8.4     laravel-app   12.12.2   8977f1d10b7bbf53898a77b84e5e94ce0b823ccca072f5f9d0fd10b199f96cd9  https://github.com/laravel/laravel/archive/refs/tags/v12.12.2.tar.gz
+8.4     wordpress     7.0.6     5befe24ac94bf1ff18292a1a1f30fd0c711b009f91cfdcadaa8feb6e0afa75cd  https://wordpress.org/wordpress-7.0.6.tar.gz
+8.4     wp-sqlite     3.0.2     1602e75577ad9b3a7e3e4a6a44a81b9541cdee2124d48928faf61c6fd3cd4f74  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.0.2.zip
+8.2     laravel-app   12.12.2   8977f1d10b7bbf53898a77b84e5e94ce0b823ccca072f5f9d0fd10b199f96cd9  https://github.com/laravel/laravel/archive/refs/tags/v12.12.2.tar.gz
+8.2     wordpress     7.0.6     5befe24ac94bf1ff18292a1a1f30fd0c711b009f91cfdcadaa8feb6e0afa75cd  https://wordpress.org/wordpress-7.0.6.tar.gz
+8.2     wp-sqlite     3.0.2     1602e75577ad9b3a7e3e4a6a44a81b9541cdee2124d48928faf61c6fd3cd4f74  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.0.2.zip
+8.1     laravel-app   10.3.3    00d981a312f9f2ae2bd7b44cc83a2a970d7153c224fdb0543786b6044cfd68c8  https://github.com/laravel/laravel/archive/refs/tags/v10.3.3.tar.gz
+8.1     wordpress     7.0.6     5befe24ac94bf1ff18292a1a1f30fd0c711b009f91cfdcadaa8feb6e0afa75cd  https://wordpress.org/wordpress-7.0.6.tar.gz
+8.1     wp-sqlite     3.0.2     1602e75577ad9b3a7e3e4a6a44a81b9541cdee2124d48928faf61c6fd3cd4f74  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.0.2.zip
+7.2     laravel-app   6.20.1    d8280bfc2cc0c89aa647b8dc89fdc02f80eb25dd8336e10583244c693592738c  https://github.com/laravel/laravel/archive/refs/tags/v6.20.1.tar.gz
+7.2     wordpress     6.9.9     32231b9acbe763a86138e8bbb7b5c4f3f123bec9d65fc3898bcb3b64506a7358  https://wordpress.org/wordpress-6.9.9.tar.gz
+7.2     wp-sqlite     2.2.23    44be096a14ebcea424b5e4bf764436ec85fb067f74ab47822c4c5346df21591e  https://downloads.wordpress.org/plugin/sqlite-database-integration.2.2.23.zip
+7.1     laravel-app   5.8.35    f88d0c8c74c0fade17323fbc2b2d95905af15a7249b25922efa7ec166b244723  https://github.com/laravel/laravel/archive/refs/tags/v5.8.35.tar.gz
+7.1     wordpress     6.5.12    24493a46d598df5b9bb954539f0f247d96e5d7c4bef533e5587cca0dbc374738  https://wordpress.org/wordpress-6.5.12.tar.gz
+7.1     wp-sqlite     2.1.16    ccc69cada05983e6c2dac8c0962b548c437b4c96c00ea41b0e130fc128671391  https://downloads.wordpress.org/plugin/sqlite-database-integration.2.1.16.zip
+7.0     laravel-app   5.5.28    17264762d343bbb23cd8ddc7427e58bb1ba4d484de0c1d48eb45d32526999878  https://github.com/laravel/laravel/archive/refs/tags/v5.5.28.tar.gz
+7.0     wordpress     6.5.12    24493a46d598df5b9bb954539f0f247d96e5d7c4bef533e5587cca0dbc374738  https://wordpress.org/wordpress-6.5.12.tar.gz
+7.0     wp-sqlite     2.1.16    ccc69cada05983e6c2dac8c0962b548c437b4c96c00ea41b0e130fc128671391  https://downloads.wordpress.org/plugin/sqlite-database-integration.2.1.16.zip

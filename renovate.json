@@ -1,0 +1,136 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices"
+  ],
+  "ignorePaths": [
+    "deps/versions.lock",
+    "php/php-src.lock",
+    "php/pgo/corpus.lock",
+    "php/pgo/corpus/**"
+  ],
+  "customManagers": [
+    {
+      "description": "matrix.json's base image is a JSON string, not a Dockerfile ARG -- docker-bake.hcl always overrides the Dockerfile's own ARG BASE_IMAGE from it, so this is the only place a digest pin has any effect",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^matrix\\.json$/"
+      ],
+      "matchStrings": [
+        "\"base\": \"(?<depName>[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[a-f0-9]+)\""
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "loose"
+    },
+    {
+      "description": "Digest-pinned tool and registry images pulled through mirror.gcr.io (the BuildKit image of every builder in ci.yml, test-attest.sh's registries): the tag and digest are Docker Hub's, the mirror only serves them",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/ci\\.yml$/",
+        "/^tests/test-attest\\.sh$/"
+      ],
+      "matchStrings": [
+        "mirror\\.gcr\\.io/(?:library/)?(?<depName>[a-z0-9][a-z0-9/_.-]*):(?<currentValue>[A-Za-z0-9][A-Za-z0-9._-]*)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "loose"
+    },
+    {
+      "description": "test-attest.sh's zot registry, digest-pinned from GHCR (zot is not on Docker Hub, so not behind mirror.gcr.io)",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^tests/test-attest\\.sh$/"
+      ],
+      "matchStrings": [
+        "\"(?<depName>ghcr\\.io/project-zot/[a-z0-9][a-z0-9/_.-]*):(?<currentValue>v[0-9][A-Za-z0-9._-]*)@(?<currentDigest>sha256:[a-f0-9]{64})\""
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "loose"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Auto-merge base image digest/patch refreshes once CI is green",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "pin",
+        "patch"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Minor/major base bumps stay as PRs for review",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "major"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Auto-merge the matrix.json base-image digest pin the same way as the Dockerfile bases",
+      "matchManagers": [
+        "custom.regex"
+      ],
+      "matchFileNames": [
+        "matrix.json"
+      ],
+      "matchUpdateTypes": [
+        "digest",
+        "pin",
+        "patch"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "A new action release (minor/major) stays a PR for review",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "major"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "A mutable action tag can be force-moved to a malicious commit (the 2026-03 trivy-action hijack); a digest update waits a week and is never auto-merged, leaving a review window",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "automerge": false,
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "Auto-merge action version-tag refreshes once CI is green (the SHA is pinned by hand from the new tag)",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "pin",
+        "patch"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "Never bump our own published images (ghcr.io/lotuswebagency/php(/corpus), lotuswebagency/php): a PR against either is a self-referential loop that changes a build input, invalidates INPUTS_HASH and triggers a rebuild producing a new digest to bump again",
+      "matchManagers": [
+        "dockerfile",
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "lotuswebagency/php",
+        "ghcr.io/lotuswebagency/**"
+      ],
+      "enabled": false
+    }
+  ]
+}

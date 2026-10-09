@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Exit 0 when the FPM pool answers its ping path. Requires cgi-fcgi
+# (libfcgi-bin). Vendored because an unpinned executable fetch at build time
+# violates the SHA-pinning policy.
+set -euo pipefail
+
+LISTEN="${PHP_FPM_LISTEN:-127.0.0.1:9000}"
+PING_PATH="${PHP_FPM_PING_PATH:-/fpm-ping}"
+EXPECT="${PHP_FPM_PING_RESPONSE:-pong}"
+
+# 0.0.0.0 is a bind address, not a connect address; the baked default
+# (conf/www.conf via PHP_FPM_LISTEN) is 0.0.0.0:9000.
+CONNECT="${LISTEN/0.0.0.0/127.0.0.1}"
+
+response=$(
+  SCRIPT_NAME="$PING_PATH" \
+  SCRIPT_FILENAME="$PING_PATH" \
+  REQUEST_METHOD=GET \
+  cgi-fcgi -bind -connect "$CONNECT" 2>/dev/null
+) || { echo "fpm did not answer on ${CONNECT}" >&2; exit 1; }
+
+if ! grep -q "$EXPECT" <<<"$response"; then
+  echo "unexpected ping response: $response" >&2
+  exit 1
+fi
+exit 0

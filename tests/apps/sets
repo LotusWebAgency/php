@@ -1,0 +1,56 @@
+# Which application release runs on which PHP version, and how.
+#
+# One row per fixture set (an application release, populated once), with the
+# explicit list of PHP versions it is tested on. Rows may overlap and may leave
+# gaps: two releases of one app can run on the same PHP, and a PHP version
+# nobody asked for simply has no cell. There is no coverage rule; the cells are
+# exactly what is written here. `appsets.py check` (run by run-matrix.sh)
+# validates the syntax, that every PHP version exists in matrix.json, that
+# every (app, set) has a fixture recipe and apps.lock rows, and that no
+# (app, set) or PHP version is listed twice.
+#
+# php    comma list of matrix.json versions; a-b is shorthand for every
+#        matrix.json version from a to b (7.3-8.0 is 7.3,7.4,8.0)
+# flags  comma list, or - for none:
+#          builder   also run the cli-builder image (composer against the real
+#                    lock); without it a row runs fpm and cli only
+#          v3        also run the -v3 images, where the PHP version has one
+#                    (matrix.json "uarch"); meant for the latest release of an app
+#          hardened  fpm also runs the hardened (snuffleupagus) config, on the
+#                    PHP versions that ship it (php/ext.json: >= 7.2)
+# db     the database the fixture is installed on; only mariadb is supported.
+#        A column per row because one fixture is one database.
+#
+# ext-builder images never run application suites; they have their own test.
+#
+# The PHP the fixture is BUILT on is the lowest version in the row: every set
+# is installed, composer-resolved and populated on the stock image for it
+# (APPTEST_BUILDER_REPO, dementev/php-fpm-with-ext by default), so the data the
+# from-source images are tested against was written by a known-good PHP they
+# have to stay compatible with -- serialized sessions, password hashes, cache
+# entries and all. The recipe hash carries only that lowest version, so adding
+# or dropping a PHP the row is tested on never rebuilds its fixture.
+#
+# app        set    php        flags                 db
+laravel      9      8.0,8.2    hardened              mariadb
+laravel      10     8.1,8.3    hardened              mariadb
+laravel      12     8.2,8.5    hardened              mariadb
+laravel      13     8.3-8.5    builder,v3,hardened   mariadb
+wordpress    4.9    7.0,7.2    hardened              mariadb
+wordpress    5.9    7.0,8.1    hardened              mariadb
+wordpress    6.9    7.2,8.5    hardened              mariadb
+wordpress    7.1    7.4-8.5    builder,v3,hardened   mariadb
+# PrestaShop. The PHP lists follow what was measured to work, not each release's
+# documented ceiling (PrestaShop's own devdocs stop 8.2 at 8.1): 8.2.8 is tested
+# up to 8.4 with its cache:warmup allowed to fail there (tests/apps/known-failures: its Twig 3.4.3
+# compiles the closure-based format_date function into invalid PHP under 8.4's
+# closure names); 1.7.8.11 stops at 7.3 because its webservice error handler
+# turns 7.4's "array offset on null/bool" notices into HTTP 500s
+# (WebserviceOutputBuilder.php:669, Product.php:7178).
+# 1.6 is the only PrestaShop that runs on 7.0; builder only on 8.2 and 9.2 (the
+# lines whose lock composer replays), v3 only on the newest line (9.2).
+prestashop   1.6    7.0-7.1        hardened              mariadb
+prestashop   1.7    7.1-7.3        hardened              mariadb
+prestashop   8.0    7.4,8.1        hardened              mariadb
+prestashop   8.2    7.2,8.1-8.4    builder,hardened      mariadb
+prestashop   9.2    8.1-8.5        builder,v3,hardened   mariadb

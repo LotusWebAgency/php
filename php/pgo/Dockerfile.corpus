@@ -1,0 +1,370 @@
+# syntax=docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# PGO training corpus, built once per tier and cached; the php build only mounts
+# it and reads it. Build context is php/pgo.
+#
+#   docker build -f php/pgo/Dockerfile.corpus \
+#     --build-arg BUILDER_IMAGE=lotuswebagency/php:8.2-cli-builder --build-arg TIER=8.2 \
+#     -t ghcr.io/lotuswebagency/php/corpus:php8.2 php/pgo
+#
+# BUILDER_IMAGE, TIER and the tag all come from scripts/pgo_tiers.py, which
+# derives them from matrix.json (tests/test-corpus-tiers.sh builds and checks
+# every tier).
+#
+# A tier is a floor PHP version; the corpus is reused by every matrix.json
+# version at or above that floor until the next one. Composer writes the resolved
+# floor into vendor/composer/platform_check.php, which autoload.php requires before
+# any application code, so a corpus resolved on 7.4 fatals at autoload on 7.0-7.3
+# -- silently, because the training run curls and cannot tell a fatal from a slow
+# page.
+#
+# There is no framework constraint build arg: a committed composer.lock is
+# tier-specific, so the constraint lives in the tier's committed composer.json
+# next to its lock, where it cannot disagree with it. TIER is the only knob.
+#
+# BuildKit scopes ARGs declared after a FROM to that stage, so BUILDER_IMAGE and
+# TIER are declared before the first FROM (the prestashop/* stages and the alias
+# stage below are FROM lines). TIER is redeclared bare inside the corpus stage so
+# its own instructions can see it.
+ARG BUILDER_IMAGE=lotuswebagency/php:8.2-cli-builder
+ARG TIER=8.2
+
+# PrestaShop source per tier, pinned by the official prestashop/prestashop image
+# manifest digest rather than a fetched zip: GitHub release assets and
+# download.prestashop.com are unreachable from the build network (the evidence
+# per version is in the PrestaShop header of php/pgo/corpus.lock). BuildKit prunes
+# every stage except the one the alias FROM below resolves to.
+#
+# 8.4, 8.2, 8.1 and 7.2 share one image on purpose: PrestaShop 8.2.8 trains all
+# four, and its release tree does not depend on the php of the image it ships in.
+# 8.5 is PrestaShop 9.2.0.
+FROM prestashop/prestashop@sha256:bad534d47aa2365b3ec2ea136736a530592b8e62582607fb4129d3e8127e8756 AS ps-8.5
+FROM prestashop/prestashop@sha256:0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66 AS ps-8.4
+FROM prestashop/prestashop@sha256:0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66 AS ps-8.2
+FROM prestashop/prestashop@sha256:0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66 AS ps-8.1
+FROM prestashop/prestashop@sha256:0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66 AS ps-7.2
+FROM prestashop/prestashop@sha256:25a4fa68ab0529a5886f45ea9aad04d2626f7c1b861c62cbe643d2574a8e6473 AS ps-7.1
+FROM prestashop/prestashop@sha256:fd757ab1a4847abc053f19dfbf0f4885ffbf4fc06b02bce04035f30c952e234f AS ps-7.0
+
+# Alias stage: `COPY --from` and `RUN --mount from=` do not expand ARGs when they
+# name a build stage, only FROM does. The per-tier stage is picked here and
+# everything downstream copies from this fixed name.
+FROM ps-${TIER} AS ps-selected
+
+FROM ${BUILDER_IMAGE} AS corpus
+ARG TIER
+# Lets a stale corpus be told apart from a current one (fed from
+# scripts/inputs-hash.sh by tests/build-corpus.sh), same as the php images.
+ARG INPUTS_HASH=""
+
+LABEL org.opencontainers.image.source="https://github.com/LotusWebAgency/php" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="Lotus Web Agency" \
+      org.opencontainers.image.authors="Vasilii Dementev https://vasiliidementev.com" \
+      org.opencontainers.image.title="lotuswebagency/php PGO training corpus (php ${TIER} tier)" \
+      com.lotuswebagency.inputs-hash="${INPUTS_HASH}"
+
+USER root
+# /corpus-src is the reference tree: pins, lockfiles, the Symfony app source, the
+# endpoint manifests. Root-owned so the www-data training run, which has a
+# read-write bind mount of /corpus, cannot rewrite what defines the corpus.
+COPY corpus/ /corpus-src/
+COPY corpus.lock /corpus-src/corpus.lock
+RUN mkdir -p /corpus /composer-cache && chown www-data:www-data /corpus /composer-cache
+
+USER www-data
+WORKDIR /corpus
+# CORPUS_LOCK: corpus.lock sits inside /corpus-src here, not beside it as in the
+# repo, so fetch.sh's default of "../corpus.lock" would miss it.
+#
+# COMPOSER_CACHE_DIR is fixed so the RUNs below can mount it as a BuildKit cache
+# and survive a GitHub outage. The locked packages resolve to GitHub zipballs
+# whose `dist` entry has an empty shasum, so Composer's integrity check is the
+# commit reference in the download URL, not a content hash; the cache skips
+# refetches but does not re-verify on read the way fetch-verified.sh does.
+ENV COMPOSER_ALLOW_SUPERUSER=0 \
+    COMPOSER_NO_INTERACTION=1 \
+    COMPOSER_CACHE_DIR=/composer-cache \
+    CORPUS_TIER=${TIER} \
+    CORPUS_LOCK=/corpus-src/corpus.lock
+
+# TIER and BUILDER_IMAGE are separate build args that must agree, or the tier's
+# lockfiles would be installed onto the wrong PHP and fail deep inside Composer.
+# The tier must also be a floor corpus/tiers declares and name its apps: the
+# Drupal stages read that list to decide whether they run.
+RUN set -eu; \
+    awk -v t="$CORPUS_TIER" '$1 == t && NF > 1 { found = 1 } END { exit !found }' /corpus-src/tiers \
+      || { echo "FATAL: '$CORPUS_TIER' is not a tier floor with apps in corpus/tiers" >&2; exit 1; }; \
+    got="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"; \
+    [ "$CORPUS_TIER" = "$got" ] || { echo "FATAL: TIER=$CORPUS_TIER but BUILDER_IMAGE is php $got" >&2; exit 1; }; \
+    echo "ok: tier $CORPUS_TIER on php $got"
+
+# --- Laravel -----------------------------------------------------------------
+# The skeleton tarball carries app files only; every dependency comes from the
+# committed lock, so the composer.json constraint is never re-resolved here.
+#
+# corpus/laravel/app is an overlay on the skeleton: routes that hit Eloquent
+# instead of the static welcome view, the models behind them, a migration that
+# creates and seeds the tables, and Blade views. Without it the profile would
+# cover boot, router and one static template but no ORM, query builder or
+# pdo_sqlite.
+#
+# config:cache and route:cache because production Laravel runs cached. The
+# overlay's routes use controller strings because route:cache cannot serialize
+# closures. view:cache exists only from Laravel 5.6, so it runs when available and
+# is skipped with a note otherwise.
+RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked,uid=33,gid=33 \
+    --mount=type=cache,target=/composer-cache,id=php-pgo-composer-cache,sharing=locked,uid=33,gid=33 \
+    set -eux; \
+    /corpus-src/fetch.sh "$CORPUS_TIER" laravel-app /tmp/laravel.tar.gz; \
+    mkdir -p /corpus/laravel; \
+    tar xzf /tmp/laravel.tar.gz -C /corpus/laravel --strip-components=1; \
+    rm -f /tmp/laravel.tar.gz; \
+    cp "/corpus-src/laravel/${CORPUS_TIER}/composer.json" /corpus/laravel/composer.json; \
+    cp "/corpus-src/laravel/${CORPUS_TIER}/composer.lock" /corpus/laravel/composer.lock; \
+    cp /corpus-src/laravel/env /corpus/laravel/.env; \
+    cp -r /corpus-src/laravel/app/. /corpus/laravel/; \
+    cd /corpus/laravel; \
+    composer install --no-dev --no-progress --prefer-dist; \
+    php artisan key:generate --force; \
+    mkdir -p database; \
+    touch database/database.sqlite; \
+    php artisan migrate --force; \
+    php artisan config:cache; \
+    php artisan route:cache; \
+    cmds="$(php artisan list --raw 2>/dev/null || true)"; \
+    case "$cmds" in \
+      *view:cache*) php artisan view:cache ;; \
+      *) echo "note: this laravel has no view:cache command; blade views compile on first request" ;; \
+    esac
+
+# --- Symfony -----------------------------------------------------------------
+# Not symfony/demo: its current release answers 500 on every request until
+# `importmap:install` (JavaScript from jsdelivr) and `sass:build` (a dart-sass
+# binary downloaded on first use) have run, and the newest demo that runs on
+# PHP 7.4 builds with webpack-encore (an npm step) -- none of which a lockfile in
+# this repo pins. The own app covers what a PGO profile wants -- kernel boot,
+# compiled DI container, router, Twig, pdo_sqlite -- with every byte committed or
+# pinned by composer.lock.
+#
+# corpus/symfony/app is the whole workload; a tier whose Symfony is too old for it
+# names an overlay in its own directory that replaces only the files that cannot
+# be shared. The 7.0 tier's Symfony 3.4 needs four (front controller, console,
+# kernel, routes): symfony/runtime arrived in 5.3, MicroKernelTrait's default
+# config-directory loading in 5.1, the routing `controller:` shorthand in 4.1.
+# The controller, PDO service, templates and seeder stay shared so a workload
+# change lands on every tier.
+RUN --mount=type=cache,target=/composer-cache,id=php-pgo-composer-cache,sharing=locked,uid=33,gid=33 \
+    set -eux; \
+    overlay="$(cat "/corpus-src/symfony/${CORPUS_TIER}/overlay")"; \
+    mkdir -p /corpus/symfony; \
+    cp -r /corpus-src/symfony/app/. /corpus/symfony/; \
+    if [ "$overlay" != none ]; then cp -r "/corpus-src/symfony/overlay/${overlay}/." /corpus/symfony/; fi; \
+    rm -f /corpus/symfony/README.md; \
+    cp "/corpus-src/symfony/${CORPUS_TIER}/composer.json" /corpus/symfony/composer.json; \
+    cp "/corpus-src/symfony/${CORPUS_TIER}/composer.lock" /corpus/symfony/composer.lock; \
+    cd /corpus/symfony; \
+    composer install --no-dev --no-progress --prefer-dist; \
+    php bin/seed.php; \
+    php bin/console cache:warmup --env=prod --no-debug
+
+# --- WordPress ---------------------------------------------------------------
+# SQLite drop-in, so no database server is needed in the build. wp_install()
+# creates the schema and the "Hello world!" post, which is what makes "/" and
+# "/?p=1" render a page instead of the installer.
+#
+# WordPress and drop-in versions are per tier because WordPress enforces its own
+# PHP floor at boot: 7.0 refuses to run below 7.4, 6.9 below 7.2.24.
+RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked,uid=33,gid=33 \
+    set -eux; \
+    /corpus-src/fetch.sh "$CORPUS_TIER" wordpress /tmp/wp.tar.gz; \
+    mkdir -p /corpus/wordpress; \
+    tar xzf /tmp/wp.tar.gz -C /corpus/wordpress --strip-components=1; \
+    rm -f /tmp/wp.tar.gz; \
+    /corpus-src/fetch.sh "$CORPUS_TIER" wp-sqlite /tmp/wp-sqlite.zip; \
+    unzip -q /tmp/wp-sqlite.zip -d /corpus/wordpress/wp-content/plugins; \
+    rm -f /tmp/wp-sqlite.zip; \
+    cp /corpus/wordpress/wp-content/plugins/sqlite-database-integration/db.copy \
+       /corpus/wordpress/wp-content/db.php; \
+    mkdir -p /corpus/wordpress/wp-content/database; \
+    cp /corpus-src/wordpress/wp-config.php /corpus/wordpress/wp-config.php; \
+    WP_ROOT=/corpus/wordpress php /corpus-src/wordpress/install.php; \
+    test -s /corpus/wordpress/wp-content/database/.ht.sqlite
+
+# --- Drupal ------------------------------------------------------------------
+# Only for tiers whose line in corpus/tiers lists it (8.4 and 8.5); other tiers
+# get nothing here and verify.sh does not expect /corpus/drupal. Two RUNs keep the
+# network half (composer install) apart from the no-network half (site install and
+# seeding).
+#
+# Drupal comes from Packagist only: the lock pins drupal/core-recommended 11.4.8
+# and drush 13, and the scaffold plugin writes web/ at install time, so no tarball
+# or corpus.lock row is involved.
+#
+# The database is a sqlite file under web/sites/default/files; the URL needs the
+# "localhost" host, or `sites` is parsed as the host and the file lands in
+# web/default/files. Drupal 11.4's Standard profile ships no content types, no
+# comments and no node search (search_node), so those modules are enabled here and
+# corpus/drupal/seed.php builds the content model and 22 nodes.
+#
+# page_cache and dynamic_page_cache are uninstalled because they would answer
+# every training request after the first from a stored response and the profile
+# would describe a cache read, not Drupal. automated_cron and update act on a
+# request (cron on a corpus older than three hours, a call to drupal.org).
+# `drush cron` builds the search index once, here.
+#
+# drush runs as `php -d memory_limit=-1 .../drush.php` because vendor/bin/drush is
+# a shell wrapper that cannot take a php flag, and the install needs more than the
+# 128M CLI default. The training run's built-in server has no php.ini and serves
+# every endpoint within that default. HOME points at a scratch directory for
+# drush's cache, removed afterwards.
+RUN --mount=type=cache,target=/composer-cache,id=php-pgo-composer-cache,sharing=locked,uid=33,gid=33 \
+    set -eux; \
+    apps="$(awk -v t="$CORPUS_TIER" '$1 == t { $1 = ""; print }' /corpus-src/tiers)"; \
+    case " $apps " in \
+      *" drupal "*) \
+        mkdir -p /corpus/drupal; \
+        cp "/corpus-src/drupal/${CORPUS_TIER}/composer.json" /corpus/drupal/composer.json; \
+        cp "/corpus-src/drupal/${CORPUS_TIER}/composer.lock" /corpus/drupal/composer.lock; \
+        cd /corpus/drupal; \
+        composer install --no-dev --no-progress --prefer-dist ;; \
+      *) echo "note: tier $CORPUS_TIER does not train drupal" ;; \
+    esac
+RUN --network=none set -eux; \
+    apps="$(awk -v t="$CORPUS_TIER" '$1 == t { $1 = ""; print }' /corpus-src/tiers)"; \
+    case " $apps " in \
+      *" drupal "*) \
+        export HOME=/tmp/drupal-home; \
+        mkdir -p "$HOME"; \
+        cd /corpus/drupal; \
+        drush() { php -d memory_limit=-1 vendor/drush/drush/drush.php "$@"; }; \
+        drush site:install standard \
+          --db-url=sqlite://localhost/sites/default/files/.ht.sqlite \
+          --site-name='PGO training corpus' --account-name=admin --account-pass='CorpusTraining1234' -y; \
+        drush en comment search search_node -y; \
+        drush pm:uninstall automated_cron update page_cache dynamic_page_cache -y; \
+        drush php:script /corpus-src/drupal/seed.php; \
+        drush cron; \
+        rm -rf "$HOME" ;; \
+      *) echo "note: tier $CORPUS_TIER does not train drupal" ;; \
+    esac
+
+# --- PrestaShop ----------------------------------------------------------------
+# The one app with no sqlite option: PrestaShop's ObjectModel/Db layer is
+# MySQL/MariaDB-only. mariadb-server is installed here as root purely to run the
+# CLI installer and let verify.sh prove the result; nothing it installs reaches a
+# runtime image, because the training run bind-mounts only /corpus and
+# /corpus-src. corpus/prestashop/db-up.sh and db-down.sh (also used by verify.sh
+# and tests/test-corpus-tiers.sh) expect mariadbd on PATH or in /usr/sbin.
+#
+# The app tree comes from the official prestashop/prestashop image for the tier
+# (ps-${TIER}, pinned by digest above), not a fetched zip.
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends mariadb-server mariadb-client \
+    && rm -rf /var/lib/apt/lists/*
+# mariadb-server ships auth_pam_tool setuid root for its PAM plugin. Nothing here
+# authenticates via PAM (db-up.sh runs mariadbd with --skip-grant-tables), so
+# every setuid/setgid bit is stripped, as in angie-docker and nginx-docker.
+RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} +
+COPY --from=ps-selected --chown=www-data:www-data /var/www/html /corpus/prestashop
+# db-up.sh and db-down.sh arrive at /corpus-src/prestashop/ via the
+# `COPY corpus/ /corpus-src/` above; www-data only needs to execute them.
+
+USER www-data
+# The installer's one network dependency: Install.php's installLanguages()
+# unconditionally calls Language::downloadXLFLanguagePack() for "en" too, with no
+# existing-cache check, and fails with "Cannot download language pack "en"" under
+# --network=none. The file that call would fetch -- the vendor's per-version
+# en-US translation pack, corpus.lock's `prestashop-lang` row, shape-checked by
+# fetch.sh because it is the one unpinned row -- is fetched ahead of the
+# network=none step instead. The corpus.lock header traces Language.php to show
+# why these two paths satisfy the call and why PrestaShop 1.6 (the 7.0 tier) needs
+# neither.
+RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked,uid=33,gid=33 \
+    set -eux; \
+    case "$CORPUS_TIER" in \
+      7.0) echo "note: php $CORPUS_TIER's prestashop (1.6.1.24) predates the language-pack download entirely -- nothing to prefetch" ;; \
+      *) \
+        mkdir -p /corpus/prestashop/translations; \
+        /corpus-src/fetch.sh "$CORPUS_TIER" prestashop-lang /corpus/prestashop/translations/sf-en-US.zip; \
+        : > /corpus/prestashop/translations/en.gzip; \
+        echo "ok: prefetched the en-US translation pack for tier $CORPUS_TIER" ;; \
+    esac
+# --network=none: with the translation pack above already fetched, the CLI
+# installer must not depend on the network at all. Any other outbound call has to
+# fail fast here instead of hanging the build on restrictive egress.
+#
+# --skip-grant-tables: the datadir only exists in a throwaway build layer or a
+# --rm test container and is bound to loopback only, so authentication would only
+# give the installer's two DB connections (see db-up.sh) and verify.sh a password
+# to agree on.
+#
+# The admin/ copy-up: admin/ has been untouched since the `COPY --from=ps-selected`
+# layers back, so it is a pure lower-layer directory. With redirect_dir=nofollow
+# (containerd/overlayfs snapshotters) overlayfs refuses to rename a directory that
+# was never copied up, and finalize()'s `@rename($admin, ...)` swallows the
+# failure and reports only "The admin folder could not be renamed". `cp -a` + `rm`
+# + `mv` in this same layer materializes admin/ before the installer renames it.
+#
+# install/ afterwards holds only install_version.php, which verify.sh and
+# test-corpus.sh read the version from. 9.2.0's CLI installer removes install/
+# itself and earlier ones leave it, so the file is set aside first and put back.
+RUN --network=none set -eux; \
+    cp -a /corpus/prestashop/admin /corpus/prestashop/admin.copyup; \
+    rm -rf /corpus/prestashop/admin; \
+    mv /corpus/prestashop/admin.copyup /corpus/prestashop/admin; \
+    mkdir -p /corpus/prestashop/db-data; \
+    mariadb-install-db --datadir=/corpus/prestashop/db-data \
+      --auth-root-authentication-method=normal --skip-test-db >/tmp/mariadb-install.log 2>&1 \
+      || { cat /tmp/mariadb-install.log; exit 1; }; \
+    /corpus-src/prestashop/db-up.sh /corpus/prestashop; \
+    mariadb --host=127.0.0.1 --port=13306 --protocol=tcp -e "CREATE DATABASE prestashop CHARACTER SET utf8mb4;"; \
+    rm -rf /corpus/prestashop/var/cache/*; \
+    cp /corpus/prestashop/install/install_version.php /tmp/install_version.php; \
+    DB_SERVER=127.0.0.1 DB_PORT=13306 DB_NAME=prestashop DB_USER=root DB_PASSWD= DB_PREFIX=ps_ \
+    PS_DOMAIN=127.0.0.1:18401 PS_FOLDER_INSTALL=install PS_FOLDER_ADMIN=admin \
+    PS_LANGUAGE=en PS_COUNTRY=us PS_ALL_LANGUAGES=0 PS_ENABLE_SSL=0 \
+    ADMIN_MAIL=admin@corpus.test ADMIN_PASSWD='CorpusTraining1234!' \
+      php -d memory_limit=-1 /corpus/prestashop/install/index_cli.php \
+        --domain="127.0.0.1:18401" --db_server="127.0.0.1:13306" \
+        --db_name=prestashop --db_user=root --db_password= --prefix=ps_ \
+        --firstname=John --lastname=Doe --password='CorpusTraining1234!' --email=admin@corpus.test \
+        --language=en --country=us --all_languages=0 --newsletter=0 --send_email=0 --ssl=0; \
+    mariadb --host=127.0.0.1 --port=13306 --protocol=tcp prestashop \
+      -e "UPDATE ps_configuration SET value=0 WHERE name='PS_REWRITING_SETTINGS';"; \
+    rm -rf /corpus/prestashop/var/cache/*; \
+    admin_dir="$(find /corpus/prestashop -maxdepth 1 -type d -name 'admin[0-9][0-9][0-9]*' -print -quit)"; \
+    [ -z "$admin_dir" ] || mv "$admin_dir" /corpus/prestashop/admin; \
+    rm -rf /corpus/prestashop/install; \
+    mkdir /corpus/prestashop/install; \
+    mv /tmp/install_version.php /corpus/prestashop/install/; \
+    /corpus-src/prestashop/db-down.sh
+
+# --- proof -------------------------------------------------------------------
+# network=none: verify.sh only talks to its own `php -S 127.0.0.1:...` over
+# loopback.
+#
+# The /tmp cleanup matters because /tmp is not a VOLUME: what db-up.sh and
+# verify.sh write there as www-data (ps-corpus-mysql.log/pid, the
+# mariadb-install-db log, verify-<app>.log, verify-body) is committed into the
+# image. tests/test-corpus.sh's mysql-row-count check runs as --user 0 against it,
+# and under a user-namespace-remapped root that cannot overwrite a www-data-owned
+# file, so mariadbd fails to start ("/tmp/ps-corpus-mysql.log: Permission denied")
+# and db-up.sh then prints the stale baked-in log as if current. Nothing under
+# /corpus or /corpus-src depends on these paths.
+RUN --network=none set -eux; \
+    /corpus-src/verify.sh /corpus /corpus-src /corpus/MANIFEST; \
+    rm -f /tmp/mariadb-install.log /tmp/ps-corpus-mysql.log /tmp/ps-corpus-mysql.pid \
+      /tmp/ps-corpus-mysql.runner.pid /tmp/ps-corpus-mysql.sock /tmp/verify-*.log /tmp/verify-body
+
+# Runtime uid 33 owns everything the training run touches. The second find is
+# the positive control for the first: /usr/local/bin/php is root-owned in every
+# flavor of this image, so if `find ! -uid 33` cannot see it, it could not have
+# seen a root-owned file under /corpus either and the first check proved nothing.
+RUN --network=none set -eu; \
+    bad="$(find /corpus ! -uid 33 -print -quit)"; \
+    [ -z "$bad" ] || { echo "FATAL: $bad is not owned by uid 33" >&2; exit 1; }; \
+    control="$(find /usr/local/bin/php ! -uid 33 -print -quit)"; \
+    [ -n "$control" ] || { echo "FATAL: '! -uid 33' matched nothing on a root-owned file -- the check above measures nothing" >&2; exit 1; }; \
+    echo "ok: /corpus is uid 33 only (control: $control)"
+
+CMD ["cat", "/corpus/MANIFEST"]

@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# Empty placeholder corpus for the bootstrap cli-builder targets only.
+#
+# The main Dockerfile's php-build stage mounts a corpus unconditionally, because a
+# conditional mount is not expressible and a placeholder for the pgo=false case
+# would split the fallback path from the real one. That holds for the release php
+# targets, which always build PGO=true against a real per-tier corpus. The
+# bootstrap targets exist only to produce the cli-builder image a tier's real
+# corpus is built from (the chicken-and-egg noted in tests/build-corpus.sh), so
+# they need something to satisfy the same mount without claiming to be a training
+# corpus.
+#
+# php/build.sh reads /corpus and /corpus-src only when PGO=true, and
+# docker-bake.hcl's php-cli-builder-bootstrap target always builds PGO=false.
+# That target also adds com.lotuswebagency.bootstrap=true and a
+# "-cli-builder-bootstrap" tag suffix; this image carries the same label so it
+# cannot be mistaken for a release image.
+ARG BASE_IMAGE=debian:trixie-slim
+FROM ${BASE_IMAGE}
+ARG INPUTS_HASH=""
+
+LABEL org.opencontainers.image.source="https://github.com/LotusWebAgency/php" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="Lotus Web Agency" \
+      org.opencontainers.image.authors="Vasilii Dementev https://vasiliidementev.com" \
+      org.opencontainers.image.title="lotuswebagency/php bootstrap placeholder corpus (not a real PGO corpus)" \
+      com.lotuswebagency.bootstrap="true" \
+      com.lotuswebagency.inputs-hash="${INPUTS_HASH}"
+
+RUN mkdir -p /corpus /corpus-src

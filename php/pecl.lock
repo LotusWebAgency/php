@@ -1,0 +1,80 @@
+# name        version   sha256                                                            php-min  php-max
+#
+# php-min / php-max are the range the package itself declares in its
+# package.xml, transcribed, with "-" for "not declared" and for the source=github
+# rows that have no package.xml at all.
+#
+# They exist because a floor set *too high* is invisible to every other check:
+# tests/smoke.sh derives the expected extension set from the same php/ext.json
+# constraints that drive the build, so raising a floor shrinks the expectation in
+# lockstep and the check still prints ok. scripts/test_ext_registry.py
+# cross-checks every matrix version against these columns, so a lock bump that
+# outruns its ext.json range fails the test suite instead of quietly deleting an
+# extension.
+# igbinary is on a release candidate on purpose: 3.2.17RC1 is the only release
+# that supports PHP 8.5 (its notes: "Support PHP 8.5"; 3.2.16 predates it).
+# Move to 3.2.17 stable once PECL publishes it.
+igbinary      3.2.17RC1 91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc  7.0.0    -
+redis         6.3.0     0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5  7.4.0    -
+# phpredis 6.x declares a PHP 7.4.0 floor, so 7.0-7.3 pin the last 5.x line
+# instead (same tarball for all four, hence the identical sha256 -- the rows
+# are per-version because that is how fetch-pecl.sh keys an override).
+redis@7.0     5.3.7     b958166ccda4f40bd17c6998f9e2239021ae644467cd8ad5c15def420aad65b0  7.0.0    -
+redis@7.1     5.3.7     b958166ccda4f40bd17c6998f9e2239021ae644467cd8ad5c15def420aad65b0  7.0.0    -
+redis@7.2     5.3.7     b958166ccda4f40bd17c6998f9e2239021ae644467cd8ad5c15def420aad65b0  7.0.0    -
+redis@7.3     5.3.7     b958166ccda4f40bd17c6998f9e2239021ae644467cd8ad5c15def420aad65b0  7.0.0    -
+memcached     3.4.0     c163434eb0da97c8f45c7ad41d979d381f8b81c49402b1b90b063987fb37972e  7.0.0    -
+apcu          5.1.28    ca9c1820810a168786f8048a4c3f8c9e3fd941407ad1553259fb2e30b5f057bf  7.0.0    -
+zstd          0.18.0    223d0f77eb5a5e73cf5e7a0652dd8fde7ffdcc843e7f30eeb3998283dec847b9  7.0      -
+imagick       3.8.1     3a3587c0a524c17d0dad9673a160b90cd776e836838474e173b549ed864352ee  5.6.0    -
+# Shared PECL extensions: the latest stable release on pecl.php.net when pinned;
+# sha256 computed locally against the fetched tarball (pecl.php.net does not
+# publish checksums to verify against).
+amqp          2.2.0     5ae624bd785e299523f6132c204bd562cc73066dd33a10a12aa96389f55a4de7  7.4.0    -
+mongodb       2.5.3     5e5369cd01b47543fb3244917eff17fa4c8c357b0866828d59c899b4e53e6665  8.1.0    8.99.99
+msgpack       3.0.1     e30be355ab79aaea4568692fbd6073fd7c7f50ea8d3cf12edce40fc0c921d868  7.0.0    -
+pcov          1.0.12    23255c8c9335a9636ccb743f5302436a97a582a0bbde9869485be911bbc15da8  7.1.0    -
+protobuf      5.36.2    f0a17c67de29df0fb0e5215a381df9b155125e1ace6252dd617bf16b4194dd5b  8.2.0    -
+ssh2          1.5.0     a943427fae39a5503c813179018ae6c500323c8c9fb434e1a9a665fb32a4d7b4  8.0.0    -
+swoole        6.2.3     21dfa1c4a4a09f4d1cb4b154f7defdc91fbabafc8d44a77f8f618b9742c67304  8.2.0    8.5.99
+uuid          1.3.0     b7af055e2c409622f8c5e6242d1c526c00e011a93c39b10ca28040b908da3f37  7.0.0    -
+xdebug        3.5.3     f073de91bea046106abf4d6071c963ea71e58571df6ce58948ceca89d121cb2d  8.0.0    8.5.99
+yaml          2.3.0     bc8404807a3a4dc896b310af21a7f8063aa238424ff77f27eb6ffa88b5874b8a  7.1.0    -
+brotli        0.21.0    97a69edd4f71046b1bd285d914741a60478e69a1db785c2b42aed940ab1fa18f  7.0      -
+event         3.1.6     5b74554c6370aae8c284c8110fe27e071d3f663953c3eb762ffc429b0a3c83a2  5.4.0    -
+# mcrypt: ext.json constrains it to php<8.0. 7.2+ builds this PECL package; 7.0
+# and 7.1 still carry ext/mcrypt in php-src, so ext.json overrides build that.
+mcrypt        1.0.9     2a9ef0817d3bf677f6d7baf8e325629a2758974735d8abad6566384788d424a5  7.2.0    8.6.0
+# Era-appropriate pins for shared extensions whose current release dropped
+# support for a PHP this project still builds. Same mechanism as redis above,
+# honored by build-shared-ext.sh too. Every version below is the newest release
+# whose own package.xml declares support for that PHP.
+xdebug@7.0    2.6.1     dae691d6c052073b886e0c6e1306a707bca9fd18a1e3485384ef6c4aacf1bd77  7.0.0    -
+xdebug@7.1    2.9.8     f555b6cc58d96c9965af942d22e0f1818b7a477a410c76b1ab0eebe85a762f8a  7.1.0    7.4.99
+xdebug@7.2    3.1.6     554eca0b4d5b7b93cb2258fab0b0bd84cc8721e74322a2255c14e137cbcad5d2  7.2.0    8.1.99
+xdebug@7.3    3.1.6     554eca0b4d5b7b93cb2258fab0b0bd84cc8721e74322a2255c14e137cbcad5d2  7.2.0    8.1.99
+xdebug@7.4    3.1.6     554eca0b4d5b7b93cb2258fab0b0bd84cc8721e74322a2255c14e137cbcad5d2  7.2.0    8.1.99
+yaml@7.0      2.0.4     9786b0386e648f12cc18a038358bd57bee4906e350a2e9ab776d6a5f18fc6680  7.0.0    -
+amqp@7.0      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f331c2f08  5.6.0    -
+amqp@7.1      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f331c2f08  5.6.0    -
+amqp@7.2      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f331c2f08  5.6.0    -
+amqp@7.3      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f331c2f08  5.6.0    -
+ssh2@7.0      1.3.1     9093a1f8d24dc65836027b0e239c50de8d5eaebf8396bc3331fdd38c5d69afd9  7.0.0    -
+ssh2@7.1      1.3.1     9093a1f8d24dc65836027b0e239c50de8d5eaebf8396bc3331fdd38c5d69afd9  7.0.0    -
+ssh2@7.2      1.3.1     9093a1f8d24dc65836027b0e239c50de8d5eaebf8396bc3331fdd38c5d69afd9  7.0.0    -
+ssh2@7.3      1.3.1     9093a1f8d24dc65836027b0e239c50de8d5eaebf8396bc3331fdd38c5d69afd9  7.0.0    -
+ssh2@7.4      1.3.1     9093a1f8d24dc65836027b0e239c50de8d5eaebf8396bc3331fdd38c5d69afd9  7.0.0    -
+# source=github entries. No pecl.php.net version here -- the tag is pinned in
+# ext.json's url, and this row carries only the sha256 of that exact tarball
+# (computed locally against the fetched tarball, as above).
+#
+# lz4 is GitHub-only: pecl.php.net has never hosted a package named "lz4"
+# (verified against https://pecl.php.net/rest/p/packages.xml and a 404 on
+# allreleases.xml). The real extension is kjdev/php-ext-lz4, the same class of
+# problem as snuffleupagus below, so ext.json lists it as source=github.
+lz4           0.7.1     e5913a346c65ed5d3d487398332a66629db2c863e02dfe0e949f653471853fcc  -        -
+# snuffleupagus v0.14.0: built and smoke-tested on every PHP from 7.2 to 8.5.
+# Bumping it means re-syncing conf/snuffleupagus/*.rules against the new tag's
+# config/default.rules first (see the header of default.rules); the registry
+# test fails while the rules still name the old tag.
+snuffleupagus 0.14.0    080cf7e24d15a8650e271837030fca546e627c7a4c7317710c683282fdcb71c6  -        -
