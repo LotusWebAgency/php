@@ -103,7 +103,7 @@ while IFS=$'\t' read -r tier _release builder tag _versions; do
     builder="$bootstrap_tag"
   else
     echo "=== tier $tier: neither $builder nor $bootstrap_tag exist -- bootstrapping $bootstrap_tag"
-    if ! (cd "$ROOT" && RETRY_ATTEMPTS=5 "$ROOT/ci/retry.sh" docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$bootstrap_target" \
+    if ! (cd "$ROOT" && RETRY_KIND=registry,apt,http RETRY_ATTEMPTS=5 "$ROOT/ci/retry.sh" docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$bootstrap_target" \
            --set '*.platform='"$PLATFORM" --load); then
       echo "=== tier $tier -> $tag: FAIL -- bootstrap build of $bootstrap_tag failed" >&2
       results+=("$tier"$'\t'"FAIL"$'\t'"bootstrap build of $bootstrap_tag failed")
@@ -121,7 +121,7 @@ while IFS=$'\t' read -r tier _release builder tag _versions; do
   fi
 
   echo "=== tier $tier -> $tag (from $builder)"
-  if RETRY_ATTEMPTS=5 "$ROOT/ci/retry.sh" docker build "${NETWORK_ARGS[@]}" --platform "$PLATFORM" -f "${ROOT}/php/pgo/Dockerfile.corpus" \
+  if RETRY_KIND=registry,apt,http RETRY_ATTEMPTS=5 "$ROOT/ci/retry.sh" docker build "${NETWORK_ARGS[@]}" --platform "$PLATFORM" -f "${ROOT}/php/pgo/Dockerfile.corpus" \
        --build-arg "BUILDER_IMAGE=${builder}" --build-arg "TIER=${tier}" \
        --build-arg "INPUTS_HASH=${INPUTS_HASH}" \
        -t "$tag" "${ROOT}/php/pgo"; then
