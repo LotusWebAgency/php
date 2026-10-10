@@ -33,30 +33,60 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 image_of() { echo "lotuswebagency/php:${1}-fpm"; }
 
+# start_database <corpus-image> -> sets CORPUS_DB to a sidecar container;
+# stop_database removes it.
+#
+# Every tier's corpus includes PrestaShop, whose database is mariadbd, not a
+# bundled sqlite file (php/pgo/corpus/prestashop/db-up.sh). The runtime -fpm
+# images this replays against do not ship mariadb-server, but the tier's corpus
+# image does and is already local, so mariadbd runs there, started by the corpus
+# image's own db-up.sh against its own datadir, on --network none. A fresh
+# sidecar per replay also gives every replay the datadir as built: set-host.sh
+# rewrites the shop URL in it.
+CORPUS_DB=""
+stop_database() {
+  [ -z "$CORPUS_DB" ] || docker rm -f "$CORPUS_DB" >/dev/null 2>&1 || true
+  CORPUS_DB=""
+}
+trap stop_database EXIT
+
+start_database() {
+  local _
+  CORPUS_DB="$(docker run -d --rm --init --pull never --network none --entrypoint sh "$1" -c '
+    /corpus-src/prestashop/db-up.sh /corpus/prestashop >/tmp/db-up.log 2>&1 || { cat /tmp/db-up.log >&2; exit 1; }
+    exec sleep 3600
+  ')"
+  for _ in $(seq 1 120); do
+    if docker exec "$CORPUS_DB" mysqladmin --host=127.0.0.1 --port=13306 --protocol=tcp ping >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$(docker inspect -f '{{.State.Running}}' "$CORPUS_DB" 2>/dev/null || echo false)" = true ] || break
+    sleep 0.5
+  done
+  docker logs "$CORPUS_DB" 2>&1 | tail -30 >&2 || true
+  fail "the sidecar database from $1 did not come up"
+}
+
 # run_corpus <php-version> <corpus-volume> <src-volume> <tier> -> exit status, output on stdout
 #
-# --user 0 --network host, unconditionally: every tier's corpus includes
-# PrestaShop, whose database is mariadbd, not a bundled sqlite file
-# (php/pgo/corpus/prestashop/db-up.sh). The runtime -fpm images this replays
-# against do not ship mariadb-server -- verify.sh's own FATAL if it is missing
-# would otherwise fail every tier on that one app -- so it is installed fresh
-# before each replay, the way Dockerfile.corpus installs it to build the corpus.
-# --network host is for the apt-get (the default bridge network may have no
-# outbound); --user 0 is required to install packages. verify.sh does not care
-# which uid runs it, and the corpus volume's files stay uid 33 since root never
+# The replay joins the sidecar's network namespace (--network container:), so
+# 127.0.0.1:13306 reaches the database and nothing else is reachable at all;
+# --pull never keeps the daemon from fetching anything. Two shims from
+# tests/corpus-db-shim/ cover what db-up.sh and db-down.sh expect of a database
+# host and the runtime image lacks: mysqladmin, and a mariadbd that only fails
+# loudly when the sidecar is not answering.
+# --user 0 only because a fresh named volume is root-owned and verify.sh writes
+# beside the corpus; the corpus volume's files stay uid 33 since root never
 # chowns anything.
 #
 # -e CORPUS_TIER: verify.sh serves the apps the tier declares in corpus/tiers,
 # and only the corpus image carries that variable, not these runtime images.
 run_corpus() {
-  docker run --rm --user 0 --network host --entrypoint sh \
+  docker run --rm --user 0 --pull never --network "container:${CORPUS_DB}" --entrypoint sh \
     -e "CORPUS_TIER=${4}" -v "${2}:/corpus" -v "${3}:/corpus-src" \
-    "$(image_of "$1")" -c '
-      apt-get update -qq >/tmp/apt.log 2>&1 \
-        && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends mariadb-server >>/tmp/apt.log 2>&1 \
-        || { echo "FATAL: could not install mariadb-server for the replay:" >&2; tail -30 /tmp/apt.log >&2; exit 1; }
-      exec /corpus-src/verify.sh /corpus /corpus-src /tmp/MANIFEST
-    ' 2>&1
+    -v "${HERE}/corpus-db-shim/mysqladmin.sh:/usr/local/bin/mysqladmin:ro" \
+    -v "${HERE}/corpus-db-shim/mariadbd.sh:/usr/local/bin/mariadbd:ro" \
+    "$(image_of "$1")" -c 'exec /corpus-src/verify.sh /corpus /corpus-src /tmp/MANIFEST' 2>&1
 }
 
 while IFS=$'\t' read -r tier _release _builder tag versions; do
@@ -97,7 +127,11 @@ while IFS=$'\t' read -r tier _release _builder tag versions; do
       fi
       fail "$(image_of "$version") has not been built"
     fi
-    if out="$(run_corpus "$version" "$corpus_vol" "$src_vol" "$tier")"; then
+    start_database "$tag"
+    rc=0
+    out="$(run_corpus "$version" "$corpus_vol" "$src_vol" "$tier")" || rc=$?
+    stop_database
+    if [ "$rc" -eq 0 ]; then
       # verify.sh prints the manifest it just produced after a "=== MANIFEST"
       # marker; that is the observed set, built from what actually answered 200
       # with the expected content on *this* php.
@@ -115,7 +149,11 @@ $(diff <(echo "$built_manifest") <(echo "$fresh") || true)"
 
   control="$(python3 "${ROOT}/scripts/pgo_tiers.py" control-of "$tier")"
   if [ -n "$control" ] && docker image inspect "$(image_of "$control")" >/dev/null 2>&1; then
-    if out="$(run_corpus "$control" "$corpus_vol" "$src_vol" "$tier")"; then
+    start_database "$tag"
+    rc=0
+    out="$(run_corpus "$control" "$corpus_vol" "$src_vol" "$tier")" || rc=$?
+    stop_database
+    if [ "$rc" -eq 0 ]; then
       echo "$out" | tail -10 >&2
       fail "the tier $tier corpus ran clean on php $control, which is below its floor -- this check cannot distinguish a corpus that fits from one that does not"
     fi
