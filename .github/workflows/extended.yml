@@ -431,8 +431,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Everything the benchmark needs from a registry is fetched here: our
+      # cli images and the official php images they are compared against.
       - name: Pull
-        run: ci/extended-run.sh pull pull --no-corpus
+        run: |
+          ci/extended-run.sh pull pull --no-corpus
+          ci/extended-run.sh bench-prepare bench --prepare
 
       - name: bench
         run: ci/extended-run.sh bench bench

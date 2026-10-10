@@ -5,6 +5,7 @@
 # the same.
 #
 #   tests/bench.sh <our-image> <official-image|auto> <php-version> [--record]
+#   tests/bench.sh <our-image> <official-image|auto> <php-version> --prepare
 #
 # <official-image> may be the literal string "auto": bench.sh then reads
 # matrix.json's pinned release for <php-version>, derives the official flavor
@@ -13,7 +14,14 @@
 # pulls php:<release>-<flavor>. If that tag does not exist on Docker Hub, it
 # falls back to the floating php:<major.minor>-<flavor> tag and prints both
 # versions in the table header instead of silently comparing against a
-# different patch release.
+# different patch release. The fallback is taken only when the registry says the
+# tag does not exist; a registry that stays unreadable through ci/retry.sh's
+# attempts fails the run instead of benchmarking a different release.
+#
+# --prepare is the network half and nothing else: it resolves and pulls the
+# official image (both under ci/retry.sh), then exits. A run that follows finds
+# the pinned image on the daemon and fetches nothing; without --prepare the
+# official image is pulled here only when it is not on the daemon yet.
 #
 # Identical effective configuration. `-d opcache.enable_cli=1` on the official
 # image loads nothing below PHP 8.5 (opcache is a shared zend_extension there,
@@ -86,16 +94,19 @@
 # set any of the four.
 set -euo pipefail
 
-OURS="${1:?usage: bench.sh <our-image> <official-image|auto> <php-version> [--record]}"
-THEIRS_ARG="${2:?usage: bench.sh <our-image> <official-image|auto> <php-version> [--record]}"
-VERSION="${3:?usage: bench.sh <our-image> <official-image|auto> <php-version> [--record]}"
+OURS="${1:?usage: bench.sh <our-image> <official-image|auto> <php-version> [--record|--prepare]}"
+THEIRS_ARG="${2:?usage: bench.sh <our-image> <official-image|auto> <php-version> [--record|--prepare]}"
+VERSION="${3:?usage: bench.sh <our-image> <official-image|auto> <php-version> [--record|--prepare]}"
 RECORD=0
+PREPARE=0
 for arg in "${@:4}"; do
   case "$arg" in
     --record) RECORD=1 ;;
+    --prepare) PREPARE=1 ;;
     *) echo "FAIL: unrecognized argument '$arg'" >&2; exit 1 ;;
   esac
 done
+[ "$RECORD$PREPARE" != 11 ] || { echo "FAIL: --record and --prepare are exclusive" >&2; exit 1; }
 
 RUNS="${RUNS:-7}"
 ITER="${ITER:-200}"
@@ -148,6 +159,24 @@ print(m["versions"][v]["release"])
 ' "$ROOT/matrix.json" "$1"
 }
 
+RETRY="$ROOT/ci/retry.sh"
+
+registry_has() {  # registry_has <ref> -> 0 when the registry has it, 1 when it says it does not
+  local err rc=0
+  err="$(mktemp)"
+  "$RETRY" docker manifest inspect "$1" >/dev/null 2>"$err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if grep -Eiq 'no such manifest|manifest unknown|not found' "$err"; then
+      rm -f "$err"
+      return 1
+    fi
+    cat "$err" >&2
+    rm -f "$err"
+    fail "cannot tell whether $1 exists: the registry could not be read"
+  fi
+  rm -f "$err"
+}
+
 THEIRS="$THEIRS_ARG"
 OFFICIAL_VERSION_NOTE=""
 if [ "$THEIRS_ARG" = "auto" ]; then
@@ -157,7 +186,9 @@ if [ "$THEIRS_ARG" = "auto" ]; then
   fi
   release="$(matrix_release "$VERSION")"
   pinned_tag="php:${release}-${off_flavor}"
-  if docker manifest inspect "$pinned_tag" >/dev/null 2>&1; then
+  # A pinned image already on the daemon (--prepare put it there) settles it
+  # without asking the registry.
+  if { [ "$PREPARE" -eq 0 ] && docker image inspect "$pinned_tag" >/dev/null 2>&1; } || registry_has "$pinned_tag"; then
     THEIRS="$pinned_tag"
   else
     major_minor="${VERSION}"
@@ -168,8 +199,14 @@ if [ "$THEIRS_ARG" = "auto" ]; then
   fi
 fi
 
-echo "pulling $THEIRS..." >&2
-docker pull "$THEIRS" >/dev/null
+if [ "$PREPARE" -eq 1 ] || ! docker image inspect "$THEIRS" >/dev/null 2>&1; then
+  echo "pulling $THEIRS..." >&2
+  "$RETRY" docker pull "$THEIRS" >/dev/null
+fi
+if [ "$PREPARE" -eq 1 ]; then
+  echo "ok: $THEIRS is on the daemon" >&2
+  exit 0
+fi
 
 # Cross-check even an explicitly-supplied official image against matrix.json's
 # pinned release: a caller who hand-resolved the tag can still get it wrong, and
