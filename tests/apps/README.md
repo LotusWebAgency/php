@@ -13,6 +13,7 @@ people deploy on it, on the data they already have.
 ./tests/apps/run-matrix.sh --stock                     # baseline on the stock image line
 ./tests/apps/run-matrix.sh --jobs 4                    # every built target
 ./tests/apps/run-matrix.sh --list --only 8.4           # the planned cells, nothing touched
+./tests/apps/run-matrix.sh --prepare-only --only 8.4   # pull service images and fixtures, run nothing
 ./tests/apps/run.sh lotuswebagency/php:8.5-fpm --app wordpress --keep   # leave it up to poke at
 ```
 
@@ -24,7 +25,7 @@ people deploy on it, on the data they already have.
 | `appsets.py` | Reads `sets` and answers every question about it (`check`, `cells`, `sets`, `rows`, `field`); lib.sh, run.sh, run-matrix.sh, `tests/extended.sh` and `ci/extended-*.sh` all ask it, so the flavor rules live in `sets` and this one file. |
 | `apps.lock` | Every fetched source, pinned by version and sha256 (images by digest), except the PrestaShop translation packs, which fetch the latest export and are checked for shape. |
 | `build-fixture.sh` | Builds `lotuswebagency/php-apptest:<app>-<set>`: MariaDB with the populated datadir, plus the installed app tree at `/srv/app`. |
-| `compose.yml` | One test stack: the fixture as the database, a fresh copy of its `/srv/app` in a named volume, Redis, Memcached, nginx, and the image under test as `php` (fpm) or `cli`. |
+| `compose.yml` | One test stack: the fixture as the database, a fresh copy of its `/srv/app` in a named volume, Redis, Memcached, nginx, and the image under test as `php` (fpm) or `cli`. Every service has `pull_policy: never` and sits on an `internal: true` network; only nginx also joins a normal one, for its published port. See [Offline runs](#offline-runs). |
 | `run.sh` | Runs one image's suites, for every cell of `sets` that image's PHP version, flavor and variant has; `run-matrix.sh` fans that out across the matrix. |
 | `<app>/fixture/` | The recipe: `build.sh` (runs in the builder container), overlays, seeders, composer locks, optional `host-prep.sh`. |
 | `<app>/suite/` | `web.py` (HTTP, fpm images), `cli.sh` (cli images), `builder.sh` (cli-builder images, then `cli.sh`). |
@@ -144,6 +145,29 @@ connect to nginx's published port on 127.0.0.1 and send that Host, mapping
 redirects back onto the port, so no URL is rewritten per run. To browse a
 `--keep` stack, point `apptest.test` at 127.0.0.1 and use the printed port.
 
+## Offline runs
+
+Everything a run needs is fetched before the first suite starts, so a suite
+never depends on the internet:
+
+- `run-matrix.sh` begins with a prepare phase: the nginx, Redis and Memcached
+  images (pinned in `lib.sh`) are pulled under `ci/retry.sh`, then the fixtures
+  are pulled or built. `--prepare-only` stops there; it covers every planned
+  cell and leaves the php images to `tests/extended.sh pull`. A lone `run.sh`
+  pulls the service images itself.
+- The stack never pulls (`pull_policy: never`) and runs on a network with no
+  route out. DNS for an outside host fails at once; the services reach each
+  other by name. Applications that call home (WordPress update checks) are
+  already stopped by `WP_HTTP_BLOCK_EXTERNAL`; anything else that tries fails
+  the suite instead of passing quietly.
+- The builder suites run composer with `COMPOSER_DISABLE_NETWORK=1` from the
+  cache baked into the fixture (`/srv/app/.apptest/composer-cache`, copied to a
+  private writable directory first) and use the baked phars. WordPress's
+  `make-pot` calls skip the theme.json and block.json schema downloads.
+- `ci/retry.sh` is mounted read-only as `/usr/local/bin/retry` in the `php` and
+  `cli` containers, for the one fetch that can still happen there
+  (`install-composer.sh` on a stock image without the baked phars).
+
 ## Fixtures from a registry
 
 Building every fixture takes a while and the result is the same on
@@ -171,18 +195,34 @@ APPTEST_FIXTURE_REPO=ghcr.io/lotuswebagency/php/apptest ./tests/apps/run.sh lotu
 - **Pull before build.** `build-fixture.sh`, and `run.sh` before it refuses or
   rebuilds, pull a fixture that is not current locally and use it only if its
   `com.lotuswebagency.apptest-hash` label equals `apptest_recipe_hash` for
-  this tree and it is the daemon's architecture. A missing, stale or
-  unpullable one is reported (`note: ...`) and built instead. `--force`
-  skips the pull; `run.sh --no-build` still refuses what the pull did not
-  make current.
+  this tree and it is the daemon's architecture. The pull runs under
+  `ci/retry.sh`. A missing or stale one is reported (`note: ...`) and built
+  instead; so is one that stays unpullable for another reason, except under CI
+  (`CI=true`) or `APPTEST_NO_BUILD=1` (`run.sh --no-build` sets it), where that
+  fails with the pull's own error instead of turning an outage into a rebuild.
+  `--force` skips the pull; `run.sh --no-build` still refuses what the pull did
+  not make current.
 - **`build-fixture.sh --push`** pushes every fixture it ends with, built here,
   pulled or already current, and refuses when the repository is a local name
   rather than a registry (a push to `lotuswebagency/php-apptest` would go to
   Docker Hub). Run it once per architecture to publish both.
-- The recipe hash covers `build-fixture.sh`, `fetch.sh`, `install-composer.sh`
-  and `<app>/fixture/`, so an edit to the first three makes every published
-  fixture stale and one under `<app>/fixture/` that app's. `lib.sh`, `run.sh`,
-  the suites and the nginx configs are outside it.
+- The recipe hash covers `build-fixture.sh`, `fetch.sh`, `install-composer.sh`,
+  `bake-composer-cache.sh`, `<app>/fixture/` and WordPress's
+  `suite/builder/<set>/` (its composer lock is baked, below), so an edit to the
+  shared scripts makes every published fixture stale and one under
+  `<app>/fixture/` that app's. `lib.sh`, `run.sh`, the other suite files, the
+  nginx configs and `ci/retry.sh` are outside it.
+- **Baked composer inputs.** A fixture carries what the builder suites would
+  otherwise download: the pinned `composer` and `composer-lts` phars in
+  `/srv/app/.apptest/bin` (`install-composer.sh` copies from there and downloads
+  only when they are absent), and a composer cache in
+  `/srv/app/.apptest/composer-cache` filled from the lock each suite installs
+  (Laravel's dev and `--no-dev` installs, WordPress's `suite/builder/<set>` lock,
+  PrestaShop's release lock with `--no-dev`; PrestaShop 1.6 has none). The build
+  repeats those installs with `COMPOSER_DISABLE_NETWORK=1`
+  (`bake-composer-cache.sh`), so a cache that is not enough fails the build.
+- Every download in a fixture build goes through `ci/retry.sh`, which
+  `build-fixture.sh` mounts into the builder container as `/usr/local/bin/retry`.
 
 PrestaShop 1.6 to 8.2 are the official GitHub release zips, pinned by sha256
 (`prestashop-zip` rows; the release asset is a zip in a zip, which

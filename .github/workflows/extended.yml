@@ -304,8 +304,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: ci/extended-run.sh ext-builder ext-builder
 
-      - name: apps
+      # The service images and the fixtures, fetched under retry; the app
+      # stacks start with pull_policy: never on a network without a route out.
+      - name: Prepare apps
+        id: prepare_apps
         if: ${{ !cancelled() && needs.plan.outputs.apps == 'true' && needs.fixtures.result == 'success' }}
+        run: ci/extended-run.sh apps-prepare apps-prepare
+
+      - name: apps
+        if: ${{ !cancelled() && needs.plan.outputs.apps == 'true' && needs.fixtures.result == 'success' && steps.prepare_apps.outcome == 'success' }}
         run: ci/extended-run.sh apps apps
 
       - name: Upload logs

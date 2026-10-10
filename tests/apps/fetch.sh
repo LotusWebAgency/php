@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Fetch one pinned source from apps.lock and verify its sha256. Runs inside
 # the fixture builder container (build-fixture.sh mounts tests/apps at
-# /apptest and a download cache at /cache), so it only relies on what every
-# stock image has: bash, curl, sha256sum.
+# /apptest, a download cache at /cache and ci/retry.sh as `retry`), so it only
+# relies on what every stock image has: bash, curl, sha256sum. Downloads go
+# through `retry` (RETRY_KIND=http) where it is mounted.
 #
 #   fetch.sh <name> <set> <dest>    fetch and verify ("-" rows match any set)
 #   fetch.sh --pin <name> <set>     print the pinned version and exit
@@ -13,6 +14,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCK="${APPTEST_LOCK:-$HERE/apps.lock}"
 CACHE="${APPTEST_CACHE:-/cache}"
+
+download() {
+  if command -v retry >/dev/null 2>&1; then RETRY_KIND=http retry curl "$@"; else curl "$@"; fi
+}
 
 lookup() {
   local want_name="$1" want_set="$2" name set version sha url hits=0 out=""
@@ -45,7 +50,7 @@ case "$url" in docker://*) echo "FATAL: $name/$set is an image pin ($url) -- the
 if [ "$sha" = latest ]; then
   [ "$name" = prestashop-lang ] || { echo "FATAL: $name/$set: only prestashop-lang rows may be 'latest', everything else pins a sha256" >&2; exit 1; }
   echo "=== fetching $name $version (latest)"
-  curl -fsSL --retry 5 --retry-delay 3 --connect-timeout 20 -o "$dest.part" "$url"
+  download -fsSL --connect-timeout 20 -o "$dest.part" "$url"
   size="$(stat -c %s "$dest.part")"
   [ "$size" -le 16777216 ] || { rm -f "$dest.part"; echo "FATAL: $name $version is $size bytes, a translation pack is well under 16 MiB" >&2; exit 1; }
   php -r '
@@ -73,7 +78,7 @@ if [ -f "$cached" ] && echo "$sha  $cached" | sha256sum -c - >/dev/null 2>&1; th
 else
   echo "=== fetching $name $version"
   tmp="$cached.part.$$"
-  curl -fsSL --retry 5 --retry-delay 3 --connect-timeout 20 -o "$tmp" "$url"
+  download -fsSL --connect-timeout 20 -o "$tmp" "$url"
   got="$(sha256sum "$tmp" | cut -d' ' -f1)"
   if [ "$got" != "$sha" ]; then
     rm -f "$tmp"

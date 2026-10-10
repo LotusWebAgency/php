@@ -40,6 +40,13 @@ mkdir -p "$APP/.apptest"
 # Composer, for the builder suite's lock replay; the release ships composer.lock only.
 # (1.6 has no composer at all: no lock, no vendor/, the classes are its own autoloader's.)
 [ "$SET" = 1.6 ] || bash /apptest/fetch.sh prestashop-composer "$SET" "$APP/composer.json"
+# Both pinned phars are baked into the tree for the builder suite, and so is the
+# cache for its --no-dev install from the release lock: the suite needs no network for them.
+bash /apptest/install-composer.sh --bake "$APP/.apptest/bin"
+if [ "$SET" != 1.6 ]; then
+  bash /apptest/install-composer.sh /usr/local/bin/composer
+  bash /apptest/bake-composer-cache.sh "$APP/.apptest/composer-cache" "$APP" --no-dev
+fi
 
 step "en-US pack"
 # Install.php::installLanguages() downloads the en-US pack unconditionally;

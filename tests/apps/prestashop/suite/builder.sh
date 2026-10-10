@@ -10,9 +10,11 @@ cd /srv/app || exit 1
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-export COMPOSER_HOME="$work/home" COMPOSER_CACHE_DIR="${COMPOSER_CACHE_DIR:-/composer-cache}" COMPOSER_NO_INTERACTION=1 COMPOSER_ALLOW_SUPERUSER=1
-[ -w "$COMPOSER_CACHE_DIR" ] || export COMPOSER_CACHE_DIR="$work/cache"
-mkdir -p "$COMPOSER_HOME"
+# Composer runs offline from the cache the fixture baked for the release lock
+# (a+rX, root-owned, so a private writable copy; 1.6 has none).
+export COMPOSER_HOME="$work/home" COMPOSER_CACHE_DIR="$work/cache" COMPOSER_DISABLE_NETWORK=1 COMPOSER_NO_INTERACTION=1 COMPOSER_ALLOW_SUPERUSER=1
+mkdir -p "$COMPOSER_HOME" "$COMPOSER_CACHE_DIR"
+[ ! -d /srv/app/.apptest/composer-cache ] || cp -a /srv/app/.apptest/composer-cache/. "$COMPOSER_CACHE_DIR/"
 
 # Only the stock cli-builder images carry composer; on the other stock images (and there only) the suite fetches
 # the pinned one, like the fixture build does.

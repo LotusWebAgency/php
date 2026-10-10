@@ -56,6 +56,28 @@ APPTEST_HOST=apptest.test
 
 apptest_die() { echo "FAIL: $*" >&2; exit 1; }
 
+# Every fetch from a registry or the network goes through ci/retry.sh, which
+# retries only what looks transient (see its header for the kinds).
+APPTEST_RETRY="$APPTEST_REPO/ci/retry.sh"
+# apptest_retry <kind> <command...>
+apptest_retry() { local kind="$1"; shift; RETRY_KIND="$kind" "$APPTEST_RETRY" "$@"; }
+
+# apptest_ensure_image <ref> -> the image is local afterwards; pulled under
+# retry only when it is not. Callers then run it with --pull never.
+apptest_ensure_image() {
+  docker image inspect "$1" >/dev/null 2>&1 || apptest_retry registry docker pull -q "$1" >/dev/null
+}
+
+# apptest_ensure_service_images -> the images compose.yml runs besides the
+# fixture and the image under test are local afterwards. The stack starts with
+# pull_policy: never, so nothing is fetched while a suite runs.
+apptest_ensure_service_images() {
+  local service
+  for service in web redis memcached; do
+    apptest_ensure_image "$(apptest_service_image "$service")"
+  done
+}
+
 # Everything about which app release runs where is tests/apps/sets, read
 # through appsets.py; nothing here re-derives its rules.
 apptest_appsets() { python3 "$APPTEST_ROOT/appsets.py" "$@"; }
@@ -124,6 +146,10 @@ apptest_builder_image() {
 # out: changing a test must not force a rebuild of the data it tests.
 apptest_recipe_hash() {
   local app="$1" set="$2"
+  local -a paths=(build-fixture.sh fetch.sh install-composer.sh bake-composer-cache.sh "$app/fixture")
+  # The builder suite's composer lock is baked into the fixture's composer
+  # cache, so it decides the contents too.
+  [ ! -d "$APPTEST_ROOT/$app/suite/builder/$set" ] || paths+=("$app/suite/builder/$set")
   {
     # Only the PHP the fixture is built on (the row's lowest) decides its
     # contents; the row's other PHP versions are where it is tested, and
@@ -132,8 +158,7 @@ apptest_recipe_hash() {
     printf 'db %s\n' "$APPTEST_DB_IMAGE" "${APPTEST_DB_ARGS[@]}"
     printf 'builder %s\n' "$(apptest_builder_image "$app" "$set")"
     apptest_lock_rows "$app" "$set"
-    (cd "$APPTEST_ROOT" && find build-fixture.sh fetch.sh install-composer.sh "$app/fixture" -type f -print0 \
-      | LC_ALL=C sort -z | xargs -0 sha256sum)
+    (cd "$APPTEST_ROOT" && find "${paths[@]}" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum)
   } | sha256sum | cut -d' ' -f1
 }
 
@@ -188,16 +213,22 @@ apptest_fixture_current() {
 # pulled image counts only when its apptest-hash label is this tree's recipe
 # hash and it is this daemon's architecture; anything else is reported, removed
 # again (so it cannot be mistaken for a current fixture later), and the caller
-# builds. Not a registry repository: returns 1 at once.
+# builds (1). The pull itself runs under retry. A pull that still fails for a
+# reason other than the tag not existing returns 2: the registry is unreachable,
+# not the fixture absent, and apptest_pull_failure_is_fatal says whether the
+# caller may build instead. Not a registry repository: returns 1 at once.
 apptest_fixture_try_pull() {
   local app="$1" set="$2" tag want have arch out
   apptest_repo_is_registry || return 1
   tag="$(apptest_fixture_tag "$app" "$set")"
   want="$(apptest_recipe_hash "$app" "$set")"
   ! apptest_fixture_current "$tag" "$want" || return 0
-  if ! out="$(docker pull -q "$tag" 2>&1)"; then
+  if ! out="$(apptest_retry registry docker pull -q "$tag" 2>&1)"; then
     echo "note: $tag was not pulled ($(printf '%s' "$out" | tail -1 | cut -c1-120))" >&2
-    return 1
+    if printf '%s' "$out" | grep -Eiq 'manifest unknown|not found|name unknown|no such manifest|no matching manifest|repository does not exist'; then
+      return 1
+    fi
+    return 2
   fi
   have="$(apptest_label "$tag" com.lotuswebagency.apptest-hash)"
   arch="$(docker image inspect --format '{{.Architecture}}' "$tag")"
@@ -214,11 +245,17 @@ apptest_fixture_try_pull() {
   echo "ok: pulled $tag (apptest-hash $want)"
 }
 
+# apptest_pull_failure_is_fatal -> true where a fixture that could not be
+# pulled must fail the run instead of being rebuilt: CI, and anything that set
+# APPTEST_NO_BUILD=1 (run.sh --no-build). A full rebuild after a registry
+# outage would hide it behind a half-hour build that CI never meant to do.
+apptest_pull_failure_is_fatal() { [ "${CI:-}" = true ] || [ "${APPTEST_NO_BUILD:-0}" = 1 ]; }
+
 # apptest_fixture_push <app> <set>
 apptest_fixture_push() {
   local tag
   apptest_repo_is_registry || apptest_die "refusing to push: APPTEST_FIXTURE_REPO ($APPTEST_FIXTURE_REPO) is a local name, not a registry repository"
   tag="$(apptest_fixture_tag "$1" "$2")"
-  docker push -q "$tag" >/dev/null || apptest_die "docker push $tag failed"
+  apptest_retry registry docker push -q "$tag" >/dev/null || apptest_die "docker push $tag failed"
   echo "ok: pushed $tag"
 }

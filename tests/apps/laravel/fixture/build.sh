@@ -16,10 +16,13 @@ DB_PASS="${APPTEST_DB_PASSWORD:?}"
 PORT=8099
 
 cd /
-bash /apptest/install-composer.sh /usr/local/bin/composer
-
 rm -rf "$APP"
 mkdir -p "$APP"
+# Both pinned phars are baked into the tree for the builder suite; this build's
+# own composer is copied from there.
+bash /apptest/install-composer.sh --bake "$APP/.apptest/bin"
+bash /apptest/install-composer.sh /usr/local/bin/composer
+
 tmp="$(mktemp -d)"
 bash /apptest/fetch.sh laravel-app "$SET" "$tmp/laravel.tar.gz"
 tar -xzf "$tmp/laravel.tar.gz" -C "$APP" --strip-components=1
@@ -92,8 +95,14 @@ foreach (["laravel", "laravel_test"] as $name) {
 # stock image disables proc_open even for the CLI, and composer's script runner
 # (package:discover) needs it, so composer alone gets it back.
 composer() { php -d disable_functions= /usr/local/bin/composer "$@"; }
-composer install --no-interaction --no-progress --prefer-dist
+# The install fills the composer cache the builder suite runs from, which
+# stays in the fixture (/srv/app/.apptest/composer-cache). bake-composer-cache.sh
+# then proves the dev and the --no-dev install both work from it without the network.
+cache="$APP/.apptest/composer-cache"
+COMPOSER_CACHE_DIR="$cache" RETRY_KIND=composer retry php -d disable_functions= /usr/local/bin/composer install --no-interaction --no-progress --prefer-dist
 composer validate --no-check-publish --no-check-lock >/dev/null
+bash /apptest/bake-composer-cache.sh "$cache" "$APP"
+bash /apptest/bake-composer-cache.sh "$cache" "$APP" --no-dev
 
 php artisan migrate --force
 # The seeders are namespaced (Database\Seeders); before 8 the command's default is a global DatabaseSeeder.

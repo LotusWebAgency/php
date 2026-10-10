@@ -6,10 +6,13 @@ set -uo pipefail
 . /apptest/cli-lib.sh
 
 COMPOSER_HOME="$(mktemp -d)"
-export COMPOSER_CACHE_DIR=/composer-cache COMPOSER_NO_INTERACTION=1 COMPOSER_HOME
 WORK="$(mktemp -d /tmp/apptest-builder.XXXXXX)"
 NODEV="$(mktemp -d /tmp/apptest-builder-nodev.XXXXXX)"
 trap 'rm -rf "$WORK" "$NODEV" "$COMPOSER_HOME"' EXIT
+# Composer runs offline from the cache the fixture baked (a+rX, root-owned, so
+# a private writable copy): the dev and the --no-dev install are both in it.
+export COMPOSER_CACHE_DIR="$COMPOSER_HOME/cache" COMPOSER_DISABLE_NETWORK=1 COMPOSER_NO_INTERACTION=1 COMPOSER_HOME
+cp -a /srv/app/.apptest/composer-cache "$COMPOSER_CACHE_DIR"
 
 echo "builder: $(php -r 'echo PHP_VERSION, " ", PHP_SAPI;') as $(id -un) ($(id -u))"
 # Only the stock cli-builder images carry composer; on the other stock images
@@ -33,10 +36,10 @@ if ! php -r 'exit(function_exists("proc_open") ? 0 : 1);'; then
   skip "composer scripts with the image's own disable_functions" "proc_open is disabled in this image; composer runs with it re-enabled"
 fi
 
-# A copy of the app without vendor/ and without anything cached against /srv/app.
+# A copy of the app without vendor/, without the baked composer inputs and without anything cached against /srv/app.
 fresh() {
   cp -a /srv/app/. "$1/"
-  rm -rf "$1/vendor" "$1"/bootstrap/cache/*.php "$1"/storage/framework/views/*.php "$1"/storage/logs/*
+  rm -rf "$1/vendor" "$1/.apptest/composer-cache" "$1/.apptest/bin" "$1"/bootstrap/cache/*.php "$1"/storage/framework/views/*.php "$1"/storage/logs/*
 }
 fresh "$WORK"
 cd "$WORK" || exit 1

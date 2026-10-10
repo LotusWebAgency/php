@@ -11,14 +11,21 @@
 #                                                 image carries the same php CLI)
 #   ./tests/apps/run-matrix.sh --jobs 4 --app wordpress
 #   ./tests/apps/run-matrix.sh --list --only 8.4  print the planned cells, touch nothing
+#   ./tests/apps/run-matrix.sh --prepare-only --only 8.4
+#                                                 pull the service images and
+#                                                 pull or build the fixtures
+#                                                 the cells need, run nothing
 #
 # What runs is tests/apps/sets: each image runs the cells of its php version,
 # flavor and variant (-v3 or not); an image with no cell is a SKIP row, not a
 # run (and is not pulled). ext-builder images have no suites and are not
 # planned.
 #
-# Fixtures are built (or confirmed current) first, serially, then the image
-# runs fan out --jobs wide (default 3; each is its own compose project). A
+# The prepare phase comes first: the service images (nginx, Redis, Memcached)
+# are pulled under ci/retry.sh, then the fixtures are pulled or built, serially.
+# Nothing after it fetches anything -- the stacks start with pull_policy: never
+# on a network without a route out -- and --prepare-only stops there. Then the
+# image runs fan out --jobs wide (default 3; each is its own compose project). A
 # target whose image is not present locally is reported as MISSING rather
 # than silently dropped, so a partial matrix can never read as a full pass.
 set -euo pipefail
@@ -30,6 +37,7 @@ JOBS=3
 ONLY=""
 FLAVORS=""
 LIST=0
+PREPARE_ONLY=0
 APP_ARGS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -39,7 +47,8 @@ while [ "$#" -gt 0 ]; do
     --flavor) FLAVORS="${2:?}"; shift 2 ;;
     --app) APP_ARGS+=(--app "${2:?}"); shift 2 ;;
     --list) LIST=1; shift ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    --prepare-only) PREPARE_ONLY=1; shift ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) apptest_die "unknown argument $1" ;;
   esac
 done
@@ -121,8 +130,11 @@ export APPTEST_RESULTS
 : >"$APPTEST_RESULTS"
 echo "plan: ${#PLAN[@]} image(s), $cell_count cell(s), $step_count step(s), $JOBS at a time, results $APPTEST_RESULTS"
 
-# Fixtures first: every set any planned cell needs, built serially so parallel
-# runs never race to build the same one.
+apptest_ensure_service_images
+
+# Fixtures: every set any planned cell needs, pulled or built serially so
+# parallel runs never race to build the same one. --prepare-only does not look
+# at the php images (tests/extended.sh pull is theirs): it covers every planned cell.
 declare -A NEED=()
 MISSING=()
 RUNNABLE=()
@@ -132,7 +144,7 @@ for row in "${PLAN[@]}"; do
     printf 'RESULT\t-\t-\t%s\t%s\t%s\t-\tSKIP\tno app cell for php %s, %s, %s\n' "$image" "$php" "$flavor" "$php" "$flavor" "$variant" >>"$APPTEST_RESULTS"
     continue
   fi
-  if ! docker image inspect "$image" >/dev/null 2>&1 && ! docker pull -q "$image" >/dev/null 2>&1; then
+  if [ "$PREPARE_ONLY" -eq 0 ] && ! docker image inspect "$image" >/dev/null 2>&1 && ! apptest_retry registry docker pull -q "$image" >/dev/null 2>&1; then
     MISSING+=("$image")
     printf 'RESULT\t-\t-\t%s\t-\t%s\t-\tMISSING\timage not present\n' "$image" "$flavor" >>"$APPTEST_RESULTS"
     continue
@@ -146,6 +158,11 @@ for key in "${!NEED[@]}"; do
   read -r app set <<<"$key"
   "$APPTEST_ROOT/build-fixture.sh" "$app" "$set" || apptest_die "fixture $app $set failed -- nothing tested"
 done
+
+if [ "$PREPARE_ONLY" -eq 1 ]; then
+  echo "prepared: service images and ${#NEED[@]} fixture set(s)"
+  exit 0
+fi
 
 # xargs gives each run its own process; run.sh keeps its own logs, so the
 # console only carries the RESULT lines and failures.

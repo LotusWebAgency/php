@@ -11,9 +11,10 @@ HERE=/apptest/wordpress/suite
 MANIFEST=$APP/.apptest/manifest.json
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
-export COMPOSER_HOME="$WORK/composer-home" COMPOSER_NO_INTERACTION=1 COMPOSER_ALLOW_SUPERUSER=1
-# The shared cache volume saves a download per run; fall back to a private one where the uid cannot write to it.
-if [ -w /composer-cache ]; then export COMPOSER_CACHE_DIR=/composer-cache; else export COMPOSER_CACHE_DIR="$WORK/composer-cache"; fi
+# Composer runs offline from the cache the fixture baked from this set's lock
+# (a+rX, root-owned, so a private writable copy).
+export COMPOSER_HOME="$WORK/composer-home" COMPOSER_CACHE_DIR="$WORK/composer-cache" COMPOSER_DISABLE_NETWORK=1 COMPOSER_NO_INTERACTION=1 COMPOSER_ALLOW_SUPERUSER=1
+cp -a "$APP/.apptest/composer-cache" "$COMPOSER_CACHE_DIR"
 cd "$WORK" || exit 1
 
 mf() {
@@ -96,9 +97,10 @@ xargs -0 -P "$JOBS" -n 60 sh -c 'for f do out=$(php -l "$f" 2>&1) || echo "$out"
 if [ ! -s "$WORK/lint.out" ]; then ok "php -l: no parse error in $total files ($(( $(date +%s) - started ))s on $JOBS jobs)"; else fail "php -l found parse errors"; head -20 "$WORK/lint.out" | sed 's/^/    | /'; fi
 
 # -- WP-CLI build-time commands ------------------------------------------------------------------------------
-# --skip-theme-json: the theme.json extractor downloads its schema from develop.svn.wordpress.org.
-check_eq "i18n make-pot: a theme" "1" bash -c "$WPC i18n make-pot $APP/wp-content/themes/$(mf theme.slug) $WORK/theme.pot --slug=$(mf theme.slug) --skip-audit --skip-theme-json >/dev/null && grep -c '^msgid \"$(mf theme.name)\"' $WORK/theme.pot"
-check_eq "i18n make-pot: WooCommerce's templates (PHP parser over real code)" "1" bash -c "$WPC i18n make-pot $APP/wp-content/plugins/woocommerce/templates $WORK/woo.pot --slug=woocommerce --domain=woocommerce --skip-audit >/dev/null && [ \$(grep -c '^msgid ' $WORK/woo.pot) -gt 100 ] && echo 1"
+# --skip-theme-json and --skip-block-json: the theme.json and block.json extractors download their schemas
+# from develop.svn.wordpress.org.
+check_eq "i18n make-pot: a theme" "1" bash -c "$WPC i18n make-pot $APP/wp-content/themes/$(mf theme.slug) $WORK/theme.pot --slug=$(mf theme.slug) --skip-audit --skip-theme-json --skip-block-json >/dev/null && grep -c '^msgid \"$(mf theme.name)\"' $WORK/theme.pot"
+check_eq "i18n make-pot: WooCommerce's templates (PHP parser over real code)" "1" bash -c "$WPC i18n make-pot $APP/wp-content/plugins/woocommerce/templates $WORK/woo.pot --slug=woocommerce --domain=woocommerce --skip-audit --skip-theme-json --skip-block-json >/dev/null && [ \$(grep -c '^msgid ' $WORK/woo.pot) -gt 100 ] && echo 1"
 mkdir "$WORK/plugins"
 check "scaffold plugin" $WPC scaffold plugin apptest-scaffold --dir="$WORK/plugins" --skip-tests --plugin_name="Apptest Scaffold"
 check "scaffolded plugin has its header" grep -Eq 'Plugin Name:[[:space:]]+Apptest Scaffold' "$WORK/plugins/apptest-scaffold/apptest-scaffold.php"
