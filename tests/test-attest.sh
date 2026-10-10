@@ -42,9 +42,9 @@
 #     copy leaves something missing on the destination, it tags nothing.
 #
 # Not a Docker-image test: it needs docker (buildx), cosign, regctl, jq and
-# python3, and never touches a registry other than its own (the registry, zot,
-# httpd and BuildKit images come digest-pinned, anonymously). Containers carry the claude.adhoc
-# label and are removed on exit.
+# python3, and never touches a registry other than its own once the four images
+# below are on the daemon (digest-pinned, pulled anonymously in a block at the
+# top). Containers carry the claude.adhoc label and are removed on exit.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -98,7 +98,15 @@ export COSIGN_PASSWORD=""
 export COSIGN_ATTEST_FLAGS="--key $WORK/cosign.key --use-signing-config=false --tlog-upload=false"
 export COSIGN_VERIFY_FLAGS="--key $WORK/cosign.pub --insecure-ignore-tlog"
 
-docker run -d --rm --init --label claude.adhoc=1 --name "$REG" -p "127.0.0.1:${PORT}:5000" "$REGISTRY_IMAGE" >/dev/null
+# Every fetch from outside happens here, before the first assertion: the four
+# images (retried on a registry 429/5xx/network error) and the BuildKit
+# container the builder starts from its image. Afterwards the containers run
+# with --pull never and a missing image fails instead of fetching.
+for image in "$REGISTRY_IMAGE" "$ZOT_IMAGE" "$HTPASSWD_IMAGE" "$BUILDKIT_IMAGE"; do
+  "$ROOT/ci/retry.sh" docker pull --quiet "$image" >/dev/null || die "cannot pull $image"
+done
+
+docker run -d --rm --init --pull never --label claude.adhoc=1 --name "$REG" -p "127.0.0.1:${PORT}:5000" "$REGISTRY_IMAGE" >/dev/null
 for _ in $(seq 1 30); do
   curl -fsS "http://127.0.0.1:${PORT}/v2/" >/dev/null 2>&1 && break
   sleep 1
@@ -111,6 +119,7 @@ export REGCTL_CONFIG="$WORK/regctl.json"
 jq -e --arg a "localhost:${PORT}" --arg b "localhost:${HUB_PORT}" '.hosts[$a].tls == "disabled" and .hosts[$b].tls == "disabled"' \
   "$REGCTL_CONFIG" >/dev/null || die "regctl did not record the local registries"
 docker buildx create --name "$BUILDER" --driver docker-container --driver-opt network=host --driver-opt "image=$BUILDKIT_IMAGE" >/dev/null
+"$ROOT/ci/retry.sh" docker buildx inspect --bootstrap "$BUILDER" >/dev/null || die "cannot bootstrap the BuildKit builder"
 
 build_arch() {  # build_arch <content> <arch> -> the pushed index digest
   docker buildx build --builder "$BUILDER" --platform "linux/$2" --provenance=mode=max \
@@ -378,7 +387,7 @@ for ref in "$REPO@$LIST_CB" "$REPO@$PLAT_CB_amd64" "$REPO@$PLAT_CB_arm64"; do
 done
 
 # The destination: password auth for writes, anonymous reads, the referrers API.
-docker run --rm --init --label claude.adhoc=1 --entrypoint timeout "$HTPASSWD_IMAGE" 20 \
+docker run --rm --init --pull never --label claude.adhoc=1 --entrypoint timeout "$HTPASSWD_IMAGE" 20 \
   htpasswd -Bbn promoter s3cret >"$WORK/htpasswd"
 cat >"$WORK/zot.json" <<'EOF'
 {"distSpecVersion": "1.1.1",
@@ -391,7 +400,7 @@ cat >"$WORK/zot.json" <<'EOF'
  "log": {"level": "info"}}
 EOF
 chmod 644 "$WORK/htpasswd" "$WORK/zot.json"
-docker run -d --rm --init --label claude.adhoc=1 --name "$HUB" -p "127.0.0.1:${HUB_PORT}:5000" \
+docker run -d --rm --init --pull never --label claude.adhoc=1 --name "$HUB" -p "127.0.0.1:${HUB_PORT}:5000" \
   -v "$WORK/zot.json:/etc/zot/config.json:ro" -v "$WORK/htpasswd:/etc/zot/htpasswd:ro" "$ZOT_IMAGE" >/dev/null
 for _ in $(seq 1 30); do
   curl -fsS "http://127.0.0.1:${HUB_PORT}/v2/" >/dev/null 2>&1 && break
