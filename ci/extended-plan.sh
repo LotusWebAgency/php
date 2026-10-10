@@ -83,7 +83,8 @@ first_tag="$(python3 scripts/gen_matrix.py --github targets | jq -r '.include[0]
 # image_config <ref> -> the config JSON of the image (its linux/amd64 one for a list).
 image_config() {
   local raw
-  raw="$(docker buildx imagetools inspect "$1" --format '{{json .Image}}')" || return 1
+  # Retried on a registry 429/5xx/network error; a missing tag fails at once.
+  raw="$(./ci/retry.sh docker buildx imagetools inspect "$1" --format '{{json .Image}}')" || return 1
   jq -c 'if has("config") then . else .["linux/amd64"] end' <<<"$raw"
 }
 
@@ -96,7 +97,9 @@ else
   sha="$(git rev-parse --verify --quiet "${want}^{commit}" || true)"
   if [ -z "$sha" ]; then
     # Not in the checked-out history (e.g. only on a ref the checkout did not fetch).
-    git fetch --no-tags --quiet origin "$want" 2>/dev/null || true
+    # Retried on a transient git/network error; an unknown ref still falls through
+    # to the "not a commit" failure below.
+    RETRY_KIND=git ./ci/retry.sh git fetch --no-tags --quiet origin "$want" || true
     sha="$(git rev-parse --verify --quiet "${want}^{commit}" || git rev-parse --verify --quiet 'FETCH_HEAD^{commit}' || true)"
   fi
   [ -n "$sha" ] || die "'$want' is not a commit in this repository"

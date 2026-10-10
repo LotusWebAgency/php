@@ -6,7 +6,7 @@
 #   tests/extended.sh pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--no-corpus]
 #   tests/extended.sh uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
 #   tests/extended.sh apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
-#   tests/extended.sh bench [--only V,..] [--flavor F,..]        report only, never fails the run
+#   tests/extended.sh bench [--prepare] [--only V,..] [--flavor F,..]   report only, never fails the run
 #   tests/extended.sh all [pull flags] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, apps
 #                                                                  (not smoke, not bench: those are separate subcommands)
 #
@@ -98,7 +98,7 @@ usage: tests/extended.sh <subcommand> [options]
   pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--jobs N] [--no-corpus]
   uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
   apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
-  bench [--only V,..] [--flavor F,..]          report only, never fails the run
+  bench [--prepare] [--only V,..] [--flavor F,..]   report only, never fails the run
   all [pull options] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, apps
 
   --sha REF          pull: the commit whose images to pull (default: git rev-parse HEAD)
@@ -109,6 +109,7 @@ usage: tests/extended.sh <subcommand> [options]
   --jobs N           pull: parallel pulls (default 4)
   --skip-pull        all: do not pull first
   --no-corpus        pull, all: do not pull the PGO corpus tiers (corpus-tiers and smoke need them)
+  --prepare          bench: only pull the official php images the benchmark compares against
 EOF
 }
 usage_die() { echo "FAIL: $*" >&2; echo "(tests/extended.sh --help for usage)" >&2; exit 2; }
@@ -131,6 +132,7 @@ LATEST=0
 JOBS=4
 SKIP_PULL=0
 NO_CORPUS=0
+BENCH_PREPARE=0
 PASSTHRU=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -147,6 +149,7 @@ while [ "$#" -gt 0 ]; do
     --latest) LATEST=1; shift ;;
     --skip-pull) SKIP_PULL=1; shift ;;
     --no-corpus) NO_CORPUS=1; shift ;;
+    --prepare) BENCH_PREPARE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       [ "$CMD" = apps ] || [ "$CMD" = all ] || usage_die "unknown argument '$1' for $CMD"
@@ -163,6 +166,7 @@ case "$CMD" in
        || usage_die "--platform/--sha/--latest/--skip-pull/--no-corpus apply to pull and all only" ;;
 esac
 [ "$CMD" = all ] || [ "$SKIP_PULL" -eq 0 ] || usage_die "--skip-pull applies to all only"
+[ "$CMD" = bench ] || [ "$BENCH_PREPARE" -eq 0 ] || usage_die "--prepare applies to bench only"
 { [ "$LATEST" -eq 0 ] || [ -z "$SHA_REF" ]; } || usage_die "--sha and --latest are exclusive"
 
 # Selection: same validation as tests/build-all.sh (tests/matrix-lib.sh).
@@ -338,7 +342,9 @@ PULL_DIR=""
 pull_one() {
   local ref="$2" kind="$3" out="$PULL_DIR/$1.status" log="$PULL_DIR/$1.log" arch rev hash id info
   rm -f "$out"
-  if ! docker pull --platform "$PLATFORM" "$ref" >"$log" 2>&1; then
+  # Retried on a registry 429/5xx/network error. A missing tag matches nothing
+  # transient and fails at once, so the MISSING classification below holds.
+  if ! "$ROOT/ci/retry.sh" docker pull --platform "$PLATFORM" "$ref" >"$log" 2>&1; then
     if grep -qiE 'not found|manifest unknown|no matching manifest|name unknown' "$log"; then
       printf 'MISSING\t%s\t\t\n' "$ref is not in the registry for $PLATFORM" >"$out"
     else
@@ -764,6 +770,20 @@ cmd_bench() {
     if [ "$(image_state "$tag")" != ok ]; then
       record bench "$name" SKIP 0 "NOT RUN: $tag is missing or from another tree"
       echo "--- bench: $name NOT RUN, $tag is missing or from another tree"
+      continue
+    fi
+    if [ "$BENCH_PREPARE" -eq 1 ]; then
+      # The official image is the one network fetch a benchmark needs; doing it
+      # here keeps bench.sh's own run offline.
+      echo "--- bench prepare: $name"
+      rc=0
+      t0=$(date +%s)
+      ./tests/bench.sh "$tag" auto "$php" --prepare >"$LOG_DIR/bench-prepare-$name.log" 2>&1 || rc=$?
+      secs=$(( $(date +%s) - t0 ))
+      tail -5 "$LOG_DIR/bench-prepare-$name.log"
+      if [ "$rc" -eq 0 ]; then record bench "$name" ok "$secs" "official image pulled"
+      else record bench "$name" FAIL "$secs" "prepare failed, log $LOG_DIR/bench-prepare-$name.log"
+      fi
       continue
     fi
     echo "--- bench: $name (report only; noisy, never a verdict)"
