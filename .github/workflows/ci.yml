@@ -376,7 +376,7 @@ jobs:
           for local_tag in "$TARGET_TAG" ${RIDER_TAG:+"$RIDER_TAG"}; do
             dest="${DEV_REPO}:${local_tag#*:}-${sha}-${ARCH}"
             docker tag "$local_tag" "$dest"
-            docker push "$dest"
+            ./ci/retry.sh docker push "$dest"
             echo "ok: pushed $dest"
           done
 
@@ -605,7 +605,7 @@ jobs:
           }
           per_arch_ref="${TIER_TAG}-${INPUTS_HASH}-${ARCH_NAME}"
           docker tag "$TIER_TAG" "$per_arch_ref"
-          docker push "$per_arch_ref"
+          ./ci/retry.sh docker push "$per_arch_ref"
           echo "ok: pushed $per_arch_ref"
 
   # ------------------------------------------------------------ corpus-merge

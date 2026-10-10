@@ -150,6 +150,8 @@ class RetryTest(unittest.TestCase):
             "dial tcp 1.2.3.4:443: i/o timeout",
             'Post "https://x/v2/y": unexpected EOF',
             "dial tcp: lookup registry-1.docker.io: Temporary failure in name resolution",
+            "unknown blob",
+            "ERROR: failed to push ghcr.io/lotuswebagency/php/release:x: unknown blob",
         ]
         not_retried = [
             "unexpected status from HEAD request to https://registry-1.docker.io/v2/ns/php/manifests/sha256:"
@@ -157,6 +159,7 @@ class RetryTest(unittest.TestCase):
             "unexpected status from GET request to https://x/token: 401 Unauthorized",
             "denied: requested access to the resource is denied",
             "manifest unknown",
+            "Error response from daemon: blob unknown to registry",
             "/src/ext/foo/foo.c:429:5: error: unknown type name 'bar'",
             "make: *** [Makefile:503: all] Error 2",
             "FAIL: expected exactly one linux/arm64 manifest",

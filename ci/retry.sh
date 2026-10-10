@@ -40,6 +40,10 @@ transient+='|\]\[5[0-9][0-9]\]'
 transient+='|5[0-9][0-9] (internal server error|bad gateway|service unavailable|gateway time-?out)'
 transient+='|tls handshake timeout|connection reset by peer|i/o timeout|unexpected eof'
 transient+='|temporary failure in name resolution|client\.timeout exceeded|net/http: request canceled'
+# GHCR answers a push now and then with a bare `unknown blob` for a layer it has
+# just accepted (buildx prefixes it with `failed to push <ref>: `); pushing
+# again completes it.
+transient+='|(^|: )unknown blob$'
 
 errfile="$(mktemp)"
 trap 'rm -f "$errfile"' EXIT
