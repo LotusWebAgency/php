@@ -17,6 +17,8 @@ case "$FLAVOR" in
   *) echo "FAIL: flavor '$FLAVOR' is not one of fpm, cli, cli-builder, ext-builder"; exit 1 ;;
 esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tests/docker-lib.sh
+. "$HERE/docker-lib.sh"
 ROOT="$(cd "$HERE/.." && pwd)"
 
 # Refuse to run any check against an image that cannot prove it was built from
@@ -147,7 +149,7 @@ esac
 
 # Capture, then match. `docker run ... | grep -q` exits at the first match and
 # SIGPIPEs the producer, and pipefail reports that as a failure of the pipeline.
-ver=$(docker run --rm "$IMAGE" php -r 'echo PHP_VERSION;')
+ver=$(drun --rm "$IMAGE" php -r 'echo PHP_VERSION;')
 [ "$ver" = "$RELEASE" ] || { echo "FAIL: expected exactly $RELEASE (matrix.json), got $ver"; exit 1; }
 echo "ok: php $ver"
 
@@ -155,7 +157,7 @@ echo "ok: php $ver"
 # extension dir); every other flavor drops to www-data.
 want_uid=33
 [ "$FLAVOR" != ext-builder ] || want_uid=0
-uid=$(docker run --rm "$IMAGE" id -u)
+uid=$(drun --rm "$IMAGE" id -u)
 [[ "$uid" == "$want_uid" ]] || { echo "FAIL: running as uid $uid, expected $want_uid"; exit 1; }
 echo "ok: uid $want_uid"
 
@@ -196,8 +198,8 @@ php_registry_alias() {  # php_registry_alias <ext.json/matrix.json name> -> the 
   esac
 }
 
-extdir=$(docker run --rm "$IMAGE" php -r 'echo ini_get("extension_dir");')
-mods=$(docker run --rm "$IMAGE" php -m)
+extdir=$(drun --rm "$IMAGE" php -r 'echo ini_get("extension_dir");')
+mods=$(drun --rm "$IMAGE" php -m)
 grep -qix "$(php_registry_alias opcache)" <<<"$mods" || { echo "FAIL: opcache missing (looked for the exact, anchored line 'Zend OPcache')"; exit 1; }
 echo "ok: opcache present"
 
@@ -213,7 +215,7 @@ echo "ok: pecl extensions compiled in"
 
 # Static means no .so on disk for these
 for ext in igbinary redis imagick memcached apcu zstd; do
-  if docker run --rm "$IMAGE" sh -c "ls \$(php -r 'echo ini_get(\"extension_dir\");')/$ext.so" 2>/dev/null; then
+  if drun --rm "$IMAGE" sh -c "ls \$(php -r 'echo ini_get(\"extension_dir\");')/$ext.so" 2>/dev/null; then
     echo "FAIL: $ext is a shared module, expected static"; exit 1
   fi
 done
@@ -221,7 +223,7 @@ echo "ok: pecl extensions are static, not shared"
 
 # imagick's delegate set: the PHP-level check that static linkage wired up the
 # libraries.
-formats=$(docker run --rm "$IMAGE" php -r 'echo implode(",", Imagick::queryFormats());')
+formats=$(drun --rm "$IMAGE" php -r 'echo implode(",", Imagick::queryFormats());')
 for fmt in PNG JPEG WEBP AVIF; do
   grep -qi "$fmt" <<<"$formats" || { echo "FAIL: Imagick::queryFormats() missing $fmt (got: $formats)"; exit 1; }
 done
@@ -230,7 +232,7 @@ echo "ok: imagick delegate formats present"
 # ImageMagick is built with --disable-openmp; confirm that holds once imagick
 # links it into the php binary -- OpenMP spawns a thread per core per request if
 # it sneaks back in under FPM.
-linkage=$(docker run --rm "$IMAGE" ldd /usr/local/bin/php)
+linkage=$(drun --rm "$IMAGE" ldd /usr/local/bin/php)
 grep -qi libgomp <<<"$linkage" && { echo "FAIL: php binary links libgomp (openmp leaked in)"; exit 1; }
 echo "ok: no libgomp in php binary linkage"
 
@@ -246,7 +248,7 @@ echo "ok: no libgomp in php binary linkage"
 # the runtime image, so extract the binary via docker cp and inspect it on the
 # host.
 command -v readelf >/dev/null || { echo "FAIL: readelf not found on this host, cannot verify the static OpenSSL property"; exit 1; }
-cid=$(docker create "$IMAGE")
+cid=$(docker create --pull never "$IMAGE")
 tmp_php=$(mktemp)
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -f "$tmp_php"' EXIT
 docker cp "$cid:/usr/local/bin/php" "$tmp_php" >/dev/null
@@ -312,12 +314,12 @@ scan_ssl_resolution() {  # scan_ssl_resolution <label for messages> <ldd output>
 }
 scan_ssl_resolution "php binary" "$linkage"
 
-ext_files=$(docker run --rm "$IMAGE" sh -c "ls \"$extdir\"/*.so 2>/dev/null" || true)
+ext_files=$(drun --rm "$IMAGE" sh -c "ls \"$extdir\"/*.so 2>/dev/null" || true)
 n_ext_files=0
 # shellcheck disable=SC2086  # ext_files is a newline/space-separated list of paths, meant to word-split
 for sofile in $ext_files; do
   n_ext_files=$((n_ext_files + 1))
-  so_ldd=$(docker run --rm "$IMAGE" ldd "$sofile" 2>&1 || true)
+  so_ldd=$(drun --rm "$IMAGE" ldd "$sofile" 2>&1 || true)
   [ -n "$so_ldd" ] || { echo "FAIL: ldd produced no output for $sofile -- the OpenSSL scan could not be measured (corrupt image?)"; exit 1; }
   scan_ssl_resolution "$sofile" "$so_ldd"
 done
@@ -339,9 +341,9 @@ echo "ok: inspected the php binary and $n_ext_files shared extension .so file(s)
 # www-data, even though it printed every match it could reach; `|| true` is
 # scoped to that single command so a genuinely empty result still reads as
 # "found nothing".
-find_control=$(docker run --rm "$IMAGE" sh -c "find / -xdev -name 'libc.so*' 2>/dev/null" || true)
+find_control=$(drun --rm "$IMAGE" sh -c "find / -xdev -name 'libc.so*' 2>/dev/null" || true)
 [ -n "$find_control" ] || { echo "FAIL: image-wide find could not even locate libc.so -- the file-existence scan below would prove nothing"; exit 1; }
-stray_ssl=$(docker run --rm "$IMAGE" sh -c "find / -xdev \\( \\( -name 'libssl.so.1*' -o -name 'libcrypto.so.1*' \\) -o \\( -path '/opt/*' -a \\( -name 'libssl.so*' -o -name 'libcrypto.so*' \\) \\) \\) 2>/dev/null" || true)
+stray_ssl=$(drun --rm "$IMAGE" sh -c "find / -xdev \\( \\( -name 'libssl.so.1*' -o -name 'libcrypto.so.1*' \\) -o \\( -path '/opt/*' -a \\( -name 'libssl.so*' -o -name 'libcrypto.so*' \\) \\) \\) 2>/dev/null" || true)
 
 # 7.0-8.0 vendor OpenSSL statically (no-shared); 8.1+ link Debian's OpenSSL 3
 # dynamically by design (system packages). The boundary comes from matrix.json's
@@ -422,7 +424,7 @@ SHARED_EXTS=$(bash "$HERE/../php/build-shared-ext.sh" --list "$EXPECT")
 [ -n "$SHARED_EXTS" ] || { echo "FAIL: build-shared-ext.sh --list $EXPECT derived zero shared extensions -- every real version has at least one"; exit 1; }
 # extdir was captured near the top of this script and is reused here.
 for ext in $SHARED_EXTS; do
-  docker run --rm "$IMAGE" test -f "$extdir/$ext.so" || { echo "FAIL: $ext.so missing"; exit 1; }
+  drun --rm "$IMAGE" test -f "$extdir/$ext.so" || { echo "FAIL: $ext.so missing"; exit 1; }
 done
 echo "ok: shared modules present on disk"
 
@@ -435,7 +437,7 @@ echo "ok: shared modules present on disk"
 # (php/ext.json's opcache entry): --enable-opcache always produces a loadable
 # opcache.so, even though ext.json marks it "linkage": "static" and it ships
 # pre-activated via conf.d. It is not a member of SHARED_EXTS but is a real file.
-disk_exts=$(docker run --rm "$IMAGE" sh -c "ls \"$extdir\"" | sed -n 's/\.so$//p' | sort -u)
+disk_exts=$(drun --rm "$IMAGE" sh -c "ls \"$extdir\"" | sed -n 's/\.so$//p' | sort -u)
 # shellcheck disable=SC2086  # SHARED_EXTS is a space-separated list, meant to word-split
 expected_disk_exts=$(printf '%s\n' $SHARED_EXTS | sort -u)
 if [ "$EXPECT" != "8.5" ]; then
@@ -470,7 +472,7 @@ echo "ok: shared modules not loaded by default (including ffi)"
 # kind of capture, to find it.
 # shellcheck disable=SC2086  # SHARED_EXTS is a space-separated list, meant to word-split
 control_ext=$(printf '%s\n' $SHARED_EXTS | head -1)
-control_mods=$(docker run --rm "$IMAGE" sh -c "php-ext-enable $control_ext >/dev/null && php -m")
+control_mods=$(drun --rm "$IMAGE" sh -c "php-ext-enable $control_ext >/dev/null && php -m")
 grep -qix "$control_ext" <<<"$control_mods" \
   || { echo "FAIL: enabled $control_ext but php -m does not report it -- the 'not loaded by default' check above cannot detect a loaded module, so its result means nothing"; exit 1; }
 echo "ok: control -- an enabled module ($control_ext) is visible to the same check"
@@ -479,7 +481,7 @@ echo "ok: control -- an enabled module ($control_ext) is visible to the same che
 # report: grep the baseline ini files (10-php.ini, 15-opcache.ini, ...) for an
 # extension= or zend_extension= line naming a shared module.
 for ext in $SHARED_EXTS; do
-  if docker run --rm "$IMAGE" sh -c "grep -hE '^[[:space:]]*(zend_)?extension[[:space:]]*=' /usr/local/etc/php/conf.d/*.ini 2>/dev/null | grep -qiE \"(^|[/=])${ext}(\\.so)?\\\$\""; then
+  if drun --rm "$IMAGE" sh -c "grep -hE '^[[:space:]]*(zend_)?extension[[:space:]]*=' /usr/local/etc/php/conf.d/*.ini 2>/dev/null | grep -qiE \"(^|[/=])${ext}(\\.so)?\\\$\""; then
     echo "FAIL: conf.d enables $ext by default, shared extensions must ship dormant"; exit 1
   fi
 done
@@ -494,14 +496,14 @@ echo "ok: conf.d does not enable shared modules by default"
 # floor). php-ext-enable decides which names take the zend_extension= path, so
 # ask it (--list-zend, the same variable its is_zend() reads) and intersect with
 # this version's derived shared set. The other subjects come from SHARED_EXTS.
-zend_known=$(docker run --rm "$IMAGE" php-ext-enable --list-zend)
+zend_known=$(drun --rm "$IMAGE" php-ext-enable --list-zend)
 [ -n "$zend_known" ] || { echo "FAIL: php-ext-enable --list-zend printed nothing -- cannot pick a zend_extension subject"; exit 1; }
 # shellcheck disable=SC2086  # zend_known and SHARED_EXTS are space-separated lists, meant to word-split
 zend_subjects=$(comm -12 <(printf '%s\n' $zend_known | sort -u) <(printf '%s\n' $SHARED_EXTS | sort -u))
 
 # shellcheck disable=SC2086  # zend_subjects and SHARED_EXTS are space-separated lists, meant to word-split
 enable_exts="$(printf '%s\n' $zend_subjects $SHARED_EXTS | awk '!seen[$0]++' | head -3 | tr '\n' ' ')"
-mods=$(docker run --rm "$IMAGE" sh -c "php-ext-enable $enable_exts >&2 && php -m")
+mods=$(drun --rm "$IMAGE" sh -c "php-ext-enable $enable_exts >&2 && php -m")
 for ext in $enable_exts; do
   grep -qix "$ext" <<<"$mods" || { echo "FAIL: php-ext-enable did not load $ext"; exit 1; }
 done
@@ -512,7 +514,7 @@ if [ -n "$zend_subjects" ]; then
   # wrote for the subject it just enabled.
   # shellcheck disable=SC2086  # zend_subjects is a space-separated list, meant to word-split
   zsub=$(printf '%s\n' $zend_subjects | head -1)
-  line=$(docker run --rm "$IMAGE" sh -c "php-ext-enable $zsub >/dev/null && cat /usr/local/etc/php/conf.d/20-${zsub}.ini")
+  line=$(drun --rm "$IMAGE" sh -c "php-ext-enable $zsub >/dev/null && cat /usr/local/etc/php/conf.d/20-${zsub}.ini")
   [ "$line" = "zend_extension=${zsub}.so" ] || { echo "FAIL: php-ext-enable wrote '$line' for $zsub, expected zend_extension=${zsub}.so"; exit 1; }
   echo "ok: php-ext-enable works, including zend_extension ($zsub) [$enable_exts]"
 else
@@ -526,7 +528,7 @@ else
     # opcache is compiled in and ships pre-activated (Dockerfile), so its .so
     # legitimately exists while never being a php-ext-enable subject.
     [ "$zx" = opcache ] && continue
-    if docker run --rm "$IMAGE" test -f "$extdir/$zx.so"; then
+    if drun --rm "$IMAGE" test -f "$extdir/$zx.so"; then
       echo "FAIL: $zx.so exists in extension_dir but is not in this version's derived shared set -- the derivation is wrong, so the zend_extension= path was skipped rather than genuinely absent"; exit 1
     fi
   done
@@ -538,7 +540,7 @@ fi
 # (letters/digits/underscore, like every real name in ext.json) but not a real
 # extension; a hyphenated name is caught earlier by the charset guard, a
 # different assertion (see test-entrypoint.sh).
-if docker run --rm "$IMAGE" php-ext-enable not_a_real_extension 2>/tmp/php-ext-enable.err; then
+if drun --rm "$IMAGE" php-ext-enable not_a_real_extension 2>/tmp/php-ext-enable.err; then
   echo "FAIL: php-ext-enable accepted an unknown extension name"; exit 1
 fi
 grep -qi "no such extension" /tmp/php-ext-enable.err || { echo "FAIL: unknown extension did not fail loudly"; exit 1; }
@@ -549,7 +551,7 @@ echo "ok: php-ext-enable refuses unknown names"
 # matters after its payload COPYs: conf.d is where php-ext-enable and the
 # entrypoint write as the image user. ext-builder runs as root but inherits the
 # same runtime-base, so conf.d is www-data:www-data on every flavor.
-conf_d_owner=$(docker run --rm --entrypoint stat "$IMAGE" -c '%U:%G' /usr/local/etc/php/conf.d)
+conf_d_owner=$(drun --rm --entrypoint stat "$IMAGE" -c '%U:%G' /usr/local/etc/php/conf.d)
 [ "$conf_d_owner" = "www-data:www-data" ] \
   || { echo "FAIL: /usr/local/etc/php/conf.d is owned by $conf_d_owner, expected www-data:www-data (a payload COPY reset it)"; exit 1; }
 echo "ok: /usr/local/etc/php/conf.d is owned by www-data"
@@ -557,7 +559,7 @@ echo "ok: /usr/local/etc/php/conf.d is owned by www-data"
 # Root has to start php without a word on stderr too (the entrypoint's own
 # notices aside): anything a library creates or logs on first use as root would
 # show up in every `docker run -u 0` and in every CI job that runs as root.
-root_err=$(docker run --rm -u 0 "$IMAGE" php -r 'echo 1;' 2>&1 >/dev/null | grep -v '^docker-php-entrypoint:' || true)
+root_err=$(drun --rm -u 0 "$IMAGE" php -r 'echo 1;' 2>&1 >/dev/null | grep -v '^docker-php-entrypoint:' || true)
 [ -z "$root_err" ] || { echo "FAIL: php -r as root wrote to stderr: $root_err"; exit 1; }
 echo "ok: php starts silent as root"
 
@@ -575,7 +577,7 @@ echo "ok: php starts silent as root"
 # installed package at all -- an empty result is otherwise indistinguishable
 # from a dpkg-query that cannot run.
 dpkg_installed() {  # dpkg_installed <name-or-glob>... -> the installed packages matching, one per line
-  docker run --rm "$IMAGE" dpkg-query -W -f='${Package} ${Status}\n' "$@" 2>/dev/null \
+  drun --rm "$IMAGE" dpkg-query -W -f='${Package} ${Status}\n' "$@" 2>/dev/null \
     | sed -n 's/ install ok installed$//p' || true
 }
 [ "$(dpkg_installed libc6)" = "libc6" ] \
@@ -597,11 +599,11 @@ stray_pkgs=$(dpkg_installed "${stray_globs[@]}" | tr '\n' ' ')
 echo "ok: no ${perl_note}libsnmp* or libnetsnmp* Debian package in the image (control: libc6 is visible to the same query)"
 
 if grep -qw snmp <<<"$SHARED_EXTS"; then
-  snmp_ldd=$(docker run --rm "$IMAGE" ldd "$extdir/snmp.so" 2>&1 || true)
+  snmp_ldd=$(drun --rm "$IMAGE" ldd "$extdir/snmp.so" 2>&1 || true)
   grep -qE '^[[:space:]]*libnetsnmp\.so\.[0-9]+ => /opt/net-snmp/lib/libnetsnmp\.so\.[0-9]+' <<<"$snmp_ldd" \
     || { echo "FAIL: snmp.so does not resolve libnetsnmp from /opt/net-snmp/lib: $snmp_ldd"; exit 1; }
   ! grep -q 'not found' <<<"$snmp_ldd" || { echo "FAIL: snmp.so has an unresolved NEEDED entry: $snmp_ldd"; exit 1; }
-  nsnmp_ldd=$(docker run --rm "$IMAGE" sh -c 'ldd /opt/net-snmp/lib/libnetsnmp.so.*[0-9]' 2>&1 || true)
+  nsnmp_ldd=$(drun --rm "$IMAGE" sh -c 'ldd /opt/net-snmp/lib/libnetsnmp.so.*[0-9]' 2>&1 || true)
   # USM auth/priv crypto goes through Debian's supported libssl3, from the system
   # path -- not a vendored copy, never an EOL one.
   grep -qE 'libcrypto\.so\.3 => /(usr/)?lib/' <<<"$nsnmp_ldd" \
@@ -612,7 +614,7 @@ if grep -qw snmp <<<"$SHARED_EXTS"; then
 
   # Only the library and the MIB files ship; the prefix's bin/include/pkgconfig
   # were build-time inputs for ext-snmp. Control: the same find sees the library.
-  nsnmp_files=$(docker run --rm "$IMAGE" find /opt/net-snmp \( -type f -o -type l \))
+  nsnmp_files=$(drun --rm "$IMAGE" find /opt/net-snmp \( -type f -o -type l \))
   grep -q '/lib/libnetsnmp\.so\.' <<<"$nsnmp_files" \
     || { echo "FAIL: find /opt/net-snmp did not list the library -- the dev-file absence check below would prove nothing"; exit 1; }
   nsnmp_dev=$(grep -E '\.(a|la|pc|h)$|/(bin|include)/' <<<"$nsnmp_files" || true)
@@ -629,7 +631,7 @@ if grep -qw snmp <<<"$SHARED_EXTS"; then
   #     MIBS set: the request then fails on the network, not on the name. The
   #     control name, from a module that does not exist, must fail on the name --
   #     otherwise the resolution check cannot tell the two failures apart.
-  snmp_out=$(docker run --rm -i "$IMAGE" sh -c 'php-ext-enable snmp >/dev/null && php' 2>&1 <<'PHP' | grep -v '^docker-php-entrypoint:' || true
+  snmp_out=$(drun --rm -i "$IMAGE" sh -c 'php-ext-enable snmp >/dev/null && php' 2>&1 <<'PHP' | grep -v '^docker-php-entrypoint:' || true
 <?php
 $fail = function ($m) { echo "FAIL: $m\n"; exit(1); };
 (extension_loaded("snmp") && class_exists("SNMP")) || $fail("snmp extension or SNMP class missing");
@@ -660,10 +662,10 @@ PHP
   # extension=snmp.so rather than php-ext-enable: the entrypoint is bypassed so
   # stderr holds php's and net-snmp's output only.
   for snmp_uid in 0 33; do
-    snmp_err=$(docker run --rm -u "$snmp_uid" --entrypoint php "$IMAGE" -d extension=snmp.so -r 'echo extension_loaded("snmp") ? "" : "snmp not loaded";' 2>&1 >/dev/null || true)
+    snmp_err=$(drun --rm -u "$snmp_uid" --entrypoint php "$IMAGE" -d extension=snmp.so -r 'echo extension_loaded("snmp") ? "" : "snmp not loaded";' 2>&1 >/dev/null || true)
     [ -z "$snmp_err" ] || { echo "FAIL: loading snmp.so as uid $snmp_uid wrote to stderr: $snmp_err"; exit 1; }
   done
-  snmp_ctl=$(docker run --rm -u 0 --entrypoint sh "$IMAGE" -c 'rm -rf /var/lib/snmp; exec php -d extension=snmp.so -r "echo 1;"' 2>&1 >/dev/null || true)
+  snmp_ctl=$(drun --rm -u 0 --entrypoint sh "$IMAGE" -c 'rm -rf /var/lib/snmp; exec php -d extension=snmp.so -r "echo 1;"' 2>&1 >/dev/null || true)
   grep -q 'Created directory: /var/lib/snmp' <<<"$snmp_ctl" \
     || { echo "FAIL: control: with /var/lib/snmp removed, loading snmp.so as root did not log its directory creation ($snmp_ctl), so the clean-stderr check above proves nothing"; exit 1; }
   echo "ok: loading snmp.so is silent as root and as uid 33 (control: without /var/lib/snmp net-snmp logs 'Created directory')"
@@ -674,7 +676,7 @@ PHP
   # recursively, so it has to be named in the path) resolves a qualified name;
   # the same name before the copy exists must fail on the name (control).
   # shellcheck disable=SC2016  # the script is for the container's shell
-  snmp_mibdir=$(docker run --rm -u 0 -i --entrypoint sh "$IMAGE" -c '
+  snmp_mibdir=$(drun --rm -u 0 -i --entrypoint sh "$IMAGE" -c '
     set -eu
     cat > /tmp/probe.php <<"PHP"
 <?php
@@ -696,7 +698,7 @@ fi
 # Baseline php.ini: expose_php/display_errors/allow_url_include off.
 for pair in "expose_php:" "display_errors:" "allow_url_include:"; do
   key="${pair%%:*}"
-  val=$(docker run --rm "$IMAGE" php -r "echo ini_get('$key') ?: '0';")
+  val=$(drun --rm "$IMAGE" php -r "echo ini_get('$key') ?: '0';")
   [[ "$val" == "0" || "$val" == "" ]] || { echo "FAIL: $key is '$val', expected off"; exit 1; }
 done
 echo "ok: php.ini hardened"
@@ -705,7 +707,7 @@ echo "ok: php.ini hardened"
 # (conf/php-builder.ini) drops disable_functions entirely -- build tooling
 # legitimately needs shell_exec/exec too -- so shell_exec is only required to
 # be disabled on the fpm/cli flavors.
-dis=$(docker run --rm "$IMAGE" php -r "echo ini_get('disable_functions');")
+dis=$(drun --rm "$IMAGE" php -r "echo ini_get('disable_functions');")
 echo "$dis" | grep -q 'proc_open' && { echo "FAIL: proc_open disabled"; exit 1; }
 case "$FLAVOR" in
   cli-builder) : ;;
@@ -714,7 +716,7 @@ esac
 echo "ok: disable_functions correct"
 
 # opcache baseline (15-opcache.ini, laid down once in runtime-base for every flavor)
-oc=$(docker run --rm "$IMAGE" php -r '
+oc=$(drun --rm "$IMAGE" php -r '
 foreach (["opcache.enable","opcache.enable_file_override","opcache.save_comments","opcache.validate_timestamps"] as $k) {
   echo $k . "=" . ini_get($k) . PHP_EOL;
 }')
@@ -731,11 +733,11 @@ echo "ok: opcache settings applied"
 # a persistent opcache, and JIT trades startup time for it), so opcache is
 # inactive here by default -- assert that first, or the "activates when asked"
 # proof below has nothing to distinguish itself from.
-off=$(docker run --rm "$IMAGE" php -r '$s = opcache_get_status(false); echo $s === false ? "off" : "on";')
+off=$(drun --rm "$IMAGE" php -r '$s = opcache_get_status(false); echo $s === false ? "off" : "on";')
 [ "$off" = "off" ] || { echo "FAIL: opcache is active under plain CLI by default, expected inactive (opcache.enable_cli=0 in conf/opcache.ini): $off"; exit 1; }
 echo "ok: opcache inactive under plain CLI by default (opcache.enable_cli=0), as conf/opcache.ini sets it"
 
-on=$(docker run --rm "$IMAGE" php -d opcache.enable_cli=1 -r '
+on=$(drun --rm "$IMAGE" php -d opcache.enable_cli=1 -r '
 $s = opcache_get_status(false);
 if ($s === false) { echo "off"; exit; }
 // jit.enabled only means "this opcache build has JIT compiled in"; it stays
@@ -774,7 +776,7 @@ fi
 has_ffi=false
 for _sx in $SHARED_EXTS; do [ "$_sx" = ffi ] && has_ffi=true; done
 
-build_record=$(docker run --rm --entrypoint cat "$IMAGE" /usr/local/share/php-build/pgo.txt 2>/dev/null) \
+build_record=$(drun --rm --entrypoint cat "$IMAGE" /usr/local/share/php-build/pgo.txt 2>/dev/null) \
   || { echo "FAIL: $IMAGE has no /usr/local/share/php-build/pgo.txt -- cannot check vm_kind_config"; exit 1; }
 vm_kind_config=$(sed -n 's/^vm_kind_config=//p' <<<"$build_record" | head -1)
 [ -n "$vm_kind_config" ] \
@@ -785,7 +787,7 @@ want=$(tr '[:upper:]' '[:lower:]' <<<"$EXPECTED_VM_NAME")
 echo "ok: build record shows vm_kind_config=$vm_kind_config for PHP $EXPECT ($VM_COMPILER, $IMAGE_ARCH)"
 
 if [ "$has_ffi" = true ]; then
-  vm_kind=$(docker run --rm "$IMAGE" php -d extension=ffi -d ffi.enable=1 \
+  vm_kind=$(drun --rm "$IMAGE" php -d extension=ffi -d ffi.enable=1 \
     -r 'echo FFI::cdef("int zend_vm_kind(void);")->zend_vm_kind();')
   [ "$vm_kind" = "$EXPECTED_VM_KIND" ] \
     || { echo "FAIL: PHP $EXPECT ($VM_COMPILER) runs VM kind '$vm_kind', expected $EXPECTED_VM_KIND (ZEND_VM_KIND_$EXPECTED_VM_NAME)"; exit 1; }
@@ -795,23 +797,23 @@ else
 fi
 
 # Per-flavor ini differences, driven by the $FLAVOR argument, not the image tag.
-mem=$(docker run --rm "$IMAGE" php -r "echo ini_get('memory_limit');")
+mem=$(drun --rm "$IMAGE" php -r "echo ini_get('memory_limit');")
 case "$FLAVOR" in
   cli-builder)
     [[ "$mem" == "-1" ]] || { echo "FAIL: builder memory_limit is '$mem', expected -1"; exit 1; }
-    dis_b=$(docker run --rm "$IMAGE" php -r "echo ini_get('disable_functions');")
+    dis_b=$(drun --rm "$IMAGE" php -r "echo ini_get('disable_functions');")
     [[ -z "$dis_b" ]] || { echo "FAIL: builder disable_functions is '$dis_b', expected empty"; exit 1; }
     echo "ok: builder ini (unbounded memory, no disable_functions)"
     ;;
   cli|ext-builder)
     [[ "$mem" == "512M" ]] || { echo "FAIL: $FLAVOR memory_limit is '$mem', expected 512M"; exit 1; }
-    met=$(docker run --rm "$IMAGE" php -r "echo ini_get('max_execution_time');")
+    met=$(drun --rm "$IMAGE" php -r "echo ini_get('max_execution_time');")
     [[ "$met" == "0" ]] || { echo "FAIL: $FLAVOR max_execution_time is '$met', expected 0"; exit 1; }
     echo "ok: $FLAVOR ini (512M memory, unbounded execution time)"
     ;;
   fpm)
     [[ "$mem" == "256M" ]] || { echo "FAIL: fpm memory_limit is '$mem', expected 256M"; exit 1; }
-    errlog=$(docker run --rm "$IMAGE" php -r "echo ini_get('error_log');")
+    errlog=$(drun --rm "$IMAGE" php -r "echo ini_get('error_log');")
     [[ "$errlog" == "/dev/stderr" ]] || { echo "FAIL: fpm error_log is '$errlog', expected /dev/stderr"; exit 1; }
     echo "ok: fpm ini (256M memory, error_log to /dev/stderr)"
 
@@ -821,7 +823,7 @@ case "$FLAVOR" in
     # reach `docker logs`; assert the patch landed, independently of the
     # build-time grep. if/else so a regression prints a FAIL message rather than
     # a bare non-zero exit.
-    if docker run --rm "$IMAGE" grep -qx 'error_log = /proc/self/fd/2' /usr/local/etc/php-fpm.conf; then
+    if drun --rm "$IMAGE" grep -qx 'error_log = /proc/self/fd/2' /usr/local/etc/php-fpm.conf; then
       echo "ok: fpm global error_log patched (php-fpm.conf, not just php.ini)"
     else
       echo "FAIL: php-fpm.conf global error_log is not patched to /proc/self/fd/2"; exit 1
@@ -842,7 +844,7 @@ esac
 # process's problem.
 hard_dir=$(mktemp -d)
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -f "$tmp_php"; rm -rf "$hard_dir"' EXIT
-hcid=$(docker create "$IMAGE")
+hcid=$(docker create --pull never "$IMAGE")
 docker cp "$hcid:/usr/local/bin/php" "$hard_dir/php" >/dev/null
 docker cp "$hcid:/usr/local/lib/php-chmod-sanitize.so" "$hard_dir/php-chmod-sanitize.so" >/dev/null
 mkdir -p "$hard_dir/ext"
@@ -977,7 +979,7 @@ fi
 # $ORIGIN-relative entries resolve per file and are not a fixed directory.
 rpath_dirs=$(awk '{ print $2 }' "$rpath_hits" | grep -v '^\$ORIGIN' | sort -u)
 # shellcheck disable=SC2086  # the dir list is meant to word-split into arguments
-rpath_missing=$(docker run --rm "$IMAGE" sh -c 'for d in "$@"; do [ -d "$d" ] || echo "$d"; done' sh $rpath_dirs)
+rpath_missing=$(drun --rm "$IMAGE" sh -c 'for d in "$@"; do [ -d "$d" ] || echo "$d"; done' sh $rpath_dirs)
 if [ -n "$rpath_missing" ]; then
   echo "FAIL: RPATH/RUNPATH entries name directories that do not exist in the image:"
   while IFS= read -r d; do grep -F " $d" "$rpath_hits" | sed 's/^/  /'; done <<<"$rpath_missing"
@@ -1013,7 +1015,7 @@ echo "ok: every GLIBCXX_/CXXABI_/GCC_ version the shipped ELF files need is defi
 # which reads deps/versions.lock with the builder's own range arithmetic; for the
 # modern era (no vendored ICU) from the libicuuc soname the runtime image
 # carries. Neither can drift from what the build did.
-icu_reported=$(docker run --rm "$IMAGE" php -r 'echo INTL_ICU_VERSION;')
+icu_reported=$(drun --rm "$IMAGE" php -r 'echo INTL_ICU_VERSION;')
 [ -n "$icu_reported" ] || { echo "FAIL: INTL_ICU_VERSION is empty -- intl did not load, or ICU is not linked"; exit 1; }
 
 icu_pinned=$(bash "$HERE/../deps/build-deps.sh" --pin icu "$EXPECT")
@@ -1028,7 +1030,7 @@ else
   # No vendored ICU: the image must be using the system one, and INTL_ICU_VERSION
   # must match the libicuuc it actually ships. Reading the soname rather than a
   # package name keeps this working across Debian's libicuNN renames.
-  icu_soname=$(docker run --rm "$IMAGE" sh -c 'ls /usr/lib/*/libicuuc.so.* 2>/dev/null | head -1')
+  icu_soname=$(drun --rm "$IMAGE" sh -c 'ls /usr/lib/*/libicuuc.so.* 2>/dev/null | head -1')
   [ -n "$icu_soname" ] || { echo "FAIL: no libicuuc.so in the image, but PHP $EXPECT is supposed to link the system ICU"; exit 1; }
   icu_major="${icu_soname##*.so.}"
   case "$icu_reported" in
@@ -1043,71 +1045,120 @@ fi
 # a broken formatter: NumberFormatter::format() returns false on failure and
 # `false === ""` is false, so an outright failure would have read as success.
 # Compare the value.
-fmt=$(docker run --rm "$IMAGE" php -r '$f=new NumberFormatter("de_DE",NumberFormatter::DECIMAL); echo $f->format(1234.5);')
+fmt=$(drun --rm "$IMAGE" php -r '$f=new NumberFormatter("de_DE",NumberFormatter::DECIMAL); echo $f->format(1234.5);')
 [ "$fmt" = "1.234,5" ] || { echo "FAIL: intl de_DE formatting wrong: expected '1.234,5', got '$fmt'"; exit 1; }
 echo "ok: intl formats de_DE correctly (1234.5 -> $fmt)"
 
-# The endpoint both TLS checks below use. Overridable because these are the
-# only two assertions in this script that need outbound HTTPS, and an
+# The endpoint every TLS check below uses. Overridable because these are the
+# only assertions in this script that need outbound HTTPS, and an
 # egress-filtered CI runner would otherwise report every image as broken with a
 # message blaming ext/curl or the CA store. One constant, so the positive and
-# negative controls cannot drift onto different hosts.
+# negative controls cannot drift onto different hosts. BUILD_CHECK_TLS_URL=off
+# skips the whole block; the run says so, because an image that was never
+# checked against a real CA store must not read as one that was.
 TLS_URL="${BUILD_CHECK_TLS_URL:-https://www.php.net/}"
 
-# A real TLS handshake through PHP's own openssl extension, not curl. curl
-# resolves its CA bundle independently of PHP's openssl config, so a curl-only
-# check stayed green while the legacy era's vendored OpenSSL had a compiled-in CA
-# store pointing at an empty directory (openssl_get_cert_locations() reported
-# /opt/php-deps/ssl/cert.pem and .../certs, neither real) and file_get_contents,
-# stream_socket_client, SoapClient and SMTP+TLS all failed to verify the peer.
-# Runs for every flavor.
-body=$(docker run --rm -e TLS_URL="$TLS_URL" "$IMAGE" php -r '
-$b = @file_get_contents(getenv("TLS_URL"));
-echo $b === false ? "FAIL" : "OK:" . strlen($b);
-')
-[[ "$body" == OK:* ]] || { echo "FAIL: file_get_contents() over HTTPS failed (openssl CA store broken?): $body"; exit 1; }
-echo "ok: TLS handshake via php's own openssl extension over $TLS_URL ($body)"
-
-# Negative control: a CA file that cannot verify anything must make the same
-# request fail, or the check above is vacuous.
-broken=$(docker run --rm -e TLS_URL="$TLS_URL" "$IMAGE" php -d openssl.cafile=/nonexistent -r '
-$b = @file_get_contents(getenv("TLS_URL"));
-echo $b === false ? "FAIL" : "OK:" . strlen($b);
-')
-[[ "$broken" == "FAIL" ]] || { echo "FAIL: negative control did not fail with a bogus cafile (got: $broken) -- the TLS check above may be vacuous"; exit 1; }
-echo "ok: negative control confirms the TLS check has discriminating power"
-
-# The same handshake through ext/curl, a different code path and the one
-# deps/patches/php-7.4 and php-8.0 exist for. Their curl-openssl3-not-old patch
-# stops ext/curl/config.m4's probe from concluding that trixie's libcurl is
-# linked against a pre-1.1 OpenSSL; without it HAVE_CURL_OLD_OPENSSL is defined,
-# ext/curl reaches into OpenSSL 3's opaque structs and every HTTPS curl_exec()
-# segfaults while plain HTTP keeps working. A segfault kills the child, so it
-# shows up as an empty body and a non-zero exit, not a PHP-level error.
+# One PHP program for all four checks, so retry and classification cannot
+# drift between them. TLS_VIA picks the client (stream = file_get_contents
+# through php's own openssl extension, curl = ext/curl); TLS_EXPECT=ok is the
+# positive check, TLS_EXPECT=verify-fail the negative control, which breaks the
+# CA store (curl: CURLOPT_CAINFO here; stream: openssl.cafile on the php
+# command line) and so must be refused for a certificate reason.
 #
-# stderr is deliberately not folded in with 2>&1: the entrypoint writes an
-# autotuning notice there on every run, and capturing it would make the
-# comparison below fail on a perfectly healthy image.
-body=$(docker run --rm -e TLS_URL="$TLS_URL" "$IMAGE" php -r '
-$ch = curl_init(getenv("TLS_URL"));
-curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30]);
-$b = curl_exec($ch);
-echo $b === false ? "FAIL:" . curl_error($ch) : "OK:" . strlen($b);
-') || { echo "FAIL: curl_exec() over HTTPS crashed the php process (exit $?): $body"; exit 1; }
-[[ "$body" == OK:* ]] || { echo "FAIL: curl_exec() over HTTPS failed: $body"; exit 1; }
-echo "ok: TLS handshake via ext/curl over $TLS_URL ($body)"
+# Prints exactly one line:
+#   OK:<bytes>        the request succeeded
+#   VERIFY:<reason>   the peer's certificate (or the CA store) was rejected:
+#                     curl_errno 60 or 77, or a stream error naming "certificate
+#                     verify failed" or the unloadable cafile
+#   FAIL:<reason>     any other error
+#   TRANSIENT:<why>   DNS, connect, timeout, reset or TLS-handshake errors that
+#                     persisted through every attempt
+# A transient error is retried with a short backoff, so one flaky resolver
+# lookup does not fail an image. The negative control passes only on VERIFY: a
+# DNS or connection failure there proves nothing about the CA store, so it is
+# retried and, if it persists, fails the check.
+TLS_PHP='
+$url = getenv("TLS_URL"); $via = getenv("TLS_VIA"); $neg = getenv("TLS_EXPECT") === "verify-fail";
+$verify_re = "/certificate verify failed|failed loading cafile/i";
+$transient_re = "/getaddrinfo|timed out|refused|reset/i";
+$reason = "no attempt made";
+for ($attempt = 1; $attempt <= 4; $attempt++) {
+    if ($attempt > 1) { sleep(2 * ($attempt - 1)); }
+    if ($via === "curl") {
+        $ch = curl_init($url);
+        $opts = [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30];
+        if ($neg) { $opts[CURLOPT_CAINFO] = "/nonexistent"; }
+        curl_setopt_array($ch, $opts);
+        $b = curl_exec($ch);
+        $no = curl_errno($ch);
+        $reason = "curl_errno $no: " . curl_error($ch);
+        if ($b !== false) { echo "OK:" . strlen($b); exit; }
+        if ($no === 60 || $no === 77) { echo "VERIFY:$reason"; exit; }
+        if (in_array($no, [6, 7, 28, 35, 52, 56], true)) { continue; }
+        echo "FAIL:$reason"; exit;
+    }
+    $msgs = [];
+    set_error_handler(function ($n, $s) use (&$msgs) { $msgs[] = $s; return true; });
+    $b = file_get_contents($url);
+    restore_error_handler();
+    $reason = $msgs ? implode(" | ", $msgs) : "no error reported";
+    if ($b !== false) { echo "OK:" . strlen($b); exit; }
+    if (preg_match($verify_re, $reason)) { echo "VERIFY:$reason"; exit; }
+    if (preg_match($transient_re, $reason)) { continue; }
+    echo "FAIL:$reason"; exit;
+}
+echo "TRANSIENT:still failing after 4 attempts: $reason";
+'
+tls_probe() {  # tls_probe <stream|curl> <ok|verify-fail> [php args] -> the one-line verdict above
+  local via="$1" expect="$2"; shift 2
+  docker run --rm -e TLS_URL="$TLS_URL" -e TLS_VIA="$via" -e TLS_EXPECT="$expect" "$IMAGE" php "$@" -r "$TLS_PHP"
+}
 
-# Negative control for the same measurement channel: a CA file that cannot
-# verify anything must make the curl request fail, or the check above is vacuous.
-broken_curl=$(docker run --rm -e TLS_URL="$TLS_URL" "$IMAGE" php -r '
-$ch = curl_init(getenv("TLS_URL"));
-curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30,
-                        CURLOPT_CAINFO => "/nonexistent"]);
-$b = curl_exec($ch);
-echo $b === false ? "FAIL" : "OK:" . strlen($b);
-')
-[[ "$broken_curl" == "FAIL" ]] || { echo "FAIL: curl negative control did not fail with a bogus CA file (got: $broken_curl) -- the curl TLS check above may be vacuous"; exit 1; }
-echo "ok: negative control confirms the ext/curl check has discriminating power"
+if [ "$TLS_URL" = off ]; then
+  echo "WARNING: BUILD_CHECK_TLS_URL=off -- the four TLS checks (openssl stream and ext/curl, each with a negative control) are SKIPPED; this image's CA store was NOT verified end to end" >&2
+  echo "skip: TLS checks (BUILD_CHECK_TLS_URL=off)"
+else
+  # A real TLS handshake through PHP's own openssl extension, not curl. curl
+  # resolves its CA bundle independently of PHP's openssl config, so a curl-only
+  # check stayed green while the legacy era's vendored OpenSSL had a compiled-in CA
+  # store pointing at an empty directory (openssl_get_cert_locations() reported
+  # /opt/php-deps/ssl/cert.pem and .../certs, neither real) and file_get_contents,
+  # stream_socket_client, SoapClient and SMTP+TLS all failed to verify the peer.
+  # Runs for every flavor. These containers keep plain `docker run`: reaching the
+  # internet is the point.
+  body=$(tls_probe stream ok)
+  [[ "$body" == OK:* ]] || { echo "FAIL: file_get_contents() over HTTPS to $TLS_URL failed (openssl CA store broken, or the endpoint unreachable?): $body"; exit 1; }
+  echo "ok: TLS handshake via php's own openssl extension over $TLS_URL ($body)"
+
+  # Negative control: a CA file that cannot verify anything must make the same
+  # request fail, or the check above is vacuous. It must fail on verification: a
+  # network error would also be a failure and would prove nothing.
+  broken=$(tls_probe stream verify-fail -d openssl.cafile=/nonexistent)
+  [[ "$broken" == VERIFY:* ]] || { echo "FAIL: negative control did not fail on certificate verification with a bogus cafile (got: $broken) -- the TLS check above may be vacuous"; exit 1; }
+  echo "ok: negative control confirms the TLS check has discriminating power"
+
+  # The same handshake through ext/curl, a different code path and the one
+  # deps/patches/php-7.4 and php-8.0 exist for. Their curl-openssl3-not-old patch
+  # stops ext/curl/config.m4's probe from concluding that trixie's libcurl is
+  # linked against a pre-1.1 OpenSSL; without it HAVE_CURL_OLD_OPENSSL is defined,
+  # ext/curl reaches into OpenSSL 3's opaque structs and every HTTPS curl_exec()
+  # segfaults while plain HTTP keeps working. A segfault kills the child, so it
+  # shows up as an empty body and a non-zero exit, not a PHP-level error.
+  #
+  # stderr is deliberately not folded in with 2>&1: the entrypoint writes an
+  # autotuning notice there on every run, and capturing it would make the
+  # comparison below fail on a perfectly healthy image.
+  body=$(tls_probe curl ok) || { echo "FAIL: curl_exec() over HTTPS crashed the php process (exit $?): $body"; exit 1; }
+  [[ "$body" == OK:* ]] || { echo "FAIL: curl_exec() over HTTPS to $TLS_URL failed: $body"; exit 1; }
+  echo "ok: TLS handshake via ext/curl over $TLS_URL ($body)"
+
+  # Negative control for the same measurement channel: a CA file that cannot
+  # verify anything must make the curl request fail, on verification (curl_errno
+  # 60 or 77), or the check above is vacuous.
+  broken_curl=$(tls_probe curl verify-fail)
+  [[ "$broken_curl" == VERIFY:* ]] || { echo "FAIL: curl negative control did not fail on certificate verification with a bogus CA file (got: $broken_curl) -- the curl TLS check above may be vacuous"; exit 1; }
+  echo "ok: negative control confirms the ext/curl check has discriminating power"
+fi
 
 # Flavor shape, checked against what the Dockerfile's own stages actually
 # build rather than assumed. Only ext-builder carries a compiler, g++, autoconf
@@ -1121,10 +1172,10 @@ no_toolchain() {  # no_toolchain <flavor> -- no compiler, assembler, linker, aut
   # which every image has. The triplet forms are what a cross/multiarch
   # binutils installs. Fail-closed control first: if the probe shell cannot
   # run at all, "found nothing" below would be a pass on a dead container.
-  docker run --rm "$IMAGE" sh -c 'command -v sh' >/dev/null 2>&1 \
+  drun --rm "$IMAGE" sh -c 'command -v sh' >/dev/null 2>&1 \
     || { echo "FAIL: $1: the toolchain probe cannot run a shell in the image, so its absence checks would prove nothing"; exit 1; }
   local found
-  found=$(docker run --rm "$IMAGE" sh -c '
+  found=$(drun --rm "$IMAGE" sh -c '
     for t in gcc g++ cc c++ cpp clang clang++ as ld ld.bfd ld.gold ld.lld lld gold \
              x86_64-linux-gnu-gcc x86_64-linux-gnu-g++ x86_64-linux-gnu-as x86_64-linux-gnu-ld \
              aarch64-linux-gnu-gcc aarch64-linux-gnu-g++ aarch64-linux-gnu-as aarch64-linux-gnu-ld \
@@ -1139,13 +1190,13 @@ no_toolchain() {  # no_toolchain <flavor> -- no compiler, assembler, linker, aut
 case "$FLAVOR" in
   ext-builder)
     for tool in gcc g++ make autoconf pkg-config phpize php-config; do
-      docker run --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
+      drun --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
         || { echo "FAIL: ext-builder is missing $tool (Dockerfile's ext-builder stage should provide it)"; exit 1; }
     done
-    docker run --rm "$IMAGE" test -f /usr/local/include/php/main/php.h \
+    drun --rm "$IMAGE" test -f /usr/local/include/php/main/php.h \
       || { echo "FAIL: ext-builder has no PHP headers under /usr/local/include/php"; exit 1; }
     for tool in composer node npm; do
-      if docker run --rm "$IMAGE" sh -c "command -v $tool" >/dev/null 2>&1; then
+      if drun --rm "$IMAGE" sh -c "command -v $tool" >/dev/null 2>&1; then
         echo "FAIL: ext-builder carries $tool -- it is a compile stage, composer and node belong to cli-builder"; exit 1
       fi
     done
@@ -1154,11 +1205,11 @@ case "$FLAVOR" in
     # php-config has to describe the runtime it sits in: the extension dir
     # names the Zend module API, so equal dirs mean an extension built here
     # loads in the fpm/cli image of the same version.
-    pc_dir=$(docker run --rm "$IMAGE" php-config --extension-dir)
-    rt_dir=$(docker run --rm "$IMAGE" php -r 'echo ini_get("extension_dir");')
+    pc_dir=$(drun --rm "$IMAGE" php-config --extension-dir)
+    rt_dir=$(drun --rm "$IMAGE" php -r 'echo ini_get("extension_dir");')
     [ -n "$pc_dir" ] && [ "$pc_dir" = "$rt_dir" ] \
       || { echo "FAIL: php-config --extension-dir ('$pc_dir') != the runtime's extension_dir ('$rt_dir')"; exit 1; }
-    pc_ver=$(docker run --rm "$IMAGE" php-config --version)
+    pc_ver=$(drun --rm "$IMAGE" php-config --version)
     [ "$pc_ver" = "$RELEASE" ] || { echo "FAIL: php-config --version is '$pc_ver', expected $RELEASE"; exit 1; }
     echo "ok: php-config matches the runtime ($pc_ver, extension_dir $pc_dir)"
 
@@ -1167,7 +1218,7 @@ case "$FLAVOR" in
     # into this image's own php. The cross-image half (copy into fpm and cli,
     # PHP_EXT_ENABLE) is tests/test-ext-builder.sh, which needs all three
     # images of a version and so cannot run from one build leg.
-    hello_out=$(docker run --rm --init -v "$HERE/fixtures/ext-hello":/src:ro "$IMAGE" \
+    hello_out=$(drun --rm --init -v "$HERE/fixtures/ext-hello":/src:ro "$IMAGE" \
       timeout 600 sh -c '/src/build.sh /out >/tmp/build.log 2>&1 || { cat /tmp/build.log; exit 1; }
         so=$(find /out -name hello.so); test -n "$so" || exit 1
         php -d "extension=$so" -r "echo hello_world(), \"|\", hello_api();"') \
@@ -1181,25 +1232,25 @@ case "$FLAVOR" in
     echo "ok: cli-builder carries no compiler, autoconf, phpize/php-config or PHP headers"
 
     for tool in git rsync patch make brotli sqlite3 jq less nano ps unzip zip zstd composer node npm npx corepack semantic-release mariadb mariadb-dump; do
-      docker run --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
+      drun --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
         || { echo "FAIL: cli-builder is missing $tool (Dockerfile's cli-builder stage should provide it)"; exit 1; }
     done
-    node_major=$(docker run --rm "$IMAGE" node -p 'process.versions.node.split(".")[0]')
+    node_major=$(drun --rm "$IMAGE" node -p 'process.versions.node.split(".")[0]')
     [ "$node_major" = "24" ] || { echo "FAIL: cli-builder's node major is '$node_major', expected 24 (copied from the node:24 image)"; exit 1; }
     for cmd in "npm --version" "npx --version" "corepack --version" "composer --version" "semantic-release --version"; do
-      docker run --rm "$IMAGE" sh -c "$cmd" >/dev/null 2>&1 \
+      drun --rm "$IMAGE" sh -c "$cmd" >/dev/null 2>&1 \
         || { echo "FAIL: cli-builder: '$cmd' does not run as the image user"; exit 1; }
     done
     # npm and corepack cache under HOME by default, and uid 33's HOME (/var/www)
     # does not exist: `npm ci` as the image user fails unless both caches point
     # somewhere writable.
     for probe in "npm config get cache" 'printenv COREPACK_HOME'; do
-      cache_dir=$(docker run --rm "$IMAGE" sh -c "$probe") \
+      cache_dir=$(drun --rm "$IMAGE" sh -c "$probe") \
         || { echo "FAIL: cli-builder: '$probe' failed as the image user"; exit 1; }
       [ -n "$cache_dir" ] && [ "$cache_dir" != undefined ] \
         || { echo "FAIL: cli-builder: '$probe' printed '$cache_dir'"; exit 1; }
-      docker run --rm "$IMAGE" sh -c 'mkdir -p "$1" && t=$(mktemp -p "$1") && rm -f "$t"' sh "$cache_dir" \
-        || { echo "FAIL: cli-builder: $cache_dir ('$probe') is not writable as the image user (uid $(docker run --rm "$IMAGE" id -u))"; exit 1; }
+      drun --rm "$IMAGE" sh -c 'mkdir -p "$1" && t=$(mktemp -p "$1") && rm -f "$t"' sh "$cache_dir" \
+        || { echo "FAIL: cli-builder: $cache_dir ('$probe') is not writable as the image user (uid $(drun --rm "$IMAGE" id -u))"; exit 1; }
     done
     echo "ok: cli-builder's npm and corepack caches are writable as the image user"
     # npm is pinned to 11.21.0 in the node-tools stage (the node image bundles an
@@ -1208,14 +1259,14 @@ case "$FLAVOR" in
     # @semantic-release/npm is a dependency of that package and expected. The
     # pattern is the exact node_modules/npm path, so
     # @semantic-release/npm/package.json is not a match.
-    npm_version=$(docker run --rm "$IMAGE" npm --version)
+    npm_version=$(drun --rm "$IMAGE" npm --version)
     [ "$npm_version" = "11.21.0" ] || { echo "FAIL: cli-builder: npm --version is '$npm_version', expected 11.21.0"; exit 1; }
-    npm_pkgs=$(docker run --rm "$IMAGE" find /usr/local/lib/node_modules -path '*/node_modules/npm/package.json' -not -path '/usr/local/lib/node_modules/semantic-release/*')
+    npm_pkgs=$(drun --rm "$IMAGE" find /usr/local/lib/node_modules -path '*/node_modules/npm/package.json' -not -path '/usr/local/lib/node_modules/semantic-release/*')
     [ "$npm_pkgs" = "/usr/local/lib/node_modules/npm/package.json" ] \
       || { echo "FAIL: cli-builder: expected exactly one npm outside semantic-release's own tree, found: $npm_pkgs"; exit 1; }
-    npm_pkg_version=$(docker run --rm "$IMAGE" node -p 'require("/usr/local/lib/node_modules/npm/package.json").version')
+    npm_pkg_version=$(drun --rm "$IMAGE" node -p 'require("/usr/local/lib/node_modules/npm/package.json").version')
     [ "$npm_pkg_version" = "11.21.0" ] || { echo "FAIL: cli-builder: the installed npm package.json says $npm_pkg_version, expected 11.21.0"; exit 1; }
-    sr_npm=$(docker run --rm "$IMAGE" find /usr/local/lib/node_modules/semantic-release -path '*/node_modules/npm/package.json')
+    sr_npm=$(drun --rm "$IMAGE" find /usr/local/lib/node_modules/semantic-release -path '*/node_modules/npm/package.json')
     [ -n "$sr_npm" ] || { echo "FAIL: cli-builder: the control find saw no npm inside semantic-release's tree -- the exclusion above is untested, so its result proves nothing"; exit 1; }
     echo "ok: cli-builder's npm is 11.21.0 and the only npm outside semantic-release's tree (control: its own nested copy is found)"
     # VEX drift: vex/php.openvex.json names the bundled npm packages we accepted a
@@ -1239,7 +1290,7 @@ PY
     )
     [ -n "$vex_pkgs" ] || { echo "FAIL: cli-builder: vex/php.openvex.json names no npm package -- the drift check below would prove nothing"; exit 1; }
     while read -r vex_name vex_want; do
-      vex_have=$(docker run --rm "$IMAGE" find /usr/local/lib/node_modules -path "*/node_modules/$vex_name/package.json" \
+      vex_have=$(drun --rm "$IMAGE" find /usr/local/lib/node_modules -path "*/node_modules/$vex_name/package.json" \
         -exec node -p 'require(process.argv[1]).version' {} \;)
       grep -qxF "$vex_want" <<<"$vex_have" \
         || { echo "FAIL: cli-builder: vex/php.openvex.json says $vex_name@$vex_want but the image has: ${vex_have:-no copy of it} -- update vex/php.openvex.json (and run: python3 ci/vex.py trivyignore --write)"; exit 1; }
@@ -1256,7 +1307,7 @@ esac
 if [ "$FLAVOR" = fpm ]; then
   # `php-fpm -t` also runs at build time (Dockerfile); assert it against the
   # shipped image too, since a pulled image is run as-is.
-  if docker run --rm --entrypoint php-fpm "$IMAGE" -t >/dev/null 2>&1; then
+  if drun --rm --entrypoint php-fpm "$IMAGE" -t >/dev/null 2>&1; then
     echo "ok: php-fpm -t against the shipped config"
   else
     echo "FAIL: php-fpm -t failed against the image's own shipped config"; exit 1
@@ -1294,13 +1345,13 @@ fi
 # that never started makes `docker run` exit non-zero, which reads exactly like
 # "command -v found nothing". Something definitely on the image must be found
 # the same way the loop below looks for absence.
-control_bin=$(docker run --rm "$IMAGE" sh -c "command -v php" 2>/dev/null || true)
+control_bin=$(drun --rm "$IMAGE" sh -c "command -v php" 2>/dev/null || true)
 [ -n "$control_bin" ] \
   || { echo "FAIL: docker run $IMAGE sh -c 'command -v php' produced nothing -- the container may not even start, so the mariadb-absence loop below would prove nothing"; exit 1; }
 echo "ok: control -- the image runs and 'command -v' finds php ($control_bin), so the absence loop below can be trusted"
 
 for b in mariadbd mysqld mariadb-install-db mysql_install_db; do
-  if docker run --rm "$IMAGE" sh -c "command -v $b" >/dev/null 2>&1; then
+  if drun --rm "$IMAGE" sh -c "command -v $b" >/dev/null 2>&1; then
     echo "FAIL: $b is present in the runtime image -- mariadb-server leaked out of the php-build stage"
     exit 1
   fi

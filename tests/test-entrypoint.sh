@@ -7,6 +7,9 @@ case "$FLAVOR" in
   *) echo "FAIL: flavor '$FLAVOR' is not one of fpm, cli, cli-builder" >&2; exit 1 ;;
 esac
 fail() { echo "FAIL: $*" >&2; exit 1; }
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tests/docker-lib.sh
+. "$HERE/docker-lib.sh"
 
 # ENTRYPOINT_OVERRIDE/WWW_CONF_OVERRIDE are opt-in local paths, bind-mounted
 # read-only over the image's own copy on every `docker run`, so the working-tree
@@ -75,7 +78,7 @@ fcgi_request() {
 # The proc_open assertions below gate on PHP_MAJOR and require that warning's own
 # text: the 7.x shape can never occur on 8.x, and the probe's derived
 # PROC_OPEN_BLOCKED marker alone would also appear for any unrelated failure.
-PHP_MAJOR=$(docker run --rm "$IMAGE" php -r 'echo PHP_MAJOR_VERSION;')
+PHP_MAJOR=$(drun --rm "$IMAGE" php -r 'echo PHP_MAJOR_VERSION;')
 
 # This file runs once per flavor (smoke.sh passes the image actually under test), so
 # assertions that only mean something for an fpm pool config are gated on $FLAVOR.
@@ -83,14 +86,14 @@ PHP_MAJOR=$(docker run --rm "$IMAGE" php -r 'echo PHP_MAJOR_VERSION;')
 # for every flavor.
 
 # 1. ini overrides land
-got=$(docker run --rm -e PHP_MEMORY_LIMIT=777M "$IMAGE" php -r 'echo ini_get("memory_limit");')
+got=$(drun --rm -e PHP_MEMORY_LIMIT=777M "$IMAGE" php -r 'echo ini_get("memory_limit");')
 [[ "$got" == "777M" ]] || fail "PHP_MEMORY_LIMIT ignored, got '$got'"
 echo "ok: PHP_MEMORY_LIMIT"
 
 # 2. extension opt-in -- both names, not just the first
 # bz2/yaml rather than mongodb: ext.json declares them php>=7.0, so they exist on
 # every image this script runs against (mongodb needs php>=8.1).
-mods=$(docker run --rm -e PHP_EXT_ENABLE=bz2,yaml "$IMAGE" php -m)
+mods=$(drun --rm -e PHP_EXT_ENABLE=bz2,yaml "$IMAGE" php -m)
 echo "$mods" | grep -qix bz2 || fail "PHP_EXT_ENABLE did not load bz2"
 echo "$mods" | grep -qix yaml || fail "PHP_EXT_ENABLE did not load yaml"
 echo "ok: PHP_EXT_ENABLE"
@@ -102,20 +105,20 @@ if [ "$FLAVOR" = fpm ]; then
 # read-only.
 
 # 3. autotune scales down on a small container
-tt=$(docker run --rm -m 512m "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm -m 512m "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q "test is successful" || fail "512m: php-fpm rejected the config: $tt"
 children=$(echo "$tt" | grep -oE 'pm\.max_children = [0-9]+' | grep -oE '[0-9]+' | single_value)
 [[ "$children" -ge 4 && "$children" -le 8 ]] || fail "512m container got max_children=$children"
 echo "ok: autotune small ($children children)"
 
 # 4. and up on a large one
-tt=$(docker run --rm -m 4g "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm -m 4g "$IMAGE" php-fpm -tt 2>&1)
 children_l=$(echo "$tt" | grep -oE 'pm\.max_children = [0-9]+' | grep -oE '[0-9]+' | single_value)
 [[ "$children_l" -gt "$children" ]] || fail "4g container got $children_l, not more than 512m's $children"
 echo "ok: autotune large ($children_l children)"
 
 # 5. explicit override wins over autotune
-tt=$(docker run --rm -m 4g -e PHP_FPM_MAX_CHILDREN=3 "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm -m 4g -e PHP_FPM_MAX_CHILDREN=3 "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q 'pm\.max_children = 3$' || fail "PHP_FPM_MAX_CHILDREN ignored: $tt"
 echo "ok: explicit override wins"
 fi
@@ -123,13 +126,13 @@ fi
 # 6. read-only rootfs still starts
 # Capture, then match: a host-side `docker run ... | grep -q` SIGPIPEs the producer
 # on first match and pipefail reports a false failure.
-ro_out=$(docker run --rm --read-only --tmpfs /tmp "$IMAGE" php -r 'echo "ro-ok";')
+ro_out=$(drun --rm --read-only --tmpfs /tmp "$IMAGE" php -r 'echo "ro-ok";')
 grep -q ro-ok <<<"$ro_out" \
   || fail "does not start with a read-only rootfs"
 echo "ok: read-only rootfs"
 
 # 7. unknown extension fails loudly rather than silently
-if docker run --rm -e PHP_EXT_ENABLE=notareal_ext "$IMAGE" php -v >/dev/null 2>&1; then
+if drun --rm -e PHP_EXT_ENABLE=notareal_ext "$IMAGE" php -v >/dev/null 2>&1; then
   fail "unknown extension name did not fail"
 fi
 echo "ok: unknown extension rejected"
@@ -141,7 +144,7 @@ echo "ok: unknown extension rejected"
 
 # 8. ../ is rejected by the guard
 set +e
-out=$(docker run --rm -e PHP_EXT_ENABLE=../etc "$IMAGE" php -v 2>&1 >/dev/null)
+out=$(drun --rm -e PHP_EXT_ENABLE=../etc "$IMAGE" php -v 2>&1 >/dev/null)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "../ traversal in PHP_EXT_ENABLE was not rejected"
@@ -150,7 +153,7 @@ echo "ok: ../ rejected by guard"
 
 # 9. a leading / is rejected by the guard
 set +e
-out=$(docker run --rm -e PHP_EXT_ENABLE=/etc/passwd "$IMAGE" php -v 2>&1 >/dev/null)
+out=$(drun --rm -e PHP_EXT_ENABLE=/etc/passwd "$IMAGE" php -v 2>&1 >/dev/null)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "leading / in PHP_EXT_ENABLE was not rejected"
@@ -160,14 +163,14 @@ echo "ok: leading / rejected by guard"
 # 10. an empty element (stray/doubled comma) is tolerated, not fatal -- reached by
 # calling php-ext-enable directly, since the entrypoint's `tr ',' ' '` plus unquoted
 # word-splitting never produces an empty positional argument.
-empty_arg_mods=$(docker run --rm "$IMAGE" sh -c 'php-ext-enable "" bz2 >/dev/null && php -m')
+empty_arg_mods=$(drun --rm "$IMAGE" sh -c 'php-ext-enable "" bz2 >/dev/null && php -m')
 grep -qix bz2 <<<"$empty_arg_mods" \
   || fail "an empty argument to php-ext-enable broke a valid extension"
 echo "ok: empty element tolerated"
 
 # 11. a shell metacharacter in the name is rejected by the guard
 set +e
-out=$(docker run --rm -e 'PHP_EXT_ENABLE=bz2;id' "$IMAGE" php -v 2>&1 >/dev/null)
+out=$(drun --rm -e 'PHP_EXT_ENABLE=bz2;id' "$IMAGE" php -v 2>&1 >/dev/null)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "a shell metacharacter in PHP_EXT_ENABLE was not rejected"
@@ -181,13 +184,13 @@ echo "ok: shell metacharacter rejected by guard"
 # 7.0 and 7.1 ship without the module (ext.json: php >=7.2); there the same request
 # has to refuse, naming the extension, rather than start without it. Whether it
 # should be present at all is smoke.sh's registry-derived check.
-if docker run --rm --entrypoint sh "$IMAGE" -c 'test -f "$(php -r "echo ini_get(\"extension_dir\");")/snuffleupagus.so"'; then
-  mods=$(docker run --rm -e PHP_SNUFFLEUPAGUS=laravel "$IMAGE" php -m)
+if drun --rm --entrypoint sh "$IMAGE" -c 'test -f "$(php -r "echo ini_get(\"extension_dir\");")/snuffleupagus.so"'; then
+  mods=$(drun --rm -e PHP_SNUFFLEUPAGUS=laravel "$IMAGE" php -m)
   echo "$mods" | grep -qi snuffleupagus || fail "PHP_SNUFFLEUPAGUS=laravel did not load the snuffleupagus module"
   echo "ok: PHP_SNUFFLEUPAGUS enables the module"
 else
   set +e
-  out=$(docker run --rm -e PHP_SNUFFLEUPAGUS=laravel "$IMAGE" php -m 2>&1)
+  out=$(drun --rm -e PHP_SNUFFLEUPAGUS=laravel "$IMAGE" php -m 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "PHP_SNUFFLEUPAGUS=laravel started on an image without snuffleupagus: $out"
@@ -197,7 +200,7 @@ else
 fi
 
 set +e
-out=$(docker run --rm -e PHP_SNUFFLEUPAGUS=foo "$IMAGE" php -v 2>&1 >/dev/null)
+out=$(drun --rm -e PHP_SNUFFLEUPAGUS=foo "$IMAGE" php -v 2>&1 >/dev/null)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "PHP_SNUFFLEUPAGUS=foo (no such ruleset) was not rejected"
@@ -210,7 +213,7 @@ echo "ok: an unknown ruleset name still fails loudly"
 # repeated here so the whole contract sits in one place.
 for v in '../etc/passwd' 'a/b' 'UPPER' '-x' '_x' 'a b' 'a.b'; do
   set +e
-  out=$(docker run --rm -e "PHP_SNUFFLEUPAGUS=${v}" "$IMAGE" php -v 2>&1 >/dev/null)
+  out=$(drun --rm -e "PHP_SNUFFLEUPAGUS=${v}" "$IMAGE" php -v 2>&1 >/dev/null)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "PHP_SNUFFLEUPAGUS='${v}' was not rejected"
@@ -218,7 +221,7 @@ for v in '../etc/passwd' 'a/b' 'UPPER' '-x' '_x' 'a b' 'a.b'; do
     || fail "PHP_SNUFFLEUPAGUS='${v}' rejected for the wrong reason: $out"
 done
 set +e
-out=$(docker run --rm -e PHP_SNUFFLEUPAGUS= "$IMAGE" php -v 2>&1 >/dev/null)
+out=$(drun --rm -e PHP_SNUFFLEUPAGUS= "$IMAGE" php -v 2>&1 >/dev/null)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "PHP_SNUFFLEUPAGUS= (set but empty) was accepted"
@@ -228,13 +231,13 @@ echo "ok: a PHP_SNUFFLEUPAGUS that is not a bare lowercase name is refused"
 
 # 12c. A custom ruleset: a file mounted read-only into the ruleset directory,
 # selected by name. Needs the module, so images without it skip.
-if docker run --rm --entrypoint sh "$IMAGE" -c 'test -f "$(php -r "echo ini_get(\"extension_dir\");")/snuffleupagus.so"'; then
+if drun --rm --entrypoint sh "$IMAGE" -c 'test -f "$(php -r "echo ini_get(\"extension_dir\");")/snuffleupagus.so"'; then
   sp_custom_dir=$(mktemp -d)
   chmod 755 "$sp_custom_dir"
   printf '%s\n' 'sp.harden_random.enable();' > "${sp_custom_dir}/my-site_2.rules"
   chmod 644 "${sp_custom_dir}/my-site_2.rules"
   out=$(echo '<?php echo "loaded:", ini_get("sp.configuration_file");' \
-    | docker run --rm -i -v "${sp_custom_dir}/my-site_2.rules:/usr/local/etc/php/snuffleupagus/my-site_2.rules:ro" \
+    | drun --rm -i -v "${sp_custom_dir}/my-site_2.rules:/usr/local/etc/php/snuffleupagus/my-site_2.rules:ro" \
         -e PHP_SNUFFLEUPAGUS=my-site_2 "$IMAGE" php 2>&1) \
     || { rm -rf "$sp_custom_dir"; fail "a mounted custom ruleset did not load: $out"; }
   rm -rf "$sp_custom_dir"
@@ -248,7 +251,7 @@ fi
 # LD_PRELOAD, accepts the documented boolean spellings, and refuses anything that is
 # neither on nor off rather than treating it as off.
 set +e
-out=$(docker run --rm -e PHP_CHMOD_SHIM=1 "$IMAGE" env 2>&1)
+out=$(drun --rm -e PHP_CHMOD_SHIM=1 "$IMAGE" env 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 0 ] || fail "PHP_CHMOD_SHIM=1 did not start: $out"
@@ -257,7 +260,7 @@ echo "ok: PHP_CHMOD_SHIM=1 sets LD_PRELOAD"
 
 for v in true TRUE yes on; do
   set +e
-  out=$(docker run --rm -e "PHP_CHMOD_SHIM=${v}" "$IMAGE" env 2>&1)
+  out=$(drun --rm -e "PHP_CHMOD_SHIM=${v}" "$IMAGE" env 2>&1)
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "PHP_CHMOD_SHIM=${v} did not start: $out"
@@ -266,14 +269,14 @@ done
 echo "ok: PHP_CHMOD_SHIM accepts true/TRUE/yes/on"
 
 for v in 0 false FALSE no off; do
-  out=$(docker run --rm -e "PHP_CHMOD_SHIM=${v}" "$IMAGE" env 2>&1)
+  out=$(drun --rm -e "PHP_CHMOD_SHIM=${v}" "$IMAGE" env 2>&1)
   echo "$out" | grep -q '^LD_PRELOAD=' && fail "PHP_CHMOD_SHIM=${v} unexpectedly set LD_PRELOAD: $out"
 done
 echo "ok: PHP_CHMOD_SHIM accepts 0/false/no/off and leaves the shim inert"
 
 for v in 2 maybe TRUEX; do
   set +e
-  out=$(docker run --rm -e "PHP_CHMOD_SHIM=${v}" "$IMAGE" php -v 2>&1 >/dev/null)
+  out=$(drun --rm -e "PHP_CHMOD_SHIM=${v}" "$IMAGE" php -v 2>&1 >/dev/null)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "PHP_CHMOD_SHIM=${v} (neither on nor off) was not rejected"
@@ -286,13 +289,13 @@ echo "ok: PHP_CHMOD_SHIM rejects ambiguous values instead of silently treating t
 if [ "$FLAVOR" = fpm ]; then
 # 14. An M-suffixed size (PHP_FPM_WORKER_MEMORY=64M) must not silently fall back to
 # the baked static pm.max_children.
-tt=$(docker run --rm -m 512m -e PHP_FPM_WORKER_MEMORY=64M "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm -m 512m -e PHP_FPM_WORKER_MEMORY=64M "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q "test is successful" || fail "PHP_FPM_WORKER_MEMORY=64M was rejected: $tt"
 echo "$tt" | grep -q 'pm\.max_children = 4$' || fail "PHP_FPM_WORKER_MEMORY=64M did not autotune: $tt"
 echo "ok: M-suffixed PHP_FPM_WORKER_MEMORY accepted"
 
 # also: a value that parses to zero must abort loudly, not silently
-if docker run --rm -m 512m -e PHP_FPM_WORKER_MEMORY=0 "$IMAGE" true >/dev/null 2>&1; then
+if drun --rm -m 512m -e PHP_FPM_WORKER_MEMORY=0 "$IMAGE" true >/dev/null 2>&1; then
   fail "PHP_FPM_WORKER_MEMORY=0 (division by zero) was not rejected"
 fi
 echo "ok: PHP_FPM_WORKER_MEMORY=0 rejected loudly"
@@ -302,7 +305,7 @@ if [ "$FLAVOR" = fpm ]; then
 # 15. With no cgroup memory limit, autotuning must not derive from host RAM (hundreds
 # of workers on a shared host); it must warn and assume a small fixed default.
 set +e
-out=$(docker run --rm -e PHP_FPM_WORKER_MEMORY=64 "$IMAGE" php-fpm -tt 2>&1)
+out=$(drun --rm -e PHP_FPM_WORKER_MEMORY=64 "$IMAGE" php-fpm -tt 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 0 ] || fail "no-limit case did not exit 0: $out"
@@ -315,12 +318,12 @@ fi
 if [ "$FLAVOR" = fpm ]; then
 # 16. A read-only rootfs must autotune regardless of invocation shape: direct
 # argv[0]=php-fpm, and wrapped in a shell.
-tt=$(docker run --rm --read-only --tmpfs /tmp -m 512m "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm --read-only --tmpfs /tmp -m 512m "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q "test is successful" || fail "read-only rootfs: php-fpm rejected the config: $tt"
 echo "$tt" | grep -q 'pm\.max_children = 16$' && fail "read-only rootfs fell back to the static default: $tt"
 # The real ENTRYPOINT still runs; only the COMMAND is a wrapper, so the entrypoint's
 # "$@" is ["sh", "-c", "exec php-fpm -tt"] and $1 is not php-fpm.
-tt_wrapped=$(docker run --rm --read-only --tmpfs /tmp -m 256m "$IMAGE" \
+tt_wrapped=$(drun --rm --read-only --tmpfs /tmp -m 256m "$IMAGE" \
   sh -c 'exec php-fpm -tt' 2>&1)
 echo "$tt_wrapped" | grep -q 'pm\.max_children = 4$' \
   || fail "read-only rootfs did not autotune when php-fpm was wrapped in a shell: $tt_wrapped"
@@ -330,7 +333,7 @@ fi
 # 17. A newline in a core PHP_* value must not inject a second ini directive (e.g.
 # auto_prepend_file, which would run arbitrary PHP on every request).
 set +e
-out=$(docker run --rm -e "PHP_MEMORY_LIMIT=$(printf '128M\nauto_prepend_file=/tmp/x.php')" "$IMAGE" php -r 'echo ini_get("memory_limit");' 2>&1)
+out=$(drun --rm -e "PHP_MEMORY_LIMIT=$(printf '128M\nauto_prepend_file=/tmp/x.php')" "$IMAGE" php -r 'echo ini_get("memory_limit");' 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "newline-embedded PHP_MEMORY_LIMIT was not rejected: $out"
@@ -340,20 +343,20 @@ echo "ok: newline injection rejected"
 if [ "$FLAVOR" = fpm ]; then
 # 18. PHP_FPM_ACCESS_LOG. /dev/null, not an arbitrary path: `-tt` opens the access log
 # while validating, so a missing path would fail for an unrelated reason.
-tt=$(docker run --rm -m 512m -e PHP_FPM_ACCESS_LOG=/dev/null "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm -m 512m -e PHP_FPM_ACCESS_LOG=/dev/null "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q "test is successful" || fail "PHP_FPM_ACCESS_LOG=/dev/null was rejected: $tt"
 echo "$tt" | grep -q 'access\.log = /dev/null$' || fail "PHP_FPM_ACCESS_LOG ignored: $tt"
 echo "ok: PHP_FPM_ACCESS_LOG"
 
 # 19. PHP_FPM_MAX_CHILDREN=1 must produce a config php-fpm accepts (min_spare,
 # max_spare and start_servers all clamped to 1).
-tt=$(docker run --rm -m 512m -e PHP_FPM_MAX_CHILDREN=1 "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm -m 512m -e PHP_FPM_MAX_CHILDREN=1 "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q "test is successful" || fail "PHP_FPM_MAX_CHILDREN=1 produced a config php-fpm rejects: $tt"
 echo "ok: PHP_FPM_MAX_CHILDREN=1 starts cleanly"
 
 # 20. An explicit small PHP_FPM_START_SERVERS is honored exactly, not raised to the
 # derived-default floor of 2.
-tt=$(docker run --rm -m 4g -e PHP_FPM_START_SERVERS=1 "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm -m 4g -e PHP_FPM_START_SERVERS=1 "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q 'pm\.start_servers = 1$' || fail "explicit PHP_FPM_START_SERVERS=1 was overridden: $tt"
 echo "ok: explicit start_servers honored below the derived-default floor"
 fi
@@ -361,7 +364,7 @@ fi
 # 21. PHP_EXT_ENABLE must not be glob-expanded against the working directory before
 # validation.
 set +e
-out=$(docker run --rm -w /usr/local/etc/php/conf.d -e 'PHP_EXT_ENABLE=*' "$IMAGE" php -v 2>&1 >/dev/null)
+out=$(drun --rm -w /usr/local/etc/php/conf.d -e 'PHP_EXT_ENABLE=*' "$IMAGE" php -v 2>&1 >/dev/null)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "PHP_EXT_ENABLE=* was not rejected: $out"
@@ -370,7 +373,7 @@ echo "ok: PHP_EXT_ENABLE=* is not glob-expanded"
 
 # 22. PHP_EXT_ENABLE reducing to nothing after splitting on commas is a typo, not a
 # silent no-op.
-if docker run --rm -e 'PHP_EXT_ENABLE=,,,' "$IMAGE" php -v >/dev/null 2>&1; then
+if drun --rm -e 'PHP_EXT_ENABLE=,,,' "$IMAGE" php -v >/dev/null 2>&1; then
   fail "PHP_EXT_ENABLE=,,, silently did nothing instead of failing loudly"
 fi
 echo "ok: PHP_EXT_ENABLE=,,, rejected loudly"
@@ -380,7 +383,7 @@ echo "ok: PHP_EXT_ENABLE=,,, rejected loudly"
 # 23. A file planted at a fixed, guessable /tmp/php-conf.d must have no effect, while
 # a legitimate override in the same run still applies (the read-only fallback
 # directory is unguessable rather than merely broken).
-out=$(docker run --rm --read-only --tmpfs /tmp -m 512m -e PHP_MEMORY_LIMIT=321M --entrypoint sh "$IMAGE" -c '
+out=$(drun --rm --read-only --tmpfs /tmp -m 512m -e PHP_MEMORY_LIMIT=321M --entrypoint sh "$IMAGE" -c '
   mkdir -p /tmp/php-conf.d
   echo "auto_prepend_file=/tmp/pwn.php" > /tmp/php-conf.d/99-zzz-evil.ini
   docker-php-entrypoint php -r "echo \"AP=[\".ini_get(\"auto_prepend_file\").\"] ML=\".ini_get(\"memory_limit\");"
@@ -391,7 +394,7 @@ echo "ok: a file planted at the old world-writable conf.d fallback path is ignor
 
 # 24. The private conf.d fallback directory must be mode 0700, not merely unused by
 # the attack above.
-perm=$(docker run --rm --read-only --tmpfs /tmp -m 512m --entrypoint sh "$IMAGE" -c '
+perm=$(drun --rm --read-only --tmpfs /tmp -m 512m --entrypoint sh "$IMAGE" -c '
   docker-php-entrypoint true >/dev/null 2>&1
   stat -c "%a %U" /tmp/php-conf.* 2>/dev/null | head -1
 ')
@@ -401,7 +404,7 @@ echo "ok: private conf.d fallback directory is mode 700, not world-writable"
 if [ "$FLAVOR" = fpm ]; then
 # 25. The writable case uses the baked php-fpm.conf directly, with no /tmp fallback
 # directory.
-tt=$(docker run --rm -m 512m "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm -m 512m "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q "/usr/local/etc/php-fpm.conf test is successful" \
   || fail "writable case unexpectedly used something other than the baked config: $tt"
 echo "ok: writable case still uses the baked php-fpm.conf directly"
@@ -410,7 +413,7 @@ fi
 # 26. An empty element in an operator-supplied PHP_INI_SCAN_DIR (leading, trailing or
 # doubled ":") must not make every conf.d ini parse twice. Compared against the
 # unset-PHP_INI_SCAN_DIR file count, not a hardcoded number.
-baseline=$(docker run --rm "$IMAGE" php -r 'echo count(explode(",", php_ini_scanned_files()));')
+baseline=$(drun --rm "$IMAGE" php -r 'echo count(explode(",", php_ini_scanned_files()));')
 # A trailing slash, a doubled slash, "/." and "/./" are the same directory spelled
 # another ordinary way and must not double-scan either.
 for val in '/nonexistent:' ':/nonexistent' '/a::/b' '/usr/local/etc/php/conf.d:' ':' \
@@ -418,7 +421,7 @@ for val in '/nonexistent:' ':/nonexistent' '/a::/b' '/usr/local/etc/php/conf.d:'
            ':/usr/local/etc/php/conf.d/' '/nonexistent/:' \
            '//usr/local/etc/php/conf.d' '/usr/local/etc/php/conf.d/.' \
            '/usr/local/etc/php/conf.d/./'; do
-  n=$(docker run --rm -e "PHP_INI_SCAN_DIR=${val}" "$IMAGE" php -r 'echo count(explode(",", php_ini_scanned_files()));')
+  n=$(drun --rm -e "PHP_INI_SCAN_DIR=${val}" "$IMAGE" php -r 'echo count(explode(",", php_ini_scanned_files()));')
   case "$val" in
     '/nonexistent:'|':/nonexistent'|'/a::/b'|'/nonexistent/:')
       # these also scan a nonexistent extra dir (0 files) alongside conf.d
@@ -434,7 +437,7 @@ echo "ok: PHP_INI_SCAN_DIR with an empty element or a trailing slash never doubl
 # 27. A read-only rootfs plus an operator PHP_INI_SCAN_DIR with no empty element must
 # not drop the baked conf.d, which would disable every requested extension and every
 # baked hardening setting (disable_functions, opcache).
-out=$(docker run --rm --read-only --tmpfs /tmp -m 512m -e PHP_INI_SCAN_DIR=/nonexistent -e PHP_EXT_ENABLE=bz2 "$IMAGE" sh -c '
+out=$(drun --rm --read-only --tmpfs /tmp -m 512m -e PHP_INI_SCAN_DIR=/nonexistent -e PHP_EXT_ENABLE=bz2 "$IMAGE" sh -c '
   php -m | grep -qix bz2 && echo EXT_OK || echo EXT_MISSING
   php -r "echo \"DISABLE=[\".ini_get(\"disable_functions\").\"]\";"
 ')
@@ -452,7 +455,7 @@ echo "ok: $FLAVOR -- read-only rootfs with an operator PHP_INI_SCAN_DIR keeps th
 # 28. --read-only without --tmpfs /tmp (neither conf.d nor /tmp writable) must degrade
 # with a branded diagnostic and still start, not die on a raw mkdir/mktemp error.
 set +e
-out=$(docker run --rm --read-only -m 512m "$IMAGE" php -v 2>&1)
+out=$(drun --rm --read-only -m 512m "$IMAGE" php -v 2>&1)
 rc=$?
 set -e
 [ "$rc" -eq 0 ] || fail "--read-only without --tmpfs /tmp failed to start: $out"
@@ -464,7 +467,7 @@ echo "ok: --read-only without --tmpfs /tmp degrades with a branded diagnostic"
 if [ "$FLAVOR" = fpm ]; then
 # 29. Bypassing the entrypoint must still produce a valid FPM config: the Dockerfile
 # bakes ENV defaults for exactly this.
-tt=$(docker run --rm --entrypoint php-fpm "$IMAGE" -tt 2>&1)
+tt=$(drun --rm --entrypoint php-fpm "$IMAGE" -tt 2>&1)
 echo "$tt" | grep -q "test is successful" || fail "bypassing the entrypoint produced an invalid FPM config: $tt"
 echo "$tt" | grep -q 'pm\.max_children = 16$' || fail "bypassing the entrypoint did not show the baked legacy default: $tt"
 echo "ok: bypassing the entrypoint entirely still yields a valid config"
@@ -477,7 +480,7 @@ if [ "$FLAVOR" = fpm ]; then
 # image's baked default, which is the one number a Helm chart or compose template
 # rendering every tunable from the documented defaults will pass. Tests 5 and 20 use
 # values that differ from the defaults, so they cannot see this.
-tt=$(docker run --rm -m 4g \
+tt=$(drun --rm -m 4g \
   -e PHP_FPM_MAX_CHILDREN=16 -e PHP_FPM_START_SERVERS=4 \
   -e PHP_FPM_MIN_SPARE=4 -e PHP_FPM_MAX_SPARE=8 "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q "test is successful" || fail "explicit baked-default pool sizes were rejected: $tt"
@@ -488,7 +491,7 @@ for want in 'pm\.max_children = 16' 'pm\.start_servers = 4' \
 done
 # ... while an untouched pool on the same container still autotunes, so the
 # above is "explicit wins", not "autotuning quietly stopped working".
-tt=$(docker run --rm -m 4g "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm -m 4g "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q 'pm\.max_children = 16$' && fail "autotuning stopped: a 4g container with no overrides got the baked default: $tt"
 echo "ok: explicit pool sizes equal to the baked defaults are honored, unset ones still autotune"
 
@@ -497,17 +500,17 @@ echo "ok: explicit pool sizes equal to the baked defaults are honored, unset one
 # refuses ("pm.max_spare_servers must not be less than pm.min_spare_servers"). The
 # derived neighbor has to move, not the pinned value and not the container's ability
 # to start.
-tt=$(docker run --rm -m 4g -e PHP_FPM_MAX_SPARE=8 "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm -m 4g -e PHP_FPM_MAX_SPARE=8 "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q "test is successful" || fail "a pinned pm.max_spare_servers alongside autotuned neighbors produced a config php-fpm rejects: $tt"
 echo "$tt" | grep -q 'pm\.max_spare_servers = 8$' || fail "the pinned pm.max_spare_servers was moved instead of its derived neighbors: $tt"
-tt=$(docker run --rm -m 4g -e PHP_FPM_MIN_SPARE=30 "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm -m 4g -e PHP_FPM_MIN_SPARE=30 "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q "test is successful" || fail "a pinned pm.min_spare_servers alongside autotuned neighbors produced a config php-fpm rejects: $tt"
 echo "$tt" | grep -q 'pm\.min_spare_servers = 30$' || fail "the pinned pm.min_spare_servers was moved instead of its derived neighbors: $tt"
 # ...while two pinned values that contradict *each other* stay exactly as
 # typed: neither is ours to overrule, and php-fpm's own error names the
 # offending pair.
 set +e
-out=$(docker run --rm -m 4g -e PHP_FPM_MIN_SPARE=10 -e PHP_FPM_MAX_SPARE=8 "$IMAGE" php-fpm -tt 2>&1)
+out=$(drun --rm -m 4g -e PHP_FPM_MIN_SPARE=10 -e PHP_FPM_MAX_SPARE=8 "$IMAGE" php-fpm -tt 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "two contradictory pinned pool values were silently reconciled: $out"
@@ -523,7 +526,7 @@ if [ "$FLAVOR" = fpm ]; then
 for v in PHP_FPM_MAX_REQUESTS PHP_FPM_STATUS_PATH PHP_FPM_MAX_CHILDREN \
          PHP_MEMORY_LIMIT PHP_OPCACHE_JIT PHP_EXT_ENABLE; do
   set +e
-  out=$(docker run --rm -m 512m -e "${v}=" "$IMAGE" php-fpm -tt 2>&1)
+  out=$(drun --rm -m 512m -e "${v}=" "$IMAGE" php-fpm -tt 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "${v}= (set but empty) was accepted: $out"
@@ -539,7 +542,7 @@ fi
 # starts there.
 if [ "$FLAVOR" = fpm ]; then
   set +e
-  out=$(docker run --rm -e PHP_INI_SCAN_DIR= -e PHP_MEMORY_LIMIT=777M "$IMAGE" php -r 'echo ini_get("memory_limit");' 2>&1)
+  out=$(drun --rm -e PHP_INI_SCAN_DIR= -e PHP_MEMORY_LIMIT=777M "$IMAGE" php -r 'echo ini_get("memory_limit");' 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "fpm: PHP_INI_SCAN_DIR= started despite dropping the image's own baked PHP_DISABLE_FUNCTIONS default: $out"
@@ -547,7 +550,7 @@ if [ "$FLAVOR" = fpm ]; then
     || fail "fpm: PHP_INI_SCAN_DIR= + baked PHP_DISABLE_FUNCTIONS refusal did not name PHP_INI_SCAN_DIR: $out"
   echo "ok: fpm -- set-but-empty values rejected loudly; PHP_INI_SCAN_DIR= also refuses (it would drop the image's own baked PHP_DISABLE_FUNCTIONS)"
 else
-  out=$(docker run --rm -e PHP_INI_SCAN_DIR= -e PHP_MEMORY_LIMIT=777M "$IMAGE" php -r 'echo ini_get("memory_limit");')
+  out=$(drun --rm -e PHP_INI_SCAN_DIR= -e PHP_MEMORY_LIMIT=777M "$IMAGE" php -r 'echo ini_get("memory_limit");')
   [ "$out" != "777M" ] || fail "$FLAVOR: PHP_INI_SCAN_DIR= does not disable ini scanning: $out"
   [ -n "$out" ] || fail "$FLAVOR: PHP_INI_SCAN_DIR= (documented opt-out) failed to start"
   echo "ok: $FLAVOR -- set-but-empty values rejected loudly, PHP_INI_SCAN_DIR= still honored (no baked PHP_DISABLE_FUNCTIONS default here)"
@@ -566,10 +569,10 @@ docker volume create "$conf_vol" >/dev/null
 
 # 32. three starts, at most one directory left behind
 for _ in 1 2 3; do
-  docker run --rm --read-only -v "$conf_vol":/tmp -m 512m "$IMAGE" php -r 'echo "";' >/dev/null 2>&1 \
+  drun --rm --read-only -v "$conf_vol":/tmp -m 512m "$IMAGE" php -r 'echo "";' >/dev/null 2>&1 \
     || fail "a read-only start with a volume-backed /tmp failed outright"
 done
-n=$(docker run --rm -v "$conf_vol":/tmp --entrypoint sh "$IMAGE" -c 'ls -d /tmp/php-conf.* 2>/dev/null | wc -l')
+n=$(drun --rm -v "$conf_vol":/tmp --entrypoint sh "$IMAGE" -c 'ls -d /tmp/php-conf.* 2>/dev/null | wc -l')
 [ "$n" -le 1 ] || fail "$n private conf directories left behind after 3 starts on a persistent /tmp, expected at most 1"
 echo "ok: private conf directories do not accumulate on a persistent /tmp ($n left)"
 
@@ -582,11 +585,11 @@ echo "ok: private conf directories do not accumulate on a persistent /tmp ($n le
 # indistinguishable by name from the live container's; the live one is identified by
 # the one property only it has, a held lock.
 docker volume create "$live_vol" >/dev/null
-docker run -d --name "$live_ctr" --read-only -v "$live_vol":/tmp -m 512m "$IMAGE" \
+drun -d --name "$live_ctr" --read-only -v "$live_vol":/tmp -m 512m "$IMAGE" \
   php -r 'sleep(120);' >/dev/null
 live_dir=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  live_dir=$(docker run --rm -v "$live_vol":/tmp --entrypoint sh "$IMAGE" -c '
+  live_dir=$(drun --rm -v "$live_vol":/tmp --entrypoint sh "$IMAGE" -c '
     for d in /tmp/php-conf.*; do
       [ -d "$d" ] && [ -f "$d/.lock" ] || continue
       flock -n "$d/.lock" true 2>/dev/null || { echo "$d"; break; }
@@ -595,12 +598,12 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 1
 done
 [ -n "$live_dir" ] || fail "the long-running container never created a locked private conf directory"
-docker run --rm --read-only -v "$live_vol":/tmp -m 512m "$IMAGE" php -r 'echo "";' >/dev/null 2>&1
-still=$(docker run --rm -v "$live_vol":/tmp --entrypoint sh "$IMAGE" -c "[ -d '$live_dir' ] && echo PRESENT || echo GONE")
+drun --rm --read-only -v "$live_vol":/tmp -m 512m "$IMAGE" php -r 'echo "";' >/dev/null 2>&1
+still=$(drun --rm -v "$live_vol":/tmp --entrypoint sh "$IMAGE" -c "[ -d '$live_dir' ] && echo PRESENT || echo GONE")
 [ "$still" = PRESENT ] || fail "a running container's private conf directory ($live_dir) was reaped by another container's start"
 docker rm -f "$live_ctr" >/dev/null
-docker run --rm --read-only -v "$live_vol":/tmp -m 512m "$IMAGE" php -r 'echo "";' >/dev/null 2>&1
-gone=$(docker run --rm -v "$live_vol":/tmp --entrypoint sh "$IMAGE" -c "[ -d '$live_dir' ] && echo PRESENT || echo GONE")
+drun --rm --read-only -v "$live_vol":/tmp -m 512m "$IMAGE" php -r 'echo "";' >/dev/null 2>&1
+gone=$(drun --rm -v "$live_vol":/tmp --entrypoint sh "$IMAGE" -c "[ -d '$live_dir' ] && echo PRESENT || echo GONE")
 [ "$gone" = GONE ] || fail "the private conf directory of a container that has exited ($live_dir) was never reaped"
 live_cleanup
 trap - EXIT
@@ -617,7 +620,7 @@ for pair in 'PHP_FPM_MAX_CHILDREN_EFFECTIVE:PHP_FPM_MAX_CHILDREN' \
             'PHP_FPM_MAX_SPARE_EFFECTIVE:PHP_FPM_MAX_SPARE'; do
   internal="${pair%%:*}"; knob="${pair##*:}"
   set +e
-  out=$(docker run --rm -m 4g -e "${internal}=999" "$IMAGE" php-fpm -tt 2>&1)
+  out=$(drun --rm -m 4g -e "${internal}=999" "$IMAGE" php-fpm -tt 2>&1)
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "${internal}=999 was accepted, then silently overwritten by the autotuned value: $out"
@@ -627,7 +630,7 @@ for pair in 'PHP_FPM_MAX_CHILDREN_EFFECTIVE:PHP_FPM_MAX_CHILDREN' \
 done
 # The bypass path legitimately reads the baked _EFFECTIVE defaults, so the refusal
 # must live where the entrypoint runs and nowhere else.
-tt=$(docker run --rm --entrypoint php-fpm -e PHP_FPM_MAX_CHILDREN_EFFECTIVE=999 "$IMAGE" -tt 2>&1)
+tt=$(drun --rm --entrypoint php-fpm -e PHP_FPM_MAX_CHILDREN_EFFECTIVE=999 "$IMAGE" -tt 2>&1)
 echo "$tt" | grep -q 'pm\.max_children = 999$' \
   || fail "the entrypoint-bypass path does not read PHP_FPM_MAX_CHILDREN_EFFECTIVE: $tt"
 echo "ok: the internal _EFFECTIVE names are refused with a signpost; the bypass path still reads them"
@@ -637,7 +640,7 @@ fi
 # missing writable conf dir gets the branded diagnostic instead of a raw redirection
 # error.
 set +e
-out=$(docker run --rm --read-only -m 512m -e PHP_SNUFFLEUPAGUS=laravel "$IMAGE" php -v 2>&1)
+out=$(drun --rm --read-only -m 512m -e PHP_SNUFFLEUPAGUS=laravel "$IMAGE" php -v 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "PHP_SNUFFLEUPAGUS with no writable conf dir was not rejected: $out"
@@ -669,7 +672,7 @@ echo is_resource($p) ? stream_get_contents($pipes[1]) : "PROC_OPEN_BLOCKED";'
 # names the missing function, and the command it would have run never
 # actually ran.
 set +e
-out=$(docker run --rm --read-only -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php -r "$proc_open_probe" 2>&1)
+out=$(drun --rm --read-only -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php -r "$proc_open_probe" 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "$FLAVOR: --read-only + PHP_DISABLE_FUNCTIONS=proc_open started instead of refusing: $out"
@@ -686,7 +689,7 @@ echo "ok: $FLAVOR -- bare --read-only + PHP_DISABLE_FUNCTIONS=proc_open refuses 
 # nothing set -- proves the refusal above is about the dropped control, not
 # about --read-only, proc_open(), or the image itself being broken. Unlike
 # exec(), proc_open() is not baked-disabled, so it actually runs here.
-out=$(docker run --rm --read-only "$IMAGE" php -r "$proc_open_probe" 2>&1)
+out=$(drun --rm --read-only "$IMAGE" php -r "$proc_open_probe" 2>&1)
 echo "$out" | grep -q "SENTINEL_RAN" \
   || fail "$FLAVOR: positive control -- proc_open() did not run with no PHP_DISABLE_FUNCTIONS set under bare --read-only: $out"
 echo "ok: $FLAVOR -- positive control -- proc_open() runs under bare --read-only with nothing set"
@@ -694,7 +697,7 @@ echo "ok: $FLAVOR -- positive control -- proc_open() runs under bare --read-only
 # 38. (b) a tuning knob dropped the same way keeps the container running and is named
 # with its value.
 set +e
-out=$(docker run --rm --read-only -e PHP_MEMORY_LIMIT=256M "$IMAGE" \
+out=$(drun --rm --read-only -e PHP_MEMORY_LIMIT=256M "$IMAGE" \
   php -r 'echo ini_get("memory_limit");' 2>&1)
 rc=$?
 set -e
@@ -707,7 +710,7 @@ echo "ok: $FLAVOR -- PHP_MEMORY_LIMIT dropped under bare --read-only warns by na
 # --read-only case must start clean, with none of the named warnings or refusals
 # firing. On fpm this also proves the image's baked PHP_DISABLE_FUNCTIONS ENV default
 # (always present there for www.conf) is told apart from a real override.
-out=$(docker run --rm --read-only "$IMAGE" php -r 'echo "CLEAN_START";' 2>&1)
+out=$(drun --rm --read-only "$IMAGE" php -r 'echo "CLEAN_START";' 2>&1)
 echo "$out" | grep -q "CLEAN_START" \
   || fail "$FLAVOR: bare --read-only with nothing set failed to start clean: $out"
 if echo "$out" | grep -qE "PHP_DISABLE_FUNCTIONS=|PHP_MEMORY_LIMIT=|not in force|missing:"; then
@@ -719,7 +722,7 @@ echo "ok: $FLAVOR -- bare --read-only with nothing set starts clean"
 # failure observed, not just ini_get() read back. The probe is expected to fail
 # (rc=255), so the substitution is guarded with set +e/-e.
 set +e
-out=$(docker run --rm --read-only --tmpfs /tmp -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php -r "$proc_open_probe" 2>&1)
+out=$(drun --rm --read-only --tmpfs /tmp -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php -r "$proc_open_probe" 2>&1)
 set -e
 if echo "$out" | grep -q "SENTINEL_RAN"; then
   fail "$FLAVOR: proc_open() actually ran under --tmpfs /tmp despite PHP_DISABLE_FUNCTIONS=proc_open: $out"
@@ -745,7 +748,7 @@ echo "ok: $FLAVOR -- PHP_DISABLE_FUNCTIONS applies for real under --tmpfs /tmp (
 # no main php.ini, only conf.d), so a PHP_DISABLE_FUNCTIONS set alongside it cannot
 # be in force even with a writable conf.d. Refused, naming both variables.
 set +e
-out=$(docker run --rm -e PHP_INI_SCAN_DIR= -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php -r "$proc_open_probe" 2>&1)
+out=$(drun --rm -e PHP_INI_SCAN_DIR= -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php -r "$proc_open_probe" 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "$FLAVOR: PHP_INI_SCAN_DIR= + PHP_DISABLE_FUNCTIONS=proc_open started instead of refusing: $out"
@@ -768,7 +771,7 @@ fpm_e2e_name="fpm-e2e-$$"
 trap 'docker rm -f "$fpm_e2e_name" >/dev/null 2>&1 || true' EXIT
 # /probe is a separate tmpfs for the probe script only; /tmp stays part of the
 # read-only rootfs, so CONF_WRITABLE is 0, the bare --read-only scenario.
-docker run -d --name "$fpm_e2e_name" --read-only --tmpfs /probe -m 512m -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" >/dev/null
+drun -d --name "$fpm_e2e_name" --read-only --tmpfs /probe -m 512m -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" >/dev/null
 fpm_e2e_ready=0
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   if docker exec "$fpm_e2e_name" true >/dev/null 2>&1; then
@@ -821,7 +824,7 @@ fi
 # proc_open() (or this probe script) unconditionally.
 fpm_e2e_ctrl_name="fpm-e2e-ctrl-$$"
 trap 'docker rm -f "$fpm_e2e_ctrl_name" >/dev/null 2>&1 || true' EXIT
-docker run -d --name "$fpm_e2e_ctrl_name" --read-only --tmpfs /probe -m 512m "$IMAGE" >/dev/null
+drun -d --name "$fpm_e2e_ctrl_name" --read-only --tmpfs /probe -m 512m "$IMAGE" >/dev/null
 fpm_e2e_ctrl_ready=0
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   if docker exec "$fpm_e2e_ctrl_name" true >/dev/null 2>&1; then
@@ -843,7 +846,7 @@ echo "$fpm_e2e_ctrl_out" | grep -q "SENTINEL_RAN" \
   || fail "fpm: positive control -- proc_open() did not run in a live FastCGI worker with no PHP_DISABLE_FUNCTIONS set: $fpm_e2e_ctrl_out"
 echo "ok: fpm -- positive control -- the same live-worker probe runs proc_open() successfully with nothing disabled"
 
-tt=$(docker run --rm --read-only "$IMAGE" php-fpm -tt 2>&1)
+tt=$(drun --rm --read-only "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q "test is successful" \
   || fail "fpm: bare --read-only with nothing set failed to start (php-fpm -tt): $tt"
 echo "ok: fpm -- bare --read-only with nothing set starts clean (php-fpm -tt)"
@@ -868,7 +871,7 @@ CONF
 # into a named failure; the container is force-removed afterwards either way.
 stockconf_fpmf_name="stockconf-fpmF-$$"
 set +e
-out=$(timeout 10 docker run --rm --name "$stockconf_fpmf_name" --read-only -m 512m \
+out=$(timeout 10 docker run "${DRUN_FLAGS[@]}" --rm --name "$stockconf_fpmf_name" --read-only -m 512m \
   -v "$stockconf_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
   -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php-fpm -F 2>&1)
 rc=$?
@@ -887,7 +890,7 @@ echo "ok: fpm -- a mounted pool config that sets neither php_admin_value nor php
 # must still start, proven through the same FastCGI round trip as above.
 stockconf_name="stockconf-stock-$$"
 trap 'docker rm -f "$stockconf_name" >/dev/null 2>&1 || true' EXIT
-docker run -d --name "$stockconf_name" --read-only --tmpfs /probe -m 512m -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" >/dev/null
+drun -d --name "$stockconf_name" --read-only --tmpfs /probe -m 512m -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" >/dev/null
 stockconf_ready=0
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   if docker exec "$stockconf_name" true >/dev/null 2>&1; then
@@ -944,7 +947,7 @@ pm = static
 pm.max_children = 1
 CONF
 set +e
-out=$(docker run --rm --read-only -m 512m \
+out=$(drun --rm --read-only -m 512m \
   -v "$mixconf_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
   -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php-fpm -tt 2>&1)
 rc=$?
@@ -968,7 +971,7 @@ fi
 # (a) mixed uppercase, comma+space -- refused up front, naming the bad
 # token, before anything is written or exec'd.
 set +e
-out=$(docker run --rm --read-only --tmpfs /tmp -e 'PHP_DISABLE_FUNCTIONS=EXEC, System' "$IMAGE" php -r "$proc_open_probe" 2>&1)
+out=$(drun --rm --read-only --tmpfs /tmp -e 'PHP_DISABLE_FUNCTIONS=EXEC, System' "$IMAGE" php -r "$proc_open_probe" 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "$FLAVOR: PHP_DISABLE_FUNCTIONS='EXEC, System' started instead of being refused: $out"
@@ -982,7 +985,7 @@ echo "ok: $FLAVOR -- PHP_DISABLE_FUNCTIONS='EXEC, System' is refused up front, n
 # of the token, and the resulting token is refused the same way.
 tab_value="exec$(printf '\t')system"
 set +e
-out=$(docker run --rm --read-only --tmpfs /tmp -e "PHP_DISABLE_FUNCTIONS=${tab_value}" "$IMAGE" php -r "$proc_open_probe" 2>&1)
+out=$(drun --rm --read-only --tmpfs /tmp -e "PHP_DISABLE_FUNCTIONS=${tab_value}" "$IMAGE" php -r "$proc_open_probe" 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "$FLAVOR: a tab-separated PHP_DISABLE_FUNCTIONS started instead of being refused: $out"
@@ -994,7 +997,7 @@ echo "ok: $FLAVOR -- a tab between function names (not a valid PHP separator) is
 # after it -- both are valid separators, collapsed together) still works
 # and actually disables every requested name.
 set +e
-out=$(docker run --rm --read-only --tmpfs /tmp -e 'PHP_DISABLE_FUNCTIONS=exec, proc_open' "$IMAGE" php -r "$proc_open_probe" 2>&1)
+out=$(drun --rm --read-only --tmpfs /tmp -e 'PHP_DISABLE_FUNCTIONS=exec, proc_open' "$IMAGE" php -r "$proc_open_probe" 2>&1)
 set -e
 if echo "$out" | grep -q "SENTINEL_RAN"; then
   fail "$FLAVOR: proc_open() ran despite 'exec, proc_open' (comma+space) requesting it disabled: $out"
@@ -1017,7 +1020,7 @@ echo "ok: $FLAVOR -- positive control -- a comma-plus-space-separated value stil
 if [ "$FLAVOR" = cli ]; then
 execenv_name="execenv-exec-$$"
 trap 'docker rm -f "$execenv_name" >/dev/null 2>&1 || true' EXIT
-docker run -d --name "$execenv_name" --read-only --tmpfs /tmp -m 512m "$IMAGE" php -r 'sleep(120);' >/dev/null
+drun -d --name "$execenv_name" --read-only --tmpfs /tmp -m 512m "$IMAGE" php -r 'sleep(120);' >/dev/null
 # `docker exec <c> docker-php-entrypoint php ...` re-runs this whole script against
 # the freshly exec'd environment (a new private conf.d, PHP_INI_SCAN_DIR recomputed)
 # and sees an override supplied only at exec time.
@@ -1055,7 +1058,7 @@ fi
 # shared extension. cli-builder bakes no default (conf/php-builder.ini), so this is
 # meaningless there.
 if [ "$FLAVOR" != cli-builder ]; then
-  out=$(docker run --rm -e PHP_DISABLE_FUNCTIONS=get_current_user "$IMAGE" \
+  out=$(drun --rm -e PHP_DISABLE_FUNCTIONS=get_current_user "$IMAGE" \
     php -r 'echo function_exists("dl") ? "DL_LIVE" : "DL_GONE", " ", function_exists("get_current_user") ? "GCU_LIVE" : "GCU_GONE";' 2>&1)
   echo "$out" | grep -q "DL_GONE" \
     || fail "$FLAVOR: PHP_DISABLE_FUNCTIONS=get_current_user (writable conf.d) let dl() come back, although it is in the baked default: $out"
@@ -1068,7 +1071,7 @@ fi
 # to a real function; assert_options (real) in the same list must not be swept up in
 # that refusal.
 set +e
-out=$(docker run --rm --read-only --tmpfs /tmp -e 'PHP_DISABLE_FUNCTIONS=eval,assert_options,shel_exec' "$IMAGE" php -r 'echo "EVAL_RAN";' 2>&1)
+out=$(drun --rm --read-only --tmpfs /tmp -e 'PHP_DISABLE_FUNCTIONS=eval,assert_options,shel_exec' "$IMAGE" php -r 'echo "EVAL_RAN";' 2>&1)
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "$FLAVOR: PHP_DISABLE_FUNCTIONS=eval,assert_options,shel_exec started instead of being refused: $out"
@@ -1087,7 +1090,7 @@ echo "ok: $FLAVOR -- eval (language construct) and shel_exec (typo) are refused 
 
 # negative control: two genuinely real, resolvable functions must never be refused at
 # the resolve stage (whether they end up disabled is a different question).
-out=$(docker run --rm --tmpfs /tmp -e 'PHP_DISABLE_FUNCTIONS=assert_options,proc_open' "$IMAGE" php -r 'echo "REACHED";' 2>&1)
+out=$(drun --rm --tmpfs /tmp -e 'PHP_DISABLE_FUNCTIONS=assert_options,proc_open' "$IMAGE" php -r 'echo "REACHED";' 2>&1)
 if echo "$out" | grep -qi "cannot resolve to a real function"; then
   fail "$FLAVOR: negative control -- assert_options/proc_open (both real functions) were wrongly refused as unresolvable: $out"
 fi
@@ -1102,14 +1105,14 @@ if [ "$FLAVOR" != cli-builder ]; then
 confd1_confd="/tmp/ep-f1-confd-$$"
 mkdir -p "$confd1_confd"
 chmod 777 "$confd1_confd"
-docker run --rm -v "$confd1_confd":/out "$IMAGE" sh -c 'cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
+drun --rm -v "$confd1_confd":/out "$IMAGE" sh -c 'cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
 rm -f "$confd1_confd/99-env.ini" "$confd1_confd/90-opcache-env.ini"
 confd1_probe='foreach (["ini_get","exec","system","dl"] as $f) { echo $f, "=", function_exists($f) ? "LIVE" : "gone", " "; }'
-out1=$(docker run --rm -v "$confd1_confd":/usr/local/etc/php/conf.d \
+out1=$(drun --rm -v "$confd1_confd":/usr/local/etc/php/conf.d \
   -e PHP_DISABLE_FUNCTIONS=ini_get "$IMAGE" php -r "$confd1_probe")
 echo "$out1" | grep -qw "ini_get=gone" || fail "$FLAVOR: first start did not disable ini_get: $out1"
 echo "$out1" | grep -qw "exec=gone" || fail "$FLAVOR: first start did not carry the baked list (exec) alongside ini_get: $out1"
-out2=$(docker run --rm -v "$confd1_confd":/usr/local/etc/php/conf.d \
+out2=$(drun --rm -v "$confd1_confd":/usr/local/etc/php/conf.d \
   -e PHP_DISABLE_FUNCTIONS=ini_get "$IMAGE" php -r "$confd1_probe")
 rm -rf "$confd1_confd"
 echo "$out2" | grep -qw "exec=gone" \
@@ -1136,7 +1139,7 @@ pm.max_children = 1
 php_admin_value[disable_functions] = "proc_open;legacy"
 CONF
 set +e
-out=$(docker run --rm --read-only -m 512m \
+out=$(drun --rm --read-only -m 512m \
   -v "$pool_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
   -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php-fpm -tt 2>&1)
 rc=$?
@@ -1159,7 +1162,7 @@ pm = static
 pm.max_children = 1
 php_admin_value[disable_functions] = proc_open
 CONF
-out=$(docker run --rm --read-only -m 512m \
+out=$(drun --rm --read-only -m 512m \
   -v "$pooln_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
   -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php-fpm -tt 2>&1)
 rm -f "$pooln_conf"
@@ -1180,7 +1183,7 @@ pm.max_children = 1
 php_admin_value[extension] = ssh2
 CONF
 set +e
-out=$(docker run --rm --read-only -m 512m \
+out=$(drun --rm --read-only -m 512m \
   -v "$ext_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
   -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php-fpm -tt 2>&1)
 rc=$?
@@ -1205,7 +1208,7 @@ pm.max_children = 1
 php_admin_value[error_log] = "/proc/self/fd/2 NOTICE: php_admin_value[disable_functions] = proc_open"
 CONF
 set +e
-out=$(docker run --rm --read-only -m 512m \
+out=$(drun --rm --read-only -m 512m \
   -v "$mix1_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
   -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php-fpm -tt 2>&1)
 rc=$?
@@ -1236,7 +1239,7 @@ pm = static
 pm.max_children = 1
 CONF
 set +e
-out=$(docker run --rm --read-only -m 512m \
+out=$(drun --rm --read-only -m 512m \
   -v "$mix2_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
   -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php-fpm -tt 2>&1)
 rc=$?
@@ -1253,7 +1256,7 @@ echo "ok: fpm -- a pool whose own name contains 'NOTICE: [global]' is still reco
 # probe can see it; it is verified by whether the pool's resolved value names it, not
 # treated as "not found, so already gone".
 # it, not silently treated as "not found, so already gone".
-out=$(docker run --rm --read-only -m 512m -e PHP_DISABLE_FUNCTIONS=fpm_get_status,proc_open "$IMAGE" php-fpm -tt 2>&1)
+out=$(drun --rm --read-only -m 512m -e PHP_DISABLE_FUNCTIONS=fpm_get_status,proc_open "$IMAGE" php-fpm -tt 2>&1)
 echo "$out" | grep -q "test is successful" \
   || fail "allowlist: PHP_DISABLE_FUNCTIONS=fpm_get_status,proc_open (stock www.conf, whose value covers both) was wrongly refused: $out"
 echo "ok: fpm -- allowlist -- fpm_get_status alongside an ordinary function verifies fine when the pool's value actually covers it"
@@ -1271,7 +1274,7 @@ pm.max_children = 1
 php_admin_value[disable_functions] = proc_open
 CONF
 set +e
-out=$(docker run --rm --read-only -m 512m \
+out=$(drun --rm --read-only -m 512m \
   -v "$al_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
   -e PHP_DISABLE_FUNCTIONS=fpm_get_status,proc_open "$IMAGE" php-fpm -tt 2>&1)
 rc=$?
@@ -1305,7 +1308,7 @@ pm.max_children = 1
 php_admin_value[disable_functions] = exec
 CONF
 set +e
-out=$(docker run --rm --read-only -m 512m \
+out=$(drun --rm --read-only -m 512m \
   -v "$confd2_confd/50-x.ini":/usr/local/etc/php/conf.d/50-x.ini:ro \
   -v "$confd2_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
   -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php-fpm -tt 2>&1)
@@ -1324,7 +1327,7 @@ echo "ok: fpm -- a mounted main-ini disable_functions value containing ';' does 
 confd2w_confd="/tmp/ep-f2w-confd-$$"
 mkdir -p "$confd2w_confd"
 chmod 777 "$confd2w_confd"
-docker run --rm -v "$confd2w_confd":/out "$IMAGE" sh -c 'cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
+drun --rm -v "$confd2w_confd":/out "$IMAGE" sh -c 'cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
 rm -f "$confd2w_confd/99-env.ini" "$confd2w_confd/90-opcache-env.ini"
 cat >"$confd2w_confd/zz-custom.ini" <<'CONF'
 disable_functions = get_current_user
@@ -1340,7 +1343,7 @@ pm.max_children = 1
 php_admin_value[disable_functions] = exec
 CONF
 set +e
-out=$(docker run --rm -m 512m \
+out=$(drun --rm -m 512m \
   -v "$confd2w_confd":/usr/local/etc/php/conf.d \
   -v "$confd2w_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
   -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php-fpm -tt 2>&1)

@@ -22,6 +22,8 @@ set -euo pipefail
 VERSION="${1:?usage: test-ext-builder.sh <php-version>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+# shellcheck source=tests/docker-lib.sh
+. "$HERE/docker-lib.sh"
 PHP_IMAGE="${PHP_IMAGE:-lotuswebagency/php}"
 FIXTURE="$HERE/fixtures/ext-hello"
 EXT="$PHP_IMAGE:$VERSION-ext-builder"
@@ -32,7 +34,7 @@ DERIVED_REPO="lotuswebagency/php-ext-hello-test"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 # Every container: removed on exit, signal-forwarding init, and the time limit
 # inside it (a host-side `timeout docker run` only kills the client, not PID 1).
-run() { docker run --rm --init "$@"; }
+run() { drun --rm --init "$@"; }
 
 for img in "$EXT" "$FPM" "$CLI"; do
   docker image inspect "$img" >/dev/null 2>&1 \
@@ -86,11 +88,14 @@ trap cleanup EXIT
 # --builder default: the docker driver, which resolves FROM against the local
 # image store. A docker-container builder (what CI's setup-buildx-action makes
 # current) cannot see the images this test is about, and would go to a registry.
+# --network=none: phpize/configure/make of a local fixture need no network, so a
+# RUN that tried to fetch something fails here instead of passing on whatever
+# the runner happens to reach.
 for flavor in fpm cli; do
-  docker buildx build --builder default -q -f "$FIXTURE/Dockerfile" --target "$flavor" \
+  docker buildx build --builder default --network=none -q -f "$FIXTURE/Dockerfile" --target "$flavor" \
     --build-arg "PHP_VERSION=$VERSION" --build-arg "PHP_IMAGE=$PHP_IMAGE" \
     -t "$DERIVED_REPO:$VERSION-$flavor" "$FIXTURE" >/dev/null \
-    || fail "multi-stage build of the ext-hello fixture failed for $flavor (re-run without -q: docker buildx build --builder default -f $FIXTURE/Dockerfile --target $flavor --build-arg PHP_VERSION=$VERSION --build-arg PHP_IMAGE=$PHP_IMAGE $FIXTURE)"
+    || fail "multi-stage build of the ext-hello fixture failed for $flavor (re-run without -q: docker buildx build --builder default --network=none -f $FIXTURE/Dockerfile --target $flavor --build-arg PHP_VERSION=$VERSION --build-arg PHP_IMAGE=$PHP_IMAGE $FIXTURE)"
 done
 echo "ok: ext-hello compiled in ext-builder and COPYed into fpm and cli of php $VERSION"
 
