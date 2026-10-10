@@ -7,7 +7,8 @@
 # A release asset, checked against the sha256 recorded here; the sums were taken
 # from the binaries after `cosign verify-blob` of their release sigstore bundles
 # (identity: regclient's go.yml workflow at refs/tags/<version>). A bump changes
-# all three lines together.
+# all three lines together. The download runs under ci/retry.sh (curl transfer
+# errors, DNS failures, HTTP 5xx), which curl's own --retry does not cover.
 set -euo pipefail
 version=v0.11.6
 case "$(uname -m)" in
@@ -17,7 +18,7 @@ case "$(uname -m)" in
 esac
 dir="${RUNNER_TEMP:?RUNNER_TEMP is not set}/bin"
 mkdir -p "$dir"
-curl -fsSL --retry 5 -o "$dir/regctl" "https://github.com/regclient/regclient/releases/download/${version}/regctl-linux-${arch}"
+RETRY_KIND=http "$(dirname "${BASH_SOURCE[0]}")/retry.sh" curl -fsSL -o "$dir/regctl" "https://github.com/regclient/regclient/releases/download/${version}/regctl-linux-${arch}"
 echo "${sha}  $dir/regctl" | sha256sum -c --quiet - || { rm -f "$dir/regctl"; echo "FAIL: regctl ${version} checksum mismatch" >&2; exit 1; }
 chmod +x "$dir/regctl"
 echo "$dir" >> "${GITHUB_PATH:?GITHUB_PATH is not set}"

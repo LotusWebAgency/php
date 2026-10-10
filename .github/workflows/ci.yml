@@ -113,6 +113,9 @@ env:
   # default is moby/buildkit:buildx-stable-1 from Docker Hub, unpinned); also read
   # by tests/test-attest.sh.
   BUILDKIT_IMAGE: mirror.gcr.io/moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+  # The Trivy release the prepare steps install: the pinned trivy-action's own
+  # `version` default, so the scan steps run what the action would have fetched.
+  SETUP_TRIVY_VERSION: v0.70.0
 
 jobs:
   # ------------------------------------------------------------- preflight
@@ -141,7 +144,9 @@ jobs:
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
 
       - name: Ensure shellcheck is present
-        run: command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
+        run: |
+          command -v shellcheck >/dev/null \
+            || RETRY_KIND=apt ./ci/retry.sh sh -c 'sudo apt-get update && sudo apt-get install -y shellcheck'
 
       - name: tests/preflight.sh
         run: ./tests/preflight.sh
@@ -260,6 +265,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Trivy's binary and vulnerability DB are fetched here, before any build or
+      # test, so the scan steps run on what is already on disk: they skip the
+      # action's own setup and cache restore and set TRIVY_SKIP_DB_UPDATE (which
+      # cannot be set job-wide: it conflicts with --download-db-only below).
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.SETUP_TRIVY_VERSION }}
+          cache: true
+
+      - name: Date for the Trivy DB cache key
+        id: trivy_date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Trivy DB cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ github.workspace }}/.cache/trivy
+          key: cache-trivy-${{ steps.trivy_date.outputs.date }}
+          restore-keys: cache-trivy-
+
+      # A no-op when the restored DB is still current. The vulnerability DB is
+      # an OCI artifact on GHCR, so the registry kinds of failure apply.
+      - name: Download the Trivy DB
+        run: ./ci/retry.sh trivy --cache-dir "$GITHUB_WORKSPACE/.cache/trivy" image --download-db-only
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -292,7 +323,7 @@ jobs:
         run: |
           set -euo pipefail
           corpus_ref="${TARGET_CORPUS}-${INPUTS_HASH}"
-          docker pull "$corpus_ref"
+          ./ci/retry.sh docker pull "$corpus_ref"
           label_hash="$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}' "$corpus_ref")"
           [ "$label_hash" = "$INPUTS_HASH" ] || {
             echo "FAIL: $corpus_ref carries inputs-hash '$label_hash', expected '$INPUTS_HASH'" >&2
@@ -353,6 +384,11 @@ jobs:
           exit-code: "1"
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          skip-setup-trivy: true
+          cache: false
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
 
       - name: Trivy vulnerability gate (ext-builder)
         if: matrix.target.rider_name != ''
@@ -363,6 +399,11 @@ jobs:
           exit-code: "1"
           severity: CRITICAL,HIGH
           ignore-unfixed: true
+          skip-setup-trivy: true
+          cache: false
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
 
       # Only reached when the smoke tests and both Trivy gates above passed, so
       # a pushed image is a tested one. Per-arch tag <tag>-<sha>-<arch>; the
@@ -719,6 +760,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Trivy's binary and vulnerability DB are fetched here, before any build or
+      # test, so the scan steps run on what is already on disk: they skip the
+      # action's own setup and cache restore and set TRIVY_SKIP_DB_UPDATE (which
+      # cannot be set job-wide: it conflicts with --download-db-only below).
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: ${{ env.SETUP_TRIVY_VERSION }}
+          cache: true
+
+      - name: Date for the Trivy DB cache key
+        id: trivy_date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Trivy DB cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ${{ github.workspace }}/.cache/trivy
+          key: cache-trivy-${{ steps.trivy_date.outputs.date }}
+          restore-keys: cache-trivy-
+
+      # A no-op when the restored DB is still current. The vulnerability DB is
+      # an OCI artifact on GHCR, so the registry kinds of failure apply.
+      - name: Download the Trivy DB
+        run: ./ci/retry.sh trivy --cache-dir "$GITHUB_WORKSPACE/.cache/trivy" image --download-db-only
+
       # matrix.json's "image" field is the one source of truth for the Docker Hub
       # repository. Nothing is pushed there from this job: it is the repository
       # the recorded test results name, while the image itself lives in
@@ -759,7 +826,7 @@ jobs:
         run: |
           set -euo pipefail
           corpus_ref="${TARGET_CORPUS}-${INPUTS_HASH}"
-          docker pull "$corpus_ref"
+          ./ci/retry.sh docker pull "$corpus_ref"
           label_hash="$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}' "$corpus_ref")"
           [ "$label_hash" = "$INPUTS_HASH" ] || {
             echo "FAIL: $corpus_ref carries inputs-hash '$label_hash', expected '$INPUTS_HASH'" >&2
@@ -856,6 +923,11 @@ jobs:
           exit-code: "1"
           severity: ${{ env.TRIVY_SEVERITY }}
           ignore-unfixed: true
+          skip-setup-trivy: true
+          cache: false
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
 
       - name: Trivy vulnerability gate (pushed ext-builder digest)
         id: trivy_rider
@@ -867,6 +939,11 @@ jobs:
           exit-code: "1"
           severity: ${{ env.TRIVY_SEVERITY }}
           ignore-unfixed: true
+          skip-setup-trivy: true
+          cache: false
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
 
       # Which scanner and database gave the verdict, for the test-result predicate.
       # Best effort and never a gate: the actions above own the scan; the binary
