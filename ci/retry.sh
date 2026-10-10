@@ -39,7 +39,7 @@
 # Retried commands must be safe to run again; the callers decide that
 # (see the comments at each call site).
 #
-# Needs only bash, grep, tee, mktemp and sleep, so it can be bind-mounted into
+# Needs only bash, grep, tail, tee, mktemp and sleep, so it can be bind-mounted into
 # test containers.
 set -uo pipefail
 [ "$#" -ge 1 ] || { echo "usage: $0 <command> [args...]" >&2; exit 2; }
@@ -99,7 +99,9 @@ while :; do
   # stdout goes to the original stdout (fd 3), stderr through tee into the file.
   { "$@" 2>&1 1>&3 3>&- | tee "$errfile" >&2; rc="${PIPESTATUS[0]}"; } 3>&1
   [ "$rc" -ne 0 ] || exit 0
-  if grep -Eiq "$deny" "$errfile"; then
+  # Only the tail: a long bake log can carry an unrelated deny phrase from a
+  # build step far above the registry error that ended the attempt.
+  if tail -n 20 "$errfile" | grep -Eiq "$deny"; then
     exit "$rc"
   fi
   matched_kind=''

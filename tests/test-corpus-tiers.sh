@@ -43,6 +43,8 @@ image_of() { echo "lotuswebagency/php:${1}-fpm"; }
 # image's own db-up.sh against its own datadir, on --network none. A fresh
 # sidecar per replay also gives every replay the datadir as built: set-host.sh
 # rewrites the shop URL in it.
+# No --rm on the sidecar: a database that fails to start must keep its logs for
+# start_database's report; stop_database removes it.
 CORPUS_DB=""
 stop_database() {
   [ -z "$CORPUS_DB" ] || docker rm -f "$CORPUS_DB" >/dev/null 2>&1 || true
@@ -52,7 +54,7 @@ trap stop_database EXIT
 
 start_database() {
   local _
-  CORPUS_DB="$(docker run -d --rm --init --pull never --network none --entrypoint sh "$1" -c '
+  CORPUS_DB="$(docker run -d --init --pull never --network none --entrypoint sh "$1" -c '
     /corpus-src/prestashop/db-up.sh /corpus/prestashop >/tmp/db-up.log 2>&1 || { cat /tmp/db-up.log >&2; exit 1; }
     exec sleep 3600
   ')"
