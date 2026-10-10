@@ -96,7 +96,8 @@ xargs -0 -P "$JOBS" -n 60 sh -c 'for f do out=$(php -l "$f" 2>&1) || echo "$out"
 if [ ! -s "$WORK/lint.out" ]; then ok "php -l: no parse error in $total files ($(( $(date +%s) - started ))s on $JOBS jobs)"; else fail "php -l found parse errors"; head -20 "$WORK/lint.out" | sed 's/^/    | /'; fi
 
 # -- WP-CLI build-time commands ------------------------------------------------------------------------------
-check_eq "i18n make-pot: a theme" "1" bash -c "$WPC i18n make-pot $APP/wp-content/themes/$(mf theme.slug) $WORK/theme.pot --slug=$(mf theme.slug) --skip-audit >/dev/null && grep -c '^msgid \"$(mf theme.name)\"' $WORK/theme.pot"
+# --skip-theme-json: the theme.json extractor downloads its schema from develop.svn.wordpress.org.
+check_eq "i18n make-pot: a theme" "1" bash -c "$WPC i18n make-pot $APP/wp-content/themes/$(mf theme.slug) $WORK/theme.pot --slug=$(mf theme.slug) --skip-audit --skip-theme-json >/dev/null && grep -c '^msgid \"$(mf theme.name)\"' $WORK/theme.pot"
 check_eq "i18n make-pot: WooCommerce's templates (PHP parser over real code)" "1" bash -c "$WPC i18n make-pot $APP/wp-content/plugins/woocommerce/templates $WORK/woo.pot --slug=woocommerce --domain=woocommerce --skip-audit >/dev/null && [ \$(grep -c '^msgid ' $WORK/woo.pot) -gt 100 ] && echo 1"
 mkdir "$WORK/plugins"
 check "scaffold plugin" $WPC scaffold plugin apptest-scaffold --dir="$WORK/plugins" --skip-tests --plugin_name="Apptest Scaffold"
