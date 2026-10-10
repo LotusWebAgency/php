@@ -2,12 +2,15 @@
 set -euo pipefail
 IMAGE="${1:?usage: test-fpm-health.sh <image>}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tests/docker-lib.sh
+. "$HERE/docker-lib.sh"
 name="fpm-health-$$"
 downname="fpm-health-down-$$"
 shimname="fpm-health-shim-$$"
 trap 'docker rm -f "$name" "$downname" "$shimname" >/dev/null 2>&1 || true' EXIT
 
-docker run -d --name "$name" "$IMAGE" >/dev/null
+drun -d --name "$name" "$IMAGE" >/dev/null
 for i in $(seq 1 30); do
   status=$(docker inspect --format='{{.State.Health.Status}}' "$name" 2>/dev/null || echo none)
   [ "$status" = healthy ] && break
@@ -26,7 +29,7 @@ echo "ok: clean startup log"
 # own command is, so this still exercises the real vendored
 # php-fpm-healthcheck against a pool that is genuinely down (cgi-fcgi
 # refusing to connect), not a mock.
-docker run -d --name "$downname" --entrypoint sleep "$IMAGE" 300 >/dev/null
+drun -d --name "$downname" --entrypoint sleep "$IMAGE" 300 >/dev/null
 status=none
 for i in $(seq 1 60); do
   status=$(docker inspect --format='{{.State.Health.Status}}' "$downname" 2>/dev/null || echo none)
@@ -47,7 +50,7 @@ echo "ok: healthcheck reports unhealthy when the pool is down (after ${i}s)"
 # master (and every worker it forks) starts; it cannot be toggled against the running
 # `$name` container the way SCRIPT_FILENAME can be varied per request. $name is
 # already confirmed healthy; only the new container needs its own wait.
-docker run -d --name "$shimname" -e PHP_CHMOD_SHIM=1 "$IMAGE" >/dev/null
+drun -d --name "$shimname" -e PHP_CHMOD_SHIM=1 "$IMAGE" >/dev/null
 for i in $(seq 1 30); do
   st=$(docker inspect --format='{{.State.Health.Status}}' "$shimname" 2>/dev/null || echo none)
   [ "$st" = healthy ] && break

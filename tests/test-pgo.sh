@@ -47,6 +47,8 @@ set -euo pipefail
 IMAGE="${1:?usage: test-pgo.sh <image> <php-version>}"
 VERSION="${2:?usage: test-pgo.sh <image> <php-version>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tests/docker-lib.sh
+. "$HERE/docker-lib.sh"
 ROOT="$(cd "${HERE}/.." && pwd)"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -58,7 +60,7 @@ done
 # Capture, then match. `docker run ... | grep -q` exits at the first match and
 # SIGPIPEs the producer, which pipefail then reports as a failed pipeline -- a
 # real flake under parallel load.
-ver="$(docker run --rm "$IMAGE" php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+ver="$(drun --rm "$IMAGE" php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
 [ "$ver" = "$VERSION" ] || fail "$IMAGE is php $ver, not the $VERSION this check was given"
 echo "ok: $IMAGE is php $VERSION"
 
@@ -74,7 +76,7 @@ print("true" if spec.get("pgo") else "false")
 echo "ok: matrix.json says php $VERSION is pgo=$expect_pgo"
 
 # ---------------------------------------------------------------- the record
-record="$(docker run --rm --entrypoint cat "$IMAGE" /usr/local/share/php-build/pgo.txt 2>/dev/null)" \
+record="$(drun --rm --entrypoint cat "$IMAGE" /usr/local/share/php-build/pgo.txt 2>/dev/null)" \
   || fail "$IMAGE has no /usr/local/share/php-build/pgo.txt -- it was not built by a php/build.sh that records what it did"
 field() {  # field <key> -> value (empty if absent)
   sed -n "s/^${1}=//p" <<<"$record" | head -1
@@ -211,7 +213,7 @@ esac
 # assertions.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"; [ -z "${cid:-}" ] || docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
-cid="$(docker create "$IMAGE")"
+cid="$(docker create --pull never "$IMAGE")"
 docker cp "$cid:/usr/local/bin/php" "$tmp/php" >/dev/null
 binaries=("$tmp/php")
 if docker cp "$cid:/usr/local/sbin/php-fpm" "$tmp/php-fpm" >/dev/null 2>&1; then
@@ -285,7 +287,7 @@ if [ "$expect_pgo" = true ]; then
   tag="$(python3 "${ROOT}/scripts/pgo_tiers.py" field "$tier" tag)"
   docker image inspect "$tag" >/dev/null 2>&1 \
     || fail "the tier $tier corpus ($tag) is not present locally; it is required to build this image, so it is required to check it -- ./tests/build-corpus.sh $tier"
-  manifest="$(docker run --rm "$tag" cat /corpus/MANIFEST)"
+  manifest="$(drun --rm "$tag" cat /corpus/MANIFEST)"
   want=""
   while IFS=$'\t' read -r app _docroot version _paths; do
     case "$app" in ''|\#*) continue ;; esac
@@ -312,7 +314,7 @@ fi
 # vector body, which is the code the dispatch actually selects. The script goes
 # in on stdin rather than through -r so that neither the shell nor docker has
 # to be trusted with the backslashes and quotes the addslashes input is made of.
-simd="$(docker run --rm -i "$IMAGE" php <<'PHPEOF'
+simd="$(drun --rm -i "$IMAGE" php <<'PHPEOF'
 <?php
 $data = str_repeat("PGO/ThinLTO corpus \xE2\x9C\x93 ", 200);
 $slash = str_repeat("a'b\"c\\d\x00e ", 200);
@@ -342,9 +344,9 @@ grep -q "utf8bad=n" <<<"$simd" || fail "mb_check_encoding accepted invalid UTF-8
 echo "ok: base64, addslashes and mb_check_encoding are byte-correct on the function-pointer dispatch path"
 
 # ------------------------------------------------------------------- sanity
-out="$(docker run --rm "$IMAGE" php -r 'echo "php-ok";')"
+out="$(drun --rm "$IMAGE" php -r 'echo "php-ok";')"
 [ "$out" = "php-ok" ] || fail "the shipped php binary does not run: '$out'"
-mods="$(docker run --rm "$IMAGE" php -m)"
+mods="$(drun --rm "$IMAGE" php -m)"
 grep -qi opcache <<<"$mods" || fail "opcache is missing after the two-pass build"
 echo "ok: the shipped binary runs and opcache is loaded"
 

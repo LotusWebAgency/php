@@ -19,6 +19,8 @@ set -euo pipefail
 BASELINE="${1:?usage: test-uarch.sh <baseline-image> <v3-image>}"
 V3="${2:?usage: test-uarch.sh <baseline-image> <v3-image>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tests/docker-lib.sh
+. "$HERE/docker-lib.sh"
 ROOT="$(cd "${HERE}/.." && pwd)"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -32,7 +34,7 @@ done
 # tests/test-pgo.sh use.
 extract_bin() {  # extract_bin <image> <path-in-image> <dest-path>; non-zero when the image has no such file
   local image="$1" src="$2" dest="$3" cid rc=0
-  cid="$(docker create "$image")"
+  cid="$(docker create --pull never "$image")"
   docker cp "$cid:$src" "$dest" >/dev/null 2>&1 || rc=$?
   docker rm -f "$cid" >/dev/null
   return "$rc"
@@ -88,7 +90,7 @@ echo "ok: $BASELINE is $base_arch (expects -march=$base_march), $V3 is $v3_arch 
 # disassembler, and arm64 deserves the same corroboration amd64 gets even
 # though the instruction-mix check below stays x86-only.
 record_cflags() {  # record_cflags <image> -> its pgo.txt cflags= value
-  docker run --rm --entrypoint cat "$1" /usr/local/share/php-build/pgo.txt 2>/dev/null \
+  drun --rm --entrypoint cat "$1" /usr/local/share/php-build/pgo.txt 2>/dev/null \
     | sed -n 's/^cflags=//p' | head -1
 }
 b_cflags="$(record_cflags "$BASELINE")"
@@ -274,7 +276,7 @@ else
   # The host CPU must itself be x86-64-v3 for the control to run, as for the
   # v3 image's own php above; every CI runner is.
   run_in_image() {  # run_in_image <image> <host-binary> -> output on stdout, exit status of the binary
-    docker run --rm --init --label claude.adhoc=1 -v "$2:/isa-probe:ro" \
+    drun --rm --init --label claude.adhoc=1 -v "$2:/isa-probe:ro" \
       --entrypoint timeout "$1" 20 /isa-probe -v 2>&1
   }
   refusal_proof() {  # refusal_proof <label> <host-binary>
@@ -299,13 +301,13 @@ fi
 # Capture, then match -- `docker run ... | grep -q` exits at the first match and
 # SIGPIPEs the producer, which pipefail then reports as a pipeline failure.
 for img in "$BASELINE" "$V3"; do
-  out="$(docker run --rm "$img" php -r 'echo "ok";')"
+  out="$(drun --rm "$img" php -r 'echo "ok";')"
   [ "$out" = "ok" ] || fail "$img does not run (got: '$out')"
 done
 echo "ok: both variants run"
 
-bv="$(docker run --rm "$BASELINE" php -r 'echo PHP_VERSION;')"
-vv="$(docker run --rm "$V3" php -r 'echo PHP_VERSION;')"
+bv="$(drun --rm "$BASELINE" php -r 'echo PHP_VERSION;')"
+vv="$(drun --rm "$V3" php -r 'echo PHP_VERSION;')"
 [ "$bv" = "$vv" ] || fail "version mismatch: $bv vs $vv"
 echo "ok: same php version ($bv)"
 
