@@ -1,13 +1,46 @@
 #!/usr/bin/env bash
-# Retry safe-to-repeat commands when stderr matches a selected transient kind.
-# Usage: ci/retry.sh <command> [args...]
-# RETRY_KIND: comma-separated registry (default), net, http, composer (http alias),
-# apt, git. Every kind includes net; permanent errors take precedence.
-# RETRY_DELAYS: seconds before each retry, plus up to 50% jitter. Defaults are
-# "30 60 120 300 600 900" with registry, otherwise "5 15 45 120".
-# RETRY_ATTEMPTS: total attempts, default one more than the number of delays.
-# The last delay repeats for extra attempts. Output and command exit codes pass
-# through; only stderr is matched, case-insensitively. Callers decide retry safety.
+# Run a command, retrying it with backoff when it fails the way a busy registry
+# or network fails, and only then.
+#
+#   ci/retry.sh <command> [args...]
+#
+# Docker Hub answers a burst of concurrent CI legs with `429 Too Many Requests`
+# (and now and then a 5xx or a dropped connection). A personal account's pull
+# limit is counted per hour, and one warm-cache publish run reads several
+# hundred manifests in minutes, so the waits run long: a failure that matches
+# the pattern below is retried after 30, 60, 120, 300, 600, 900 seconds (plus
+# up to 50% jitter, so 100 legs do not come back in lockstep) -- seven attempts
+# over half an hour or more. Anything else -- a missing image, a denied
+# login, a failing build -- exits at once with the command's own exit code, and
+# the command's output is passed through either way.
+#
+#   RETRY_KIND      what counts as transient, comma-separated (default "registry"):
+#                   registry  429, 5xx and GHCR's `unknown blob` from docker, buildx, cosign
+#                   http      curl/composer transfer errors, HTTP 408/429/5xx (`composer` is an alias)
+#                   apt       `Failed to fetch` with a 5xx, hash sum mismatches
+#                   git       RPC failures, HTTP 429/5xx, TLS handshake failures
+#                   net       DNS, refused/reset/timed-out connections, truncated transfers;
+#                             every kind includes it
+#                   Certificate errors, sha256 mismatches, unresolvable composer
+#                   requirements, missing apt packages or repositories and failed
+#                   authentication are never retried, whatever else matched.
+#   RETRY_DELAYS    seconds to wait before retry 1, 2, ... (default "30 60 120 300 600 900"
+#                   when RETRY_KIND includes registry, else "5 15 45 120");
+#                   the last one repeats if RETRY_ATTEMPTS asks for more attempts
+#   RETRY_ATTEMPTS  attempts in total (default: one more than RETRY_DELAYS has entries)
+#
+# Only the command's stderr is matched (that is where docker, buildx, cosign,
+# curl, composer, git and apt print their errors). Its stdout is passed straight
+# through and never buffered, so a long `docker buildx bake` still streams -- which also means a
+# failed attempt's stdout is not discarded: wrap commands that print their result
+# on success only (`imagetools inspect --raw`, `docker pull`), not ones that
+# print and then fail.
+#
+# Retried commands must be safe to run again; the callers decide that
+# (see the comments at each call site).
+#
+# Needs only bash, grep, tee, mktemp and sleep, so it can be bind-mounted into
+# test containers.
 set -uo pipefail
 [ "$#" -ge 1 ] || { echo "usage: $0 <command> [args...]" >&2; exit 2; }
 
