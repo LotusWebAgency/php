@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 # One Dockerfile for every published tag; docker-bake.hcl feeds it the matrix.
-ARG BASE_IMAGE=debian:trixie-slim
+ARG BASE_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 ARG PHP_ERA=modern
 # Declared before any FROM so `FROM toolchain-select-${COMPILER}` can resolve it.
 # The toolchain-base stage redeclares it for use inside the stage.
