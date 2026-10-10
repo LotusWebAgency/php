@@ -52,7 +52,7 @@ while [ "$#" -gt 0 ]; do
     --variant) VARIANT="${2:?}"; shift 2 ;;
     --config) REQUESTED_CONFIGS+=("${2:?}"); shift 2 ;;
     --keep) KEEP=1; shift ;;
-    --no-build) NO_BUILD=1; shift ;;
+    --no-build) NO_BUILD=1; export APPTEST_NO_BUILD=1; shift ;;
     -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     -*) apptest_die "unknown option $1" ;;
     *) [ -z "$IMAGE" ] || apptest_die "one image per run ($IMAGE, $1)"; IMAGE="$1"; shift ;;
@@ -106,7 +106,7 @@ if [ "${#CELLS[@]}" -eq 0 ]; then
   exit 0
 fi
 export APPTEST_ROOT APPTEST_HOST PHP_IMAGE="$IMAGE" APPTEST_PHP="$PHP" APPTEST_FLAVOR="$FLAVOR" APPTEST_STOCK="$STOCK"
-export APP_UID="${IDS%%:*}" APP_GID="${IDS##*:}"
+export APP_UID="${IDS%%:*}" APP_GID="${IDS##*:}" APPTEST_RETRY
 
 # APPTEST_SP_RULES=<dir> mounts a working-tree ruleset directory over the
 # image's baked /usr/local/etc/php/snuffleupagus, to try rule changes across
@@ -123,10 +123,14 @@ else
   export APPTEST_SP_SRC="$APPTEST_ROOT" APPTEST_SP_DST=/apptest-sp-rules-unused
 fi
 
+# The service images are normally pulled by run-matrix.sh before any run; a
+# lone run.sh gets them here, under retry, because the stack never pulls.
+apptest_ensure_service_images
+
 # Composer's cache is shared by every stack and written by whichever uid the
 # image under test runs as.
 docker volume create apptest-composer-cache >/dev/null
-docker run --rm -v apptest-composer-cache:/c --entrypoint sh "$APPTEST_REDIS_IMAGE" -c 'chmod 1777 /c' >/dev/null
+docker run --rm --pull never -v apptest-composer-cache:/c --entrypoint sh "$APPTEST_REDIS_IMAGE" -c 'chmod 1777 /c' >/dev/null
 
 TOTAL_FAIL=0
 result() {  # result <app> <set> <config> <ok|FAIL> <detail>
@@ -201,8 +205,16 @@ run_app() {  # run_app <app> <set> <configs csv from the cell>
   [ "${#CONFIGS[@]}" -gt 0 ] || { echo "--- $app $set: none of --config ${REQUESTED_CONFIGS[*]} applies (cell has: $cell_configs)"; return; }
   fixture="$(apptest_fixture_tag "$app" "$set")"
   want="$(apptest_recipe_hash "$app" "$set")"
-  apptest_fixture_current "$fixture" "$want" || apptest_fixture_try_pull "$app" "$set" || true
+  local pull_rc=0 pull_out=""
   if ! apptest_fixture_current "$fixture" "$want"; then
+    pull_out="$(apptest_fixture_try_pull "$app" "$set" 2>&1)" || pull_rc=$?
+    [ -z "$pull_out" ] || echo "$pull_out"
+  fi
+  if ! apptest_fixture_current "$fixture" "$want"; then
+    if [ "$pull_rc" -eq 2 ] && apptest_pull_failure_is_fatal; then
+      result "$app" "$set" "-" FAIL "fixture $fixture could not be pulled and a rebuild is not allowed here: $(printf '%s' "$pull_out" | grep '^note:' | tail -1 | cut -c7- | tr '\t' ' ')"
+      return
+    fi
     if [ "$NO_BUILD" -eq 1 ]; then
       have="$(apptest_label "$fixture" com.lotuswebagency.apptest-hash)"
       if [ -z "$have" ]; then state=missing

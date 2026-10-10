@@ -7,8 +7,19 @@
 # prints the URL and the `docker compose` prefix to use against the stack.
 name: ${APPTEST_PROJECT:?set by run.sh}
 
+# Nothing on `internal` can reach beyond the stack: a suite that needs the
+# internet fails instead of quietly depending on it. Only nginx also joins
+# `public`, because a published port needs a network that is not internal.
+# Every image is pulled before the stack starts (run-matrix.sh --prepare-only).
+networks:
+  internal:
+    internal: true
+  public: {}
+
 x-php: &php
   image: ${PHP_IMAGE:?}
+  pull_policy: never
+  networks: [internal]
   env_file:
     - ${APPTEST_PHP_ENV:?}
   environment:
@@ -24,6 +35,7 @@ x-php: &php
     - ${APPTEST_ROOT:?}:/apptest:ro
     - composer-cache:/composer-cache
     - ${APPTEST_SP_SRC:?}:${APPTEST_SP_DST:?}:ro
+    - ${APPTEST_RETRY:?}:/usr/local/bin/retry:ro
   working_dir: /srv/app
   depends_on:
     db: {condition: service_healthy}
@@ -33,6 +45,8 @@ x-php: &php
 services:
   db:
     image: ${APPTEST_FIXTURE:?}
+    pull_policy: never
+    networks: [internal]
     healthcheck:
       test: ["CMD", "mariadb", "-h127.0.0.1", "-uroot", "-papptest", "-e", "SELECT 1"]
       interval: 1s
@@ -44,6 +58,8 @@ services:
   # test's www-data (33 on ours and Debian stock, 82 on stock Alpine).
   app:
     image: ${APPTEST_FIXTURE:?}
+    pull_policy: never
+    networks: [internal]
     entrypoint: ["sh", "-c", "chown -R \"$$APP_UID:$$APP_GID\" /srv/app"]
     environment:
       APP_UID: ${APP_UID:?}
@@ -54,8 +70,12 @@ services:
 
   redis:
     image: ${APPTEST_REDIS_IMAGE:?}
+    pull_policy: never
+    networks: [internal]
   memcached:
     image: ${APPTEST_MEMCACHED_IMAGE:?}
+    pull_policy: never
+    networks: [internal]
 
   php:
     <<: *php
@@ -63,6 +83,8 @@ services:
 
   web:
     image: ${APPTEST_WEB_IMAGE:?}
+    pull_policy: never
+    networks: [internal, public]
     volumes:
       - app:/srv/app:ro
       - ${APPTEST_ROOT}/${APPTEST_APP}/nginx.conf:/etc/nginx/conf.d/default.conf:ro
@@ -77,7 +99,7 @@ services:
 
 volumes:
   app:
-  # Shared by every stack, so cli-builder runs of `composer install` do not
-  # each download the same packages again.
+  # A composer cache any uid can write, shared by every stack. The builder
+  # suites install offline from the fixture's baked cache and do not read it.
   composer-cache:
     name: apptest-composer-cache

@@ -68,6 +68,16 @@ apptest_ensure_image() {
   docker image inspect "$1" >/dev/null 2>&1 || apptest_retry registry docker pull -q "$1" >/dev/null
 }
 
+# apptest_ensure_service_images -> the images compose.yml runs besides the
+# fixture and the image under test are local afterwards. The stack starts with
+# pull_policy: never, so nothing is fetched while a suite runs.
+apptest_ensure_service_images() {
+  local service
+  for service in web redis memcached; do
+    apptest_ensure_image "$(apptest_service_image "$service")"
+  done
+}
+
 # Everything about which app release runs where is tests/apps/sets, read
 # through appsets.py; nothing here re-derives its rules.
 apptest_appsets() { python3 "$APPTEST_ROOT/appsets.py" "$@"; }
