@@ -27,8 +27,8 @@ ref="${tag%%:*}@sha256:$digest"
 # different variant. `docker image inspect --platform` needs Docker 28;
 # comparing .Architecture works on every version.
 [ "$(docker image inspect --format '{{.Architecture}}' "$ref" 2>/dev/null || true)" = amd64 ] \
-  || docker pull -q --platform linux/amd64 "$ref" >/dev/null
-cid="$(docker create --platform linux/amd64 "$ref")"
+  || RETRY_KIND=registry "$HERE/../../../../ci/retry.sh" docker pull -q --platform linux/amd64 "$ref" >/dev/null
+cid="$(docker create --pull never --platform linux/amd64 "$ref")"
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 
 docker exec "$builder" mkdir -p /srv/src

@@ -171,18 +171,33 @@ APPTEST_FIXTURE_REPO=ghcr.io/lotuswebagency/php/apptest ./tests/apps/run.sh lotu
 - **Pull before build.** `build-fixture.sh`, and `run.sh` before it refuses or
   rebuilds, pull a fixture that is not current locally and use it only if its
   `com.lotuswebagency.apptest-hash` label equals `apptest_recipe_hash` for
-  this tree and it is the daemon's architecture. A missing, stale or
-  unpullable one is reported (`note: ...`) and built instead. `--force`
-  skips the pull; `run.sh --no-build` still refuses what the pull did not
-  make current.
+  this tree and it is the daemon's architecture. The pull runs under
+  `ci/retry.sh`. A missing or stale one is reported (`note: ...`) and built
+  instead; so is one that stays unpullable for another reason, except under CI
+  (`CI=true`) or `APPTEST_NO_BUILD=1`, where that fails instead of turning an
+  outage into a rebuild. `--force` skips the pull; `run.sh --no-build` still
+  refuses what the pull did not make current.
 - **`build-fixture.sh --push`** pushes every fixture it ends with, built here,
   pulled or already current, and refuses when the repository is a local name
   rather than a registry (a push to `lotuswebagency/php-apptest` would go to
   Docker Hub). Run it once per architecture to publish both.
-- The recipe hash covers `build-fixture.sh`, `fetch.sh`, `install-composer.sh`
-  and `<app>/fixture/`, so an edit to the first three makes every published
-  fixture stale and one under `<app>/fixture/` that app's. `lib.sh`, `run.sh`,
-  the suites and the nginx configs are outside it.
+- The recipe hash covers `build-fixture.sh`, `fetch.sh`, `install-composer.sh`,
+  `bake-composer-cache.sh`, `<app>/fixture/` and WordPress's
+  `suite/builder/<set>/` (its composer lock is baked, below), so an edit to the
+  shared scripts makes every published fixture stale and one under
+  `<app>/fixture/` that app's. `lib.sh`, `run.sh`, the other suite files, the
+  nginx configs and `ci/retry.sh` are outside it.
+- **Baked composer inputs.** A fixture carries what the builder suites would
+  otherwise download: the pinned `composer` and `composer-lts` phars in
+  `/srv/app/.apptest/bin` (`install-composer.sh` copies from there and downloads
+  only when they are absent), and a composer cache in
+  `/srv/app/.apptest/composer-cache` filled from the lock each suite installs
+  (Laravel's dev and `--no-dev` installs, WordPress's `suite/builder/<set>` lock,
+  PrestaShop's release lock with `--no-dev`; PrestaShop 1.6 has none). The build
+  repeats those installs with `COMPOSER_DISABLE_NETWORK=1`
+  (`bake-composer-cache.sh`), so a cache that is not enough fails the build.
+- Every download in a fixture build goes through `ci/retry.sh`, which
+  `build-fixture.sh` mounts into the builder container as `/usr/local/bin/retry`.
 
 PrestaShop 1.6 to 8.2 are the official GitHub release zips, pinned by sha256
 (`prestashop-zip` rows; the release asset is a zip in a zip, which

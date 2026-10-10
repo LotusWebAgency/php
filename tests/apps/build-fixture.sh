@@ -27,7 +27,11 @@
 # fixture/build.sh runs inside that stock container as root, talks to the
 # services by their aliases (db, redis, memcached -- the same names the test
 # stack uses, so configs written here are the configs used later), and
-# populates the data through the application's own APIs. MariaDB is then
+# populates the data through the application's own APIs; ci/retry.sh is mounted
+# as /usr/local/bin/retry, and every fetch in there goes through it. The
+# builder suites' composer cache and the pinned composer phars are baked into
+# the app tree (/srv/app/.apptest/composer-cache, .apptest/bin), so a suite
+# needs no network for them. MariaDB is then
 # stopped cleanly, the app tree is copied into its container, and that
 # container is committed as the fixture.
 #
@@ -82,13 +86,21 @@ build_one() {
     [ "$PUSH" -eq 0 ] || apptest_fixture_push "$app" "$set"
     return 0
   fi
-  if [ "$FORCE" -eq 0 ] && apptest_fixture_try_pull "$app" "$set"; then
-    [ "$PUSH" -eq 0 ] || apptest_fixture_push "$app" "$set"
-    return 0
+  if [ "$FORCE" -eq 0 ]; then
+    local pull_rc=0
+    apptest_fixture_try_pull "$app" "$set" || pull_rc=$?
+    if [ "$pull_rc" -eq 0 ]; then
+      [ "$PUSH" -eq 0 ] || apptest_fixture_push "$app" "$set"
+      return 0
+    fi
+    if [ "$pull_rc" -eq 2 ] && apptest_pull_failure_is_fatal; then
+      echo "FAIL: $tag: the registry could not be read and a rebuild is not allowed here (CI, or APPTEST_NO_BUILD=1)"
+      return 1
+    fi
   fi
 
   builder="$(apptest_builder_image "$app" "$set")"
-  docker image inspect "$builder" >/dev/null 2>&1 || docker pull -q "$builder" >/dev/null
+  apptest_ensure_image "$builder"
   builder_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' "$builder" 2>/dev/null || echo "$builder")"
 
   name="apptest-build-${app}-${set//./_}-$$"
@@ -99,12 +111,15 @@ build_one() {
   # shellcheck disable=SC2064
   trap "docker rm -f '$name-php' '$name-db' '$name-redis' '$name-memcached' >/dev/null 2>&1 || true; docker network rm '$net' >/dev/null 2>&1 || true" RETURN
 
+  apptest_ensure_image "$APPTEST_DB_IMAGE"
+  apptest_ensure_image "$(apptest_service_image redis)"
+  apptest_ensure_image "$(apptest_service_image memcached)"
   docker network create "$net" >/dev/null
-  docker run -d --name "$name-db" --network "$net" --network-alias db \
+  docker run -d --pull never --name "$name-db" --network "$net" --network-alias db \
     -e MARIADB_ROOT_PASSWORD="$APPTEST_DB_PASSWORD" \
     "$APPTEST_DB_IMAGE" "${APPTEST_DB_ARGS[@]}" >/dev/null
-  docker run -d --name "$name-redis" --network "$net" --network-alias redis "$(apptest_service_image redis)" >/dev/null
-  docker run -d --name "$name-memcached" --network "$net" --network-alias memcached "$(apptest_service_image memcached)" >/dev/null
+  docker run -d --pull never --name "$name-redis" --network "$net" --network-alias redis "$(apptest_service_image redis)" >/dev/null
+  docker run -d --pull never --name "$name-memcached" --network "$net" --network-alias memcached "$(apptest_service_image memcached)" >/dev/null
 
   # The entrypoint's own init server runs with --skip-networking, so a TCP
   # answer means the real server is up, not the bootstrap one.
@@ -115,13 +130,14 @@ build_one() {
   done
   [ "$i" -lt 120 ] || { docker logs "$name-db" | tail -30; echo "FAIL: $tag: mariadb never answered on TCP"; return 1; }
 
-  docker run -d --name "$name-php" --network "$net" --user 0 \
+  docker run -d --pull never --name "$name-php" --network "$net" --user 0 \
     -e COMPOSER_ALLOW_SUPERUSER=1 -e COMPOSER_NO_INTERACTION=1 -e COMPOSER_CACHE_DIR=/composer-cache \
     -e APPTEST_APP="$app" -e APPTEST_SET="$set" -e APPTEST_HOST="$APPTEST_HOST" \
     -e APPTEST_DB_HOST=db -e APPTEST_DB_PASSWORD="$APPTEST_DB_PASSWORD" \
     -e APPTEST_PHP_MIN="$(apptest_set_field "$app" "$set" min)" \
     -e APPTEST_PHP_MAX="$(apptest_set_field "$app" "$set" max)" \
     -v "$APPTEST_ROOT:/apptest:ro" \
+    -v "$APPTEST_RETRY:/usr/local/bin/retry:ro" \
     -v apptest-dl-cache:/cache \
     -v apptest-composer-cache:/composer-cache \
     --entrypoint tail "$builder" -f /dev/null >/dev/null

@@ -53,6 +53,15 @@ done
 # and the suites use this copy rather than whatever the image ships.
 bash /apptest/fetch.sh wp-cli "$SET" "$APP/.apptest/wp-cli.phar"
 
+# The builder suite's composer, and the cache for its install from the set's
+# committed lock, both baked in so that suite needs no network for them
+# (sets without a builder lock bake only the phars).
+bash /apptest/install-composer.sh --bake "$APP/.apptest/bin"
+if [ -f "/apptest/wordpress/suite/builder/$SET/composer.lock" ]; then
+  bash /apptest/install-composer.sh /usr/local/bin/composer
+  bash /apptest/bake-composer-cache.sh "$APP/.apptest/composer-cache" "/apptest/wordpress/suite/builder/$SET"
+fi
+
 # The database is created by hand (mysqli, so no dependence on which client
 # binary this image has); WordPress creates its own tables.
 php -r '
