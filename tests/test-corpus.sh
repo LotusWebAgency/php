@@ -203,12 +203,10 @@ for app in "${apps[@]}"; do
   echo "ok: $app sqlite seeded ($count rows)"
 done
 
-# PrestaShop's database check needs mariadbd running, which needs
-# mariadb-server installed fresh in this --rm container (the runtime image
-# does not ship it -- same reasoning as tests/test-corpus-tiers.sh's
-# run_corpus). --network host for the apt-get; --user 0 to install packages
-# and to start mariadbd against the volume's uid-33 datadir (root can read and
-# write it regardless of ownership, so nothing here needs a chown).
+# PrestaShop's database check needs mariadbd running. The corpus image carries
+# mariadb-server (Dockerfile.corpus installs it to build the datadir), so
+# db-up.sh starts it inside this --rm container, as root against the datadir
+# (root can read and write it whatever its owner), with no network at all.
 for app in "${mysql_apps[@]:-}"; do
   [ -n "$app" ] || continue
   spec="${SRC}/${app}/endpoints"
@@ -216,10 +214,8 @@ for app in "${mysql_apps[@]:-}"; do
   db_arg="$(awk '{print $2}' <<<"$db_line")"
   db_sql="$(cut -d' ' -f3- <<<"$db_line")"
   rest="${db_arg#mysql:}"; db_name="${rest##*:}"; hostport="${rest%:*}"; db_host="${hostport%%:*}"; db_port="${hostport#*:}"
-  out="$(docker run --rm --user 0 --network host --entrypoint sh "$IMAGE" -c '
+  out="$(docker run --rm --user 0 --network none --entrypoint sh "$IMAGE" -c '
     set -eu
-    apt-get update -qq >/tmp/apt.log 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends mariadb-server >>/tmp/apt.log 2>&1 \
-      || { tail -30 /tmp/apt.log >&2; exit 1; }
     '"/corpus-src/${app}/db-up.sh"' "/corpus/'"${app}"'"
     php -r "\$pdo = new PDO(\"mysql:host=\$argv[1];port=\$argv[2];dbname=\$argv[3]\", null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]); echo (int) \$pdo->query(\$argv[4])->fetchColumn();" '"$db_host"' '"$db_port"' '"$db_name"' "'"$db_sql"'"
   ' 2>&1)"
