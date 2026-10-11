@@ -1,6 +1,6 @@
-# syntax=docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 # One Dockerfile for every published tag; docker-bake.hcl feeds it the matrix.
-ARG BASE_IMAGE=debian:trixie-slim
+ARG BASE_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 ARG PHP_ERA=modern
 # Declared before any FROM so `FROM toolchain-select-${COMPILER}` can resolve it.
 # The toolchain-base stage redeclares it for use inside the stage.
@@ -11,7 +11,7 @@ ARG COMPILER=clang
 # image, pinned by multi-arch index digest (an arm64 build resolves it too). That
 # image is debian:13-slim plus a from-source GCC under /usr/local, copied out by
 # toolchain-select-gcc. buildkit builds this stage only when COMPILER=gcc.
-FROM gcc:16.2-trixie@sha256:ef558a40d1f13115293feee01526dbdb9aaad7c9c5a00da05f471ce042e855c1 AS gcc16-toolchain
+FROM gcc:16.2-trixie@sha256:17043c23ec2ad97fc3beca18da77275d26be5db5cd70ea0a5d73200e21a8e999 AS gcc16-toolchain
 
 # --- toolchain ---
 FROM ${BASE_IMAGE} AS toolchain-base
@@ -724,7 +724,7 @@ CMD ["php", "-a"]
 # Node 24 LTS for cli-builder, copied from the official image (trixie ships the
 # unmaintained Node 20). Pinned by multi-arch index digest so amd64 and arm64 both
 # resolve it and a retag cannot change what ships.
-FROM node:24-trixie-slim@sha256:8ec5d7557396cfe32d21c3f9c13072355ceab22b584578ca4bb28af31120cffe AS node24
+FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS node24
 
 # Node, npm and semantic-release as one tree for cli-builder, finished here so no
 # intermediate npm lands in a shipped layer (upgrading npm in a later RUN left the

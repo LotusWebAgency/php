@@ -128,6 +128,19 @@
       "automerge": true
     },
     {
+      "description": "Each app fixture pins one framework major on purpose (Laravel 9/10/12/13, the WordPress suite builders): in-range lock refreshes only, never a major bump",
+      "matchManagers": [
+        "composer"
+      ],
+      "matchFileNames": [
+        "tests/apps/**"
+      ],
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Never bump our own published images (ghcr.io/lotuswebagency/php(/corpus), lotuswebagency/php): a PR against either is a self-referential loop that changes a build input, invalidates INPUTS_HASH and triggers a rebuild producing a new digest to bump again",
       "matchManagers": [
         "dockerfile",

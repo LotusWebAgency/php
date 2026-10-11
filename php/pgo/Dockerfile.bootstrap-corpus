@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.27@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+# syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 # Empty placeholder corpus for the bootstrap cli-builder targets only.
 #
 # The main Dockerfile's php-build stage mounts a corpus unconditionally, because a
@@ -15,7 +15,7 @@
 # That target also adds com.lotuswebagency.bootstrap=true and a
 # "-cli-builder-bootstrap" tag suffix; this image carries the same label so it
 # cannot be mistaken for a release image.
-ARG BASE_IMAGE=debian:trixie-slim
+ARG BASE_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
 FROM ${BASE_IMAGE}
 ARG INPUTS_HASH=""
 
