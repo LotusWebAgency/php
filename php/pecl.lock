@@ -31,7 +31,7 @@ imagick       3.8.1     3a3587c0a524c17d0dad9673a160b90cd776e836838474e173b549ed
 # sha256 computed locally against the fetched tarball (pecl.php.net does not
 # publish checksums to verify against).
 amqp          2.2.0     5ae624bd785e299523f6132c204bd562cc73066dd33a10a12aa96389f55a4de7  7.4.0    -
-mongodb       2.5.3     5e5369cd01b47543fb3244917eff17fa4c8c357b0866828d59c899b4e53e6665  8.1.0    8.99.99
+mongodb       2.5.4     41eead0799cc66876b12d10b5efe86268bfc704c1be57a70d49e4bd4bf6c8ee1  8.1.0    8.99.99
 msgpack       3.0.1     e30be355ab79aaea4568692fbd6073fd7c7f50ea8d3cf12edce40fc0c921d868  7.0.0    -
 pcov          1.0.12    23255c8c9335a9636ccb743f5302436a97a582a0bbde9869485be911bbc15da8  7.1.0    -
 protobuf      5.36.2    f0a17c67de29df0fb0e5215a381df9b155125e1ace6252dd617bf16b4194dd5b  8.2.0    -
