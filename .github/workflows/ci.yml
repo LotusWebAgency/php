@@ -319,11 +319,27 @@ jobs:
             echo "CACHE_WEEK=$(date -u +%G-W%V)"
           } >> "$GITHUB_ENV"
 
+      # A pull request that changes any build input (a Renovate base-digest bump,
+      # say) has an inputs hash no corpus job has built, so its hash-pinned ref
+      # does not exist: it falls back to the tier's last published corpus, as the
+      # job comment above describes. develop and main never fall back.
       - name: Pull and verify this target's hash-pinned PGO corpus
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           corpus_ref="${TARGET_CORPUS}-${INPUTS_HASH}"
-          ./ci/retry.sh docker pull "$corpus_ref"
+          pull_err="$RUNNER_TEMP/corpus-pull.err"
+          if ! ./ci/retry.sh docker pull "$corpus_ref" 2>"$pull_err"; then
+            cat "$pull_err" >&2
+            if [ "$EVENT_NAME" = pull_request ] && grep -qiE 'manifest unknown|not found' "$pull_err"; then
+              echo "::warning::$corpus_ref does not exist (this PR changes a build input); grading against the last published $TARGET_CORPUS"
+              ./ci/retry.sh docker pull "$TARGET_CORPUS"
+              echo "CORPUS_REF=$TARGET_CORPUS" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            exit 1
+          fi
           label_hash="$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}' "$corpus_ref")"
           [ "$label_hash" = "$INPUTS_HASH" ] || {
             echo "FAIL: $corpus_ref carries inputs-hash '$label_hash', expected '$INPUTS_HASH'" >&2
