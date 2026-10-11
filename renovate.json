@@ -79,6 +79,20 @@
       "automerge": false
     },
     {
+      "description": "matrix.json is the single source of truth for the debian base: docker-bake.hcl always overrides the ARG BASE_IMAGE default of the Dockerfile and of php/pgo/Dockerfile.bootstrap-corpus (both are built only through bake), so Renovate must not pin or bump that default a second time",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchPackageNames": [
+        "debian"
+      ],
+      "matchFileNames": [
+        "Dockerfile",
+        "php/pgo/Dockerfile.bootstrap-corpus"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Auto-merge the matrix.json base-image digest pin the same way as the Dockerfile bases",
       "matchManagers": [
         "custom.regex"

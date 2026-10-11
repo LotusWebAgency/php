@@ -113,9 +113,11 @@ env:
   # default is moby/buildkit:buildx-stable-1 from Docker Hub, unpinned); also read
   # by tests/test-attest.sh.
   BUILDKIT_IMAGE: mirror.gcr.io/moby/buildkit:v0.34.0@sha256:b059f8d7226d0b326bc871af489a5dddf65e36af4d20d14251b072974d9ee87c
-  # The Trivy release the prepare steps install: the pinned trivy-action's own
-  # `version` default, so the scan steps run what the action would have fetched.
+  # The Trivy release the prepare steps install; the scan steps skip the
+  # action's own setup and run it.
   SETUP_TRIVY_VERSION: v0.75.0
+  # The Cosign release cosign-installer fetches (its own default is older).
+  COSIGN_VERSION: v3.1.3
 
 jobs:
   # ------------------------------------------------------------- preflight
@@ -161,6 +163,8 @@ jobs:
       # local key, in the merge and promote jobs' order.
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
 
       - name: Install regctl
         run: ./ci/install-regctl.sh
@@ -1111,6 +1115,8 @@ jobs:
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
 
       - name: Install regctl
         run: ./ci/install-regctl.sh
@@ -1384,6 +1390,8 @@ jobs:
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
 
       - name: Install regctl
         run: ./ci/install-regctl.sh
