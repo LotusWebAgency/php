@@ -1,0 +1,16 @@
+services:
+    _defaults:
+        autowire: true
+        autoconfigure: true
+
+    # exclude is a string, not a one-item list: Symfony 3.4's FileLocator
+    # cannot take an array here (it warns "parse_url() expects parameter 1 to
+    # be string" and then autowires the Kernel, which has no type hints), and
+    # every later version accepts either form.
+    App\:
+        resource: '../src/'
+        exclude: '../src/Kernel.php'
+
+    App\Corpus\Database:
+        arguments:
+            $dsn: 'sqlite:%kernel.project_dir%/var/corpus.sqlite'

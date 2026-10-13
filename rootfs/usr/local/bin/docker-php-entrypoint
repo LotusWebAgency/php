@@ -1,0 +1,891 @@
+#!/usr/bin/env bash
+# Translate environment into configuration, then hand off. Everything generated
+# here is overridable; nothing here is required for the image to work.
+#
+# Rule 1: `set -e` does not reliably stop the script on a failure inside a function
+# called from an `if` then-clause, or on a bare call whose last statement was a
+# short-circuited `[ ] && echo`. Malformed input is therefore rejected with an
+# explicit `exit 1` at the point of failure, and arithmetic never touches an
+# unvalidated value.
+#
+# Rule 2: /tmp is mode 1777, so nothing that configures PHP or FPM trusts a fixed
+# path under it. A read-only rootfs gets a `mktemp`-named, mode-0700 directory.
+set -euo pipefail
+
+# ----------------------------------------------------------- input guards
+# Runs before anything is created, written or exported, so malformed input
+# refuses to start the container and leaves no private /tmp directory behind.
+# Two rejections apply to every variable consumed here:
+#   * A newline or CR in the value: it would reach a generated ini file or an FPM
+#     pool directive and produce a confusing startup error.
+#   * Set but empty: an unset shell variable in a compose file or Helm template
+#     renders as empty, and PHP_FPM_MAX_REQUESTS= would silently become
+#     pm.max_requests = 0 (no worker recycling) while PHP_FPM_STATUS_PATH= would
+#     unpublish the status endpoint. Unset the variable to get the image default.
+# PHP_INI_SCAN_DIR is excluded: empty is PHP's own "scan nothing" and the only way
+# to opt out of the baked conf.d (handled below).
+for _v in PHP_MEMORY_LIMIT PHP_MAX_EXECUTION_TIME PHP_MAX_INPUT_TIME PHP_MAX_INPUT_VARS \
+          PHP_UPLOAD_MAX_FILESIZE PHP_POST_MAX_SIZE PHP_TIMEZONE PHP_ERROR_REPORTING \
+          PHP_DISPLAY_ERRORS PHP_DISABLE_FUNCTIONS \
+          PHP_OPCACHE_ENABLE PHP_OPCACHE_MEMORY PHP_OPCACHE_VALIDATE_TIMESTAMPS \
+          PHP_OPCACHE_REVALIDATE_FREQ PHP_OPCACHE_PRELOAD PHP_OPCACHE_JIT \
+          PHP_OPCACHE_JIT_BUFFER \
+          PHP_FPM_PM PHP_FPM_MAX_CHILDREN PHP_FPM_START_SERVERS PHP_FPM_MIN_SPARE \
+          PHP_FPM_MAX_SPARE PHP_FPM_MAX_REQUESTS PHP_FPM_LISTEN PHP_FPM_STATUS_PATH \
+          PHP_FPM_ACCESS_LOG PHP_FPM_SLOWLOG_TIMEOUT PHP_FPM_WORKER_MEMORY \
+          PHP_EXT_ENABLE PHP_SNUFFLEUPAGUS PHP_CHMOD_SHIM; do
+  if [ -z "${!_v+set}" ]; then
+    continue
+  fi
+  case "${!_v}" in
+    *$'\n'*|*$'\r'*)
+      echo "docker-php-entrypoint: refusing ${_v}: value contains a newline" >&2
+      exit 1
+      ;;
+    "")
+      echo "docker-php-entrypoint: refusing ${_v}: set but empty. Unset it to use the image default -- an empty value is a typo, not a setting." >&2
+      exit 1
+      ;;
+  esac
+done
+
+# zend_disable_functions splits on literal space and comma only and matches tokens
+# case-sensitively against a lowercase function table. Anything else (a tab,
+# 'EXEC') leaves the function callable silently, so such tokens are refused up
+# front, before 99-env.ini, which carries the union of this value and the baked
+# default (see disable_functions_effective() and conf/www.conf).
+disable_functions_split() {
+  # Mirrors PHP's split: runs of spaces and commas collapse to one separator;
+  # other whitespace stays in its token and fails the charset check below.
+  printf '%s' "$1" | tr ',' ' ' | tr -s ' ' '\n' | sed '/^$/d'
+}
+if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
+  # `read` fails on a final line without a trailing newline, and this split never
+  # emits one, so `|| [ -n "$_pdf_tok" ]` keeps the last token from being skipped.
+  while IFS= read -r _pdf_tok || [ -n "$_pdf_tok" ]; do
+    case "$_pdf_tok" in
+      *[!a-z0-9_]*)
+        echo "docker-php-entrypoint: refusing PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS}: '${_pdf_tok}' is not a name PHP's own disable_functions parser can ever match -- it splits only on space/comma (so a tab or other separator stays part of the token) and matches case-sensitively against its all-lowercase function table. Use bare, lowercase function names, e.g. 'exec,proc_open'." >&2
+        exit 1
+        ;;
+    esac
+  done < <(disable_functions_split "$PHP_DISABLE_FUNCTIONS")
+fi
+
+# PHP_SNUFFLEUPAGUS names a file under /usr/local/etc/php/snuffleupagus/, so it
+# is a bare name -- never a path. Without this, PHP_SNUFFLEUPAGUS=../x resolves
+# outside that directory. Lowercase letters, digits, '-' and '_', and it has to
+# start with a letter or digit; the empty value is already refused above.
+if [ -n "${PHP_SNUFFLEUPAGUS:-}" ]; then
+  case "$PHP_SNUFFLEUPAGUS" in
+    [!a-z0-9]*|*[!a-z0-9_-]*)
+      echo "docker-php-entrypoint: refusing PHP_SNUFFLEUPAGUS=${PHP_SNUFFLEUPAGUS}: a ruleset name is lowercase letters, digits, '-' and '_' only, starting with a letter or digit (^[a-z0-9][a-z0-9_-]*\$) -- it selects /usr/local/etc/php/snuffleupagus/<name>.rules, it is not a path." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# ------------------------------------------ internal (computed) variables
+# The four PHP_FPM_*_EFFECTIVE names are what conf/www.conf reads and what
+# `docker image inspect` shows, so operators find and set them. They are computed
+# outputs this script overwrites, so a value differing from the Dockerfile's baked
+# ENV default is refused, naming the variable that works. A value equal to the
+# baked one cannot be told apart from it (Docker merges image ENV and -e) and is
+# harmless: autotuning replaces it. A build-time check in the fpm stage keeps these
+# constants in sync with the Dockerfile ENV line.
+BAKED_MAX_CHILDREN=16
+BAKED_START_SERVERS=4
+BAKED_MIN_SPARE=4
+BAKED_MAX_SPARE=8
+for _pair in "PHP_FPM_MAX_CHILDREN_EFFECTIVE:${BAKED_MAX_CHILDREN}:PHP_FPM_MAX_CHILDREN" \
+             "PHP_FPM_START_SERVERS_EFFECTIVE:${BAKED_START_SERVERS}:PHP_FPM_START_SERVERS" \
+             "PHP_FPM_MIN_SPARE_EFFECTIVE:${BAKED_MIN_SPARE}:PHP_FPM_MIN_SPARE" \
+             "PHP_FPM_MAX_SPARE_EFFECTIVE:${BAKED_MAX_SPARE}:PHP_FPM_MAX_SPARE"; do
+  _var="${_pair%%:*}"; _rest="${_pair#*:}"; _baked="${_rest%%:*}"; _knob="${_rest##*:}"
+  if [ -n "${!_var+set}" ]; then
+    if [ "${!_var}" != "$_baked" ]; then
+      echo "docker-php-entrypoint: refusing ${_var}=${!_var}: that variable is this image's computed value -- php-fpm reads it, which is why it is the one visible in \`docker image inspect\`, but this entrypoint overwrites it on every start, so setting it does nothing. Set ${_knob}=${!_var} instead: it is validated here and passed through untouched." >&2
+      exit 1
+    fi
+  fi
+done
+
+CONF_DIR=/usr/local/etc/php/conf.d
+BAKED_INI_DEFAULT=/usr/local/etc/php/conf.d
+
+# A read-only rootfs is supported: fall back to a private, mktemp-named, mode-0700
+# directory, so another UID sharing /tmp (sidecar, shared volume, earlier boot)
+# cannot pre-plant an .ini granting auto_prepend_file or clearing disable_functions.
+#
+# That directory must outlive this script (every php process reads it, and the
+# script ends in `exec`, so there is no exit hook to clean up). On a tmpfs it dies
+# with the container; on a volume-backed /tmp the two functions below reap
+# leftovers. An advisory flock is the only liveness signal that crosses PID
+# namespaces: it is held while any process over there keeps the fd open.
+#
+# Invariant: a private directory is reapable if and only if it holds a .lock nobody
+# has locked. If the lock cannot be taken (no flock, unsupported filesystem), the
+# .lock is removed so the directory is never reaped: leaking a directory is better
+# than deleting a live container's config.
+reap_dead_conf_dirs() {
+  local d uid
+  if ! command -v flock >/dev/null 2>&1; then
+    return 0
+  fi
+  uid="$(id -u)"
+  for d in /tmp/php-conf.*; do
+    if [ -L "$d" ] || [ ! -d "$d" ] || [ ! -f "$d/.lock" ]; then
+      continue
+    fi
+    if [ "$(stat -c '%u %a' "$d" 2>/dev/null)" != "$uid 700" ]; then
+      continue
+    fi
+    if flock -n "$d/.lock" true 2>/dev/null; then
+      rm -rf "$d" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
+# Fd 9 is opened with `exec`, so it survives the final exec and is inherited by the
+# container's command and its children: the lock lasts the container's whole life.
+# PHP only picks up *.ini from a scan dir, so the .lock file is invisible to it.
+hold_conf_dir_lock() {
+  local dir="$1"
+  if command -v flock >/dev/null 2>&1 && : >"${dir}/.lock" 2>/dev/null; then
+    exec 9>>"${dir}/.lock"
+    if flock -n 9; then
+      return 0
+    fi
+    exec 9>&-
+  fi
+  rm -f "${dir}/.lock" 2>/dev/null || true
+  return 0
+}
+
+CONF_WRITABLE=1
+if ! touch "${CONF_DIR}/.writable" 2>/dev/null; then
+  reap_dead_conf_dirs
+  if priv_conf_dir="$(mktemp -d /tmp/php-conf.XXXXXX 2>/dev/null)"; then
+    chmod 700 "$priv_conf_dir"
+    hold_conf_dir_lock "$priv_conf_dir"
+    CONF_DIR="$priv_conf_dir"
+  else
+    echo "docker-php-entrypoint: neither /usr/local/etc/php/conf.d nor a private /tmp directory is writable; env-driven ini overrides (PHP_MEMORY_LIMIT, opcache tuning, PHP_EXT_ENABLE, ...) will not apply" >&2
+    CONF_WRITABLE=0
+  fi
+else
+  rm -f "${CONF_DIR}/.writable"
+fi
+export PHP_CONF_DIR="$CONF_DIR"
+
+# Fail closed when a hardening control cannot be applied. With CONF_WRITABLE=0 (bare
+# --read-only, no writable /tmp) the opcache and core-ini blocks are skipped, so
+# each requested tuning value gets a named warning. Tuning values only worsen
+# tuning, never security (the baked ini ships a sane default for each), so these
+# warn rather than refuse. PHP_DISABLE_FUNCTIONS is different: it is verified after
+# every ini has been written, by asking PHP what will be in force for the command
+# about to run (see the "disable_functions in force" section below).
+if [ "$CONF_WRITABLE" != 1 ]; then
+  for _v in PHP_MEMORY_LIMIT PHP_MAX_EXECUTION_TIME PHP_MAX_INPUT_TIME PHP_MAX_INPUT_VARS \
+            PHP_UPLOAD_MAX_FILESIZE PHP_POST_MAX_SIZE PHP_TIMEZONE PHP_ERROR_REPORTING \
+            PHP_DISPLAY_ERRORS \
+            PHP_OPCACHE_ENABLE PHP_OPCACHE_MEMORY PHP_OPCACHE_VALIDATE_TIMESTAMPS \
+            PHP_OPCACHE_REVALIDATE_FREQ PHP_OPCACHE_PRELOAD PHP_OPCACHE_JIT PHP_OPCACHE_JIT_BUFFER; do
+    if [ -n "${!_v:-}" ]; then
+      echo "docker-php-entrypoint: ${_v}=${!_v} requested but no ini directory is writable; starting on the image default instead." >&2
+    fi
+  done
+fi
+
+# Returns success if $2 is already effectively scanned given the colon-
+# separated scan-dir list $1.
+scan_dir_includes() {
+  case ":${1}:" in
+    *":${2}:"*) return 0 ;;
+  esac
+  return 1
+}
+
+# Setting PHP_INI_SCAN_DIR replaces PHP's compiled-in default, and an empty element
+# in it (leading, trailing or doubled ":") splices that default back in. Whenever
+# this script touches it, two directories must end up scanned: the baked default
+# (BAKED_INI_DEFAULT: hardening, 15-opcache.ini, php-ext-enable 20-*.ini) and
+# CONF_DIR (this boot's generated files; the private fallback when the default is
+# read-only). An operator value lacking both would silently disable every extension
+# and hardening setting.
+#
+# Empty elements are squeezed out first, then both directories are appended as plain
+# entries exactly once, so nothing is scanned twice.
+#
+# An explicitly empty value means "scan nothing" and is respected.
+if [ "${PHP_INI_SCAN_DIR+set}" = set ] && [ -z "$PHP_INI_SCAN_DIR" ]; then
+  : # explicit "scan nothing" -- respected
+elif [ -n "${PHP_INI_SCAN_DIR:-}" ]; then
+  # Canonicalize each element (collapse `//`, drop `/./` and a trailing `/.`, strip
+  # trailing slashes): `.../conf.d/` equals `.../conf.d` to the filesystem but not to
+  # a string compare, so it would be appended again and PHP would parse every ini
+  # twice ("Module already loaded"). A bare "/" or "/." is left alone; rewriting it
+  # would produce an empty element, which means something else.
+  scan=""; rest="$PHP_INI_SCAN_DIR"; first=1
+  while :; do
+    el="${rest%%:*}"
+    while [ "$el" != "${el//\/\//\/}" ]; do
+      el="${el//\/\//\/}"
+    done
+    while [ "$el" != "${el//\/.\//\/}" ]; do
+      el="${el//\/.\//\/}"
+    done
+    while [ "${#el}" -gt 2 ] && [ "${el%/.}" != "$el" ]; do
+      el="${el%/.}"
+    done
+    while [ "${#el}" -gt 1 ] && [ "${el%/}" != "$el" ]; do
+      el="${el%/}"
+    done
+    if [ "$first" = 1 ]; then
+      scan="$el"; first=0
+    else
+      scan="${scan}:${el}"
+    fi
+    case "$rest" in
+      *:*) rest="${rest#*:}" ;;
+      *) break ;;
+    esac
+  done
+  while case "$scan" in *"::"*) true ;; *) false ;; esac; do
+    scan="${scan//::/:}"
+  done
+  scan="${scan#:}"
+  scan="${scan%:}"
+  scan_dir_includes "$scan" "$BAKED_INI_DEFAULT" || scan="${scan:+${scan}:}${BAKED_INI_DEFAULT}"
+  scan_dir_includes "$scan" "$CONF_DIR" || scan="${scan}:${CONF_DIR}"
+  export PHP_INI_SCAN_DIR="$scan"
+elif [ "$CONF_DIR" != "$BAKED_INI_DEFAULT" ]; then
+  export PHP_INI_SCAN_DIR="${BAKED_INI_DEFAULT}:${CONF_DIR}"
+fi
+
+PHP_MAJOR_MINOR="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+
+# Accepts a bare non-negative integer (already MB) or a php.ini-style size with a
+# K/M/G suffix (case-insensitive), normalizes to whole MB and prints it. An
+# unparseable or zero value aborts here so downstream division never sees it.
+to_mb() {
+  local name="$1" val="$2" n unit mb
+  if [[ "$val" =~ ^([0-9]+)([kKmMgG]?)$ ]]; then
+    n="${BASH_REMATCH[1]}"; unit="${BASH_REMATCH[2]}"
+    case "$unit" in
+      [kK]) mb=$(( (n + 1023) / 1024 )) ;;
+      [gG]) mb=$(( n * 1024 )) ;;
+      *)    mb=$n ;;
+    esac
+  else
+    echo "docker-php-entrypoint: invalid ${name}=${val} (expected an integer, optionally suffixed with K/M/G, e.g. 64M)" >&2
+    exit 1
+  fi
+  if [ "$mb" -lt 1 ]; then
+    echo "docker-php-entrypoint: ${name}=${val} rounds to 0MB, refusing" >&2
+    exit 1
+  fi
+  echo "$mb"
+}
+
+# A bare non-negative integer, or abort loudly. Used for the FPM pool-size
+# overrides, which are process counts, not sizes -- no K/M/G here.
+to_int() {
+  local name="$1" val="$2"
+  if [[ "$val" =~ ^[0-9]+$ ]]; then
+    echo "$val"
+  else
+    echo "docker-php-entrypoint: invalid ${name}=${val} (expected a non-negative integer)" >&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------- memory
+detect_memory_limit() {
+  local limit=""
+  if [ -r /sys/fs/cgroup/memory.max ]; then
+    limit="$(cat /sys/fs/cgroup/memory.max)"
+  elif [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+    limit="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+  fi
+  # "max", empty, or an absurd sentinel means no container limit. Host MemTotal is
+  # not a safe stand-in (every container on a shared host would size itself for the
+  # whole host), so assume a small fixed 512MB and say so.
+  if [ -z "$limit" ] || [ "$limit" = "max" ] || [ "$limit" -gt 4611686018427387904 ] 2>/dev/null; then
+    echo "docker-php-entrypoint: no container memory limit detected; assuming 512MB for FPM/opcache sizing. Set a memory limit (docker run -m, compose mem_limit) or PHP_FPM_MAX_CHILDREN for accurate autotuning." >&2
+    limit=$(( 512 * 1024 * 1024 ))
+  fi
+  echo "$limit"
+}
+
+MEM_BYTES="$(detect_memory_limit)"
+MEM_MB=$(( MEM_BYTES / 1024 / 1024 ))
+
+clamp() { local v=$1 lo=$2 hi=$3; [ "$v" -lt "$lo" ] && v=$lo; [ "$v" -gt "$hi" ] && v=$hi; echo "$v"; }
+
+# ---------------------------------------------------------------- opcache
+if [ -n "${PHP_OPCACHE_MEMORY:-}" ]; then
+  OPCACHE_MB="$(to_mb PHP_OPCACHE_MEMORY "$PHP_OPCACHE_MEMORY")"
+else
+  OPCACHE_MB="$(clamp $(( MEM_MB / 8 )) 64 512)"
+fi
+if [ "$CONF_WRITABLE" = 1 ]; then
+  {
+    echo "; generated by docker-php-entrypoint"
+    echo "opcache.enable=${PHP_OPCACHE_ENABLE:-1}"
+    echo "opcache.memory_consumption=${OPCACHE_MB}"
+    echo "opcache.validate_timestamps=${PHP_OPCACHE_VALIDATE_TIMESTAMPS:-1}"
+    echo "opcache.revalidate_freq=${PHP_OPCACHE_REVALIDATE_FREQ:-2}"
+    [ -n "${PHP_OPCACHE_PRELOAD:-}" ] && echo "opcache.preload=${PHP_OPCACHE_PRELOAD}"
+    # JIT does not exist before 8.0; the directives are unknown there
+    if [ "${PHP_MAJOR_MINOR%%.*}" -ge 8 ]; then
+      echo "opcache.jit=${PHP_OPCACHE_JIT:-tracing}"
+      echo "opcache.jit_buffer_size=${PHP_OPCACHE_JIT_BUFFER:-64M}"
+    fi
+  } > "${CONF_DIR}/90-opcache-env.ini"
+fi
+
+# PHP_DISABLE_FUNCTIONS adds to the baked disable_functions list; it never replaces
+# it. The baked half is read straight from the image's own baked ini with
+# `php -n -c`, bypassing conf.d: a live `ini_get` would also resolve a persistent
+# conf.d's 99-env.ini from the previous start, so the list could only ever grow,
+# and requesting ini_get itself would starve the probe and drop the real baked list.
+# ini_get is never on the baked list, on any flavor.
+#
+# FPM needs nothing more: php-fpm unions a pool's php_admin_value cumulatively on
+# top of the main-ini value, so www.conf's ${PHP_DISABLE_FUNCTIONS} on top of a
+# 99-env.ini that already carries baked + requested is idempotent. With an
+# unwritable conf.d, 10-php.ini's baked value is the only thing to union with (see
+# conf/www.conf).
+#
+# The caller checks for a fixed sentinel, never the probe itself (same convention
+# as disable_functions_still_live/_unresolved below): a probe that cannot complete
+# is a refusal to start, never a silent empty baked list.
+disable_functions_baked_probe() {
+  local baked_ini="${BAKED_INI_DEFAULT}/10-php.ini"
+  if [ ! -f "$baked_ini" ]; then
+    return 1
+  fi
+  php -n -c "$baked_ini" -r 'echo ini_get("disable_functions"), "__pdf_baked_ok__";' 2>/dev/null || true
+}
+
+disable_functions_effective() {
+  local line result=""
+  # disable_functions_split output has no trailing newline on its last token, so
+  # concatenating two outputs would glue the last baked token onto the first
+  # requested one ("pcntl_execget_current_user"). The explicit printf '\n'
+  # separates them; sed drops it and any empty line before the dedup.
+  while IFS= read -r line; do
+    result="${result:+${result},}${line}"
+  done < <({ disable_functions_split "$PDF_BAKED"; printf '\n'; disable_functions_split "$1"; } | sed '/^$/d' | awk '!seen[$0]++')
+  printf '%s' "$result"
+}
+
+if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
+  _pdf_baked_raw="$(disable_functions_baked_probe)"
+  case "$_pdf_baked_raw" in
+    *__pdf_baked_ok__)
+      PDF_BAKED="${_pdf_baked_raw%__pdf_baked_ok__}"
+      ;;
+    *)
+      echo "docker-php-entrypoint: refusing to start: could not read the baked disable_functions list from ${BAKED_INI_DEFAULT}/10-php.ini (the php -n -c probe did not complete) -- cannot safely compute PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS}'s union with it" >&2
+      exit 1
+      ;;
+  esac
+  # The baked value feeds the per-pool probe's `-d disable_functions=` below, so it
+  # needs the same charset guard as a pool's own value. It never trips on this
+  # image's baked lowercase names; it fails closed if that stops being true.
+  case "$PDF_BAKED" in
+    *[!a-z0-9_,\ ]*)
+      echo "docker-php-entrypoint: refusing to start: the baked disable_functions value in ${BAKED_INI_DEFAULT}/10-php.ini ('${PDF_BAKED}') contains a character this script cannot safely re-parse through \`-d\` (only lowercase letters, digits, underscore, comma and space are trusted here)" >&2
+      exit 1
+      ;;
+  esac
+  PDF_EFFECTIVE="$(disable_functions_effective "$PHP_DISABLE_FUNCTIONS")"
+fi
+
+# ------------------------------------------------------------------- core
+# An `if`, not `[ -n ... ] && echo`: under set -e, a short-circuited && as the
+# function's last statement returns 1 and kills the script on the first unset override.
+emit() { if [ -n "${2:-}" ]; then echo "$1=$2"; fi; }
+if [ "$CONF_WRITABLE" = 1 ]; then
+  {
+    echo "; generated by docker-php-entrypoint"
+    emit memory_limit          "${PHP_MEMORY_LIMIT:-}"
+    emit max_execution_time    "${PHP_MAX_EXECUTION_TIME:-}"
+    emit max_input_time        "${PHP_MAX_INPUT_TIME:-}"
+    emit max_input_vars        "${PHP_MAX_INPUT_VARS:-}"
+    emit upload_max_filesize   "${PHP_UPLOAD_MAX_FILESIZE:-}"
+    emit post_max_size         "${PHP_POST_MAX_SIZE:-}"
+    emit date.timezone         "${PHP_TIMEZONE:-}"
+    emit error_reporting       "${PHP_ERROR_REPORTING:-}"
+    emit display_errors        "${PHP_DISPLAY_ERRORS:-}"
+    emit disable_functions     "${PDF_EFFECTIVE:-}"
+  } > "${CONF_DIR}/99-env.ini"
+fi
+
+# disable_functions is verified after the extensions section below, once
+# PHP_EXT_ENABLE and PHP_SNUFFLEUPAGUS have run.
+
+# ------------------------------------------------------------- extensions
+# A function so `set --` only touches this frame's positional parameters; the
+# script's "$@" must survive for the final `exec "$@"`. `set -f` keeps the unquoted
+# split from globbing (PHP_EXT_ENABLE=*). An empty result (",,," or whitespace) is a
+# typo, not a no-op, and fails loudly.
+enable_extensions() {
+  local raw="$1"
+  set -f
+  # shellcheck disable=SC2046
+  set -- $(echo "$raw" | tr ',' ' ')
+  set +f
+  if [ "$#" -eq 0 ]; then
+    echo "docker-php-entrypoint: PHP_EXT_ENABLE=\"$raw\" contains no extension names after splitting on commas" >&2
+    exit 1
+  fi
+  # stderr: the container's stdout belongs to the command it runs, and an
+  # "enabled <name>" line there corrupts `php script.php > out.json`.
+  php-ext-enable "$@" >&2
+}
+
+if [ -n "${PHP_EXT_ENABLE:-}" ]; then
+  if [ "$CONF_WRITABLE" != 1 ]; then
+    echo "docker-php-entrypoint: PHP_EXT_ENABLE=${PHP_EXT_ENABLE} requested but no writable ini directory is available" >&2
+    exit 1
+  fi
+  enable_extensions "$PHP_EXT_ENABLE"
+fi
+
+# conf/snuffleupagus/ is copied into every image, so the [ ! -d "$sp_dir" ] guard
+# below is purely defensive. On PHP < 7.2, where snuffleupagus.so is not built, the
+# failure comes from php-ext-enable's generic "no such extension" instead.
+#
+# CONF_WRITABLE is checked up front, as for PHP_EXT_ENABLE above, so an unwritable
+# conf dir gets the branded diagnostic instead of a raw redirection error.
+if [ -n "${PHP_SNUFFLEUPAGUS:-}" ]; then
+  if [ "$CONF_WRITABLE" != 1 ]; then
+    echo "docker-php-entrypoint: PHP_SNUFFLEUPAGUS=${PHP_SNUFFLEUPAGUS} requested but no writable ini directory is available" >&2
+    exit 1
+  fi
+  sp_dir=/usr/local/etc/php/snuffleupagus
+  if [ ! -d "$sp_dir" ]; then
+    echo "PHP_SNUFFLEUPAGUS=${PHP_SNUFFLEUPAGUS} requested but this image has no snuffleupagus support" >&2
+    exit 1
+  fi
+  ruleset="${sp_dir}/${PHP_SNUFFLEUPAGUS}.rules"
+  [ -f "$ruleset" ] || { echo "no such snuffleupagus ruleset: ${PHP_SNUFFLEUPAGUS}" >&2; exit 1; }
+  php-ext-enable snuffleupagus >&2
+  {
+    echo "sp.configuration_file=${ruleset}"
+  } >> "${CONF_DIR}/20-snuffleupagus.ini"
+fi
+
+# ------------------------------------------------- disable_functions in force
+# Runs unconditionally, after PHP_INI_SCAN_DIR is exported, every ini is written and
+# PHP_EXT_ENABLE/PHP_SNUFFLEUPAGUS have run (an extension enabled above can supply a
+# function the operator asked to disable). A `php`/`php-fpm` subprocess launched from
+# here resolves exactly as the command about to be exec'd will; it cannot see
+# `-n`/`-c`/`-d` flags on that command line.
+#
+# Whether a name is still callable is answered by PHP itself (function_exists() on
+# the already-validated lowercase names), not by reimplementing PHP's split-and-match
+# rules. Two questions are asked separately:
+#   1. Does the name resolve to a real function at all?
+#      disable_functions_unresolved() runs function_exists() with disable_functions
+#      cleared (a later -d wins). A name that still does not resolve (a typo, a
+#      language construct like eval/echo, or a function this SAPI does not register,
+#      see pdf_allowlist) is refused outright; otherwise it would be certified
+#      "uncallable", and a function loaded later (a pool extension, dl()) would pass
+#      as safely gone.
+#   2. Is it actually gone? disable_functions_still_live() runs function_exists()
+#      against the real, resolved environment.
+# Both probes end in a fixed sentinel that the caller requires: a probe that crashes
+# partway (for example by calling a disabled function) prints an incomplete result,
+# treated as "everything in this batch is still live/unresolved", never as "nothing
+# found".
+# These names are registered only by the fpm-fcgi SAPI (fastcgi_finish_request,
+# fpm_get_status) or by fpm-fcgi and cli-server (apache_request_headers,
+# apache_response_headers, getallheaders), never by the plain `php` CLI binary every
+# probe here runs as, so they would never resolve there. They are checked against the
+# resolved disable_functions value instead. fpm_get_status exists from PHP 7.3, so on
+# 7.0-7.2 a request for it passes that check although there is nothing to call; that
+# exposes nothing. The list is short and named, not derived: any other name is
+# verified for real.
+pdf_allowlist=(fastcgi_finish_request fpm_get_status apache_request_headers apache_response_headers getallheaders)
+pdf_is_allowlisted() {
+  local f="$1" a
+  for a in "${pdf_allowlist[@]}"; do
+    [ "$f" = "$a" ] && return 0
+  done
+  return 1
+}
+
+if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
+  requested_functions="$(disable_functions_split "$PHP_DISABLE_FUNCTIONS")"
+  if [ -z "$requested_functions" ]; then
+    echo "docker-php-entrypoint: PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS} contains no function names after splitting on space/comma" >&2
+    exit 1
+  fi
+  mapfile -t pdf_requested_arr <<<"$requested_functions"
+
+  # Comma-and-space joins the newline list $1 for a diagnostic.
+  disable_functions_join() {
+    tr '\n' ',' <<<"$1" | sed 's/,$//; s/,/, /g'
+  }
+
+  # The probes read names from the global pdf_probe_names array and take $@ as extra
+  # php flags (none, or `-d disable_functions=<pool's own value>` to check one fpm
+  # pool in isolation). Each prints its matches one per line, honoring the sentinel
+  # contract above.
+  disable_functions_still_live() {
+    local out
+    out="$(php "$@" -r '
+      foreach ($argv as $i => $f) {
+        if ($i === 0) { continue; }
+        if (function_exists($f)) { echo $f, "\n"; }
+      }
+      echo "__pdf_probe_ok__";
+    ' -- "${pdf_probe_names[@]}" 2>/dev/null)" || true
+    case "$out" in
+      __pdf_probe_ok__) return 0 ;;
+      *$'\n'__pdf_probe_ok__) printf '%s\n' "${out%$'\n'__pdf_probe_ok__}" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  disable_functions_unresolved() {
+    local out f names=()
+    for f in "${pdf_probe_names[@]}"; do
+      pdf_is_allowlisted "$f" || names+=("$f")
+    done
+    [ "${#names[@]}" -eq 0 ] && return 0
+    out="$(php -d disable_functions= -r '
+      foreach ($argv as $i => $f) {
+        if ($i === 0) { continue; }
+        if (!function_exists($f)) { echo $f, "\n"; }
+      }
+      echo "__pdf_probe_ok__";
+    ' -- "${names[@]}" 2>/dev/null)" || true
+    case "$out" in
+      __pdf_probe_ok__) return 0 ;;
+      *$'\n'__pdf_probe_ok__) printf '%s\n' "${out%$'\n'__pdf_probe_ok__}" ;;
+      *) return 1 ;;
+    esac
+  }
+
+  # Prints, one per line, every name in pdf_probe_names not actually disabled for a
+  # context whose resolved disable_functions value is $1. That value is ground truth
+  # only for pdf_allowlist names, which the function_exists probe cannot see. The
+  # remaining arguments are extra php flags for the probe over every other name.
+  disable_functions_missing_for() {
+    local resolved="$1"; shift
+    local -a all=("${pdf_probe_names[@]}") plain=() pdf_missing=() resolved_tokens=() f
+    mapfile -t resolved_tokens < <(disable_functions_split "$resolved")
+    for f in "${all[@]}"; do
+      if pdf_is_allowlisted "$f"; then
+        printf '%s\n' "${resolved_tokens[@]}" | grep -qxF "$f" || pdf_missing+=("$f")
+      else
+        plain+=("$f")
+      fi
+    done
+    if [ "${#plain[@]}" -gt 0 ]; then
+      pdf_probe_names=("${plain[@]}")
+      local live
+      if ! live="$(disable_functions_still_live "$@")"; then
+        live="$(printf '%s\n' "${plain[@]}")"
+      fi
+      [ -n "$live" ] && pdf_missing+=("$live")
+      pdf_probe_names=("${all[@]}")
+    fi
+    [ "${#pdf_missing[@]}" -gt 0 ] && printf '%s\n' "${pdf_missing[@]}"
+    return 0
+  }
+
+  # Refused once, up front, for every flavor: a name that cannot resolve to a real
+  # function is the same defect for a pool or a plain php command.
+  pdf_probe_names=("${pdf_requested_arr[@]}")
+  if ! pdf_unresolved="$(disable_functions_unresolved)"; then
+    pdf_unresolved=""
+    for _pdf_f in "${pdf_requested_arr[@]}"; do
+      pdf_is_allowlisted "$_pdf_f" || pdf_unresolved="${pdf_unresolved}${_pdf_f}
+"
+    done
+  fi
+  if [ -n "$pdf_unresolved" ]; then
+    echo "docker-php-entrypoint: refusing PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS}: $(disable_functions_join "$pdf_unresolved") cannot resolve to a real function under the current ini/extension resolution (disable_functions cleared, still not found) -- a typo, a language construct such as eval/echo/isset, or a name only ever registered by a different SAPI than the one about to run. PHP_DISABLE_FUNCTIONS can only certify a real, resolvable function name." >&2
+    exit 1
+  fi
+
+  if [ "${1:-}" = php-fpm ]; then
+    # Resolve what php-fpm will load for the pool(s) about to run, with the same
+    # arguments the exec'd command gets; a mounted custom pool config may not carry
+    # the stock www.conf's php_admin_value lock.
+    fpm_tt_out="$(php-fpm -tt "${@:2}" 2>&1)" || {
+      echo "docker-php-entrypoint: refusing to start: php-fpm -tt failed while verifying PHP_DISABLE_FUNCTIONS is in force:" >&2
+      echo "$fpm_tt_out" >&2
+      exit 1
+    }
+
+    # php-fpm's zlog (sapi/fpm/fpm/zlog.c) formats each NOTICE line into a fixed
+    # 1024-byte buffer and ends a too-long line with "...", on every PHP version the
+    # image ships (about 1900 characters of disable_functions). A truncated dump
+    # cannot verify the pool, so refuse with the real cause named. No accepted token
+    # ([a-z0-9_]+) can contain "...", so this never misfires on a real value.
+    pdf_truncated_line="$(grep -m1 -- '\.\.\.$' <<<"$fpm_tt_out" || true)"
+    if [ -n "$pdf_truncated_line" ]; then
+      echo "docker-php-entrypoint: refusing to start: php-fpm -tt's own output has at least one line that looks truncated (ends in '...'): ${pdf_truncated_line}. php-fpm's zlog formats each NOTICE line into a fixed 1024-byte buffer on every PHP version this image ships (sapi/fpm/fpm/zlog.c), so a truncated pool-name or disable_functions line here cannot be trusted to verify PHP_DISABLE_FUNCTIONS is actually in force. Shorten the value, or verify this configuration a different way." >&2
+      exit 1
+    fi
+
+    # A pool header is a line that is, in full, the "[<timestamp>] NOTICE: " prefix
+    # followed only by "[<name>]". Anchoring the whole line matters because pool names
+    # are arbitrary (`[app@site]`, even "NOTICE: [global]"): a looser match could
+    # mistake a pool for the global header and merge its config, including its
+    # disable_functions coverage, into the previous pool. The extracted name is
+    # compared to the literal "global", never pattern-matched a second time.
+    # PHP 7.x's php-fpm -tt writes its dump twice (stderr and error_log, which points
+    # at /proc/self/fd/2), each line right after its twin. Without uniq every pool
+    # header appears twice and the first copy's block would read as a pool missing
+    # all disable_functions.
+    fpm_tt_out="$(uniq <<<"$fpm_tt_out")"
+    # PHP 7.0 names the global section [General] where 7.1+ say [global]. A
+    # pool may legally be called General, so it only counts as the global
+    # section when it is the dump's first header, where fpm always puts it.
+    pdf_first_header="$(grep -nE -m1 '^\[[^]]*\] NOTICE: \[.*\]$' <<<"$fpm_tt_out" | cut -d: -f1 || true)"
+    pool_starts=()
+    pool_names=()
+    while IFS=: read -r lineno rest; do
+      pdf_pool_name="$(printf '%s' "$rest" | sed -E 's/^\[[^]]*\] NOTICE: \[(.*)\]$/\1/')"
+      if [ "$pdf_pool_name" = global ] || { [ "$pdf_pool_name" = General ] && [ "$lineno" = "$pdf_first_header" ]; }; then
+        continue
+      fi
+      pool_starts+=("$lineno")
+      pool_names+=("$pdf_pool_name")
+    done < <(grep -nE '^\[[^]]*\] NOTICE: \[.*\]$' <<<"$fpm_tt_out")
+
+    if [ "${#pool_starts[@]}" -eq 0 ]; then
+      echo "docker-php-entrypoint: refusing to start: could not identify any FPM pool in php-fpm -tt output while verifying PHP_DISABLE_FUNCTIONS is in force" >&2
+      exit 1
+    fi
+
+    fpm_tt_lines="$(wc -l <<<"$fpm_tt_out")"
+    pool_count="${#pool_starts[@]}"
+    refusal=""
+    for ((pool_i = 0; pool_i < pool_count; pool_i++)); do
+      block_start=$(( pool_starts[pool_i] + 1 ))
+      if [ "$((pool_i + 1))" -lt "$pool_count" ]; then
+        block_end=$(( pool_starts[pool_i + 1] - 1 ))
+      else
+        block_end="$fpm_tt_lines"
+      fi
+      pool_block="$(sed -n "${block_start},${block_end}p" <<<"$fpm_tt_out")"
+
+      # A pool that loads its own extension (php_admin_value[extension] or
+      # php_value[extension]) can supply a function after every probe here has run,
+      # and there is no live worker to ask. Refuse; the extension belongs in
+      # PHP_EXT_ENABLE, which loads it once for every pool before verification.
+      if printf '%s\n' "$pool_block" | grep -qE '^\[[^]]*\] NOTICE: [[:space:]]*php_(admin_)?value\[extension\]'; then
+        refusal="${refusal:+${refusal}; }pool [${pool_names[pool_i]}] loads its own extension, which PHP_DISABLE_FUNCTIONS cannot be verified against here (use PHP_EXT_ENABLE at the image level instead)"
+        continue
+      fi
+
+      # Anchored like the header match: a directive whose value merely contains
+      # "NOTICE: php_admin_value[disable_functions] = ..." (for example in error_log)
+      # must not be read as the real directive.
+      # `|| true`: with pipefail, grep finding no directive fails the pipeline, and a
+      # pool without one (it falls through to the baseline) must not kill the script.
+      pdf_pool_value_line="$(printf '%s\n' "$pool_block" | grep -E '^\[[^]]*\] NOTICE: [[:space:]]*php_(admin_)?value\[disable_functions\][[:space:]]*=' | tail -1 || true)"
+      if [ -n "$pdf_pool_value_line" ]; then
+        pool_value="$(printf '%s' "$pdf_pool_value_line" | sed -E 's/^\[[^]]*\] NOTICE: [[:space:]]*php_(admin_)?value\[disable_functions\][[:space:]]*=[[:space:]]?//')"
+        # The probe re-parses $pool_value with the CLI's `-d` ini parser, which
+        # tokenizes differently from php-fpm's php_admin_value: `-d
+        # disable_functions=proc_open;legacy` disables only proc_open (";legacy" is a
+        # comment to the CLI) while FPM sees one token "proc_open;legacy" and disables
+        # nothing. A value outside PHP_DISABLE_FUNCTIONS' charset cannot be certified
+        # either way, so it is refused.
+        case "$pool_value" in
+          *[!a-z0-9_,\ ]*)
+            refusal="${refusal:+${refusal}; }pool [${pool_names[pool_i]}] sets disable_functions to a value this script cannot safely re-parse the way php-fpm itself does (only lowercase letters, digits, underscore, comma and space are trusted here) -- refusing rather than certifying a state it cannot verify"
+            continue
+            ;;
+        esac
+        pool_effective="$(disable_functions_effective "$pool_value")"
+        pdf_probe_names=("${pdf_requested_arr[@]}")
+        pool_missing="$(disable_functions_missing_for "$pool_effective" -d "disable_functions=${pool_effective}")"
+      else
+        pdf_probe_names=("${pdf_requested_arr[@]}")
+        pool_missing="$(disable_functions_missing_for "$(disable_functions_effective '')")"
+      fi
+      if [ -n "$pool_missing" ]; then
+        refusal="${refusal:+${refusal}; }pool [${pool_names[pool_i]}] missing: $(disable_functions_join "$pool_missing")"
+      fi
+    done
+
+    if [ -n "$refusal" ]; then
+      echo "docker-php-entrypoint: refusing to start: PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS} is not fully in force for every fpm pool that is about to run (${refusal})" >&2
+      exit 1
+    fi
+  else
+    # Everything else (php, a wrapped shell, composer's shebang, `php -S`, ...): run
+    # php under the exact environment the real command inherits and ask it via
+    # function_exists(). An operator-emptied PHP_INI_SCAN_DIR needs no special case:
+    # nothing baked is scanned (the image has no main php.ini), so every requested
+    # name is correctly reported callable.
+    pdf_probe_names=("${pdf_requested_arr[@]}")
+    missing="$(disable_functions_missing_for "$(disable_functions_effective '')")"
+    if [ -n "$missing" ]; then
+      scan_dir_note=""
+      if [ "${PHP_INI_SCAN_DIR+set}" = set ] && [ -z "$PHP_INI_SCAN_DIR" ]; then
+        scan_dir_note=" PHP_INI_SCAN_DIR is also set to the empty string, which disables ini scanning entirely (including this image's own baked hardening ini) -- unset it, or leave PHP_DISABLE_FUNCTIONS unset too."
+      fi
+      echo "docker-php-entrypoint: refusing to start: PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS} requests functions that will not actually be disabled for the command about to run (missing: $(disable_functions_join "$missing")).${scan_dir_note}" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# The chmod-sanitize shim (shim/chmod-sanitize.c, compiled to
+# /usr/local/lib/php-chmod-sanitize.so) is checked with -f: glibc treats a missing
+# LD_PRELOAD entry as a non-fatal warning, so the container would otherwise start
+# and silently run without the requested behavior.
+#
+# Boolean spellings are accepted explicitly (`true` is the ordinary Docker spelling)
+# and anything else is refused: a bare `= "1"` test would treat `true`/`yes`/`on` as
+# off and silently run PrestaShop without its chmod workaround.
+case "${PHP_CHMOD_SHIM:-0}" in
+  1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn])
+    _chmod_shim_on=1
+    ;;
+  0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Oo][Ff][Ff])
+    _chmod_shim_on=0
+    ;;
+  *)
+    echo "docker-php-entrypoint: invalid PHP_CHMOD_SHIM=${PHP_CHMOD_SHIM} (expected one of: 1, 0, true, false, yes, no, on, off)" >&2
+    exit 1
+    ;;
+esac
+if [ "$_chmod_shim_on" = 1 ]; then
+  shim=/usr/local/lib/php-chmod-sanitize.so
+  [ -f "$shim" ] || { echo "PHP_CHMOD_SHIM=${PHP_CHMOD_SHIM:-0} requested but ${shim} is not present in this image" >&2; exit 1; }
+  export LD_PRELOAD="${shim}${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+
+# -------------------------------------------------------------------- fpm
+# No files are written for FPM pool config in any deployment mode. www.conf
+# references every tunable pool directive as ${PHP_FPM_*}, and php-fpm resolves them
+# from its own environment at startup, before forking workers (a newline in a value
+# cannot inject a second directive: config lines are split before ${VAR}
+# resolution). This script only computes the autotuned values and `export`s them
+# before `exec`, so a wrapper around php-fpm inherits them regardless of argv, and
+# there is no file or directory for another UID to plant, race or leave stale.
+#
+# The Dockerfile bakes a static ENV default for every one of these, so a container
+# that bypasses this entrypoint (`--entrypoint php-fpm`) still parses: an unresolved
+# ${VAR} is a hard startup failure for pm.max_children and listen.
+#
+# The four derived directives are read by www.conf as ${PHP_FPM_*_EFFECTIVE}, and
+# only those names carry a baked default. Docker merges image ENV and `-e` into one
+# flat environment, so "operator overrode it" cannot be inferred from a value equal
+# to the default (`-e PHP_FPM_MAX_CHILDREN=16` would read as untouched and be
+# replaced by an autotuned value, over-committing memory). With the names split, the
+# operator's own variables are unset unless somebody set them, so ${VAR+set} answers
+# exactly.
+#
+# The passthrough directives (pm, listen, max_requests, status_path, access.log,
+# slowlog timeout) keep their plain names in www.conf: nothing derives them, so
+# Docker's ENV/-e layering is the whole implementation, and `-e PHP_FPM_LISTEN=...`
+# keeps working when the entrypoint is bypassed. The four autotuned values do not:
+# they resolve to the baked 16/4/4/8 and PHP_FPM_MAX_CHILDREN is read by nothing.
+#
+# PHP_FPM_MAX_CHILDREN_EFFECTIVE exists only for the fpm flavor (cli and cli-builder
+# have no php-fpm or www.conf), so the guard keys on it: if the ENV bake were
+# dropped, this section would stop exporting and php-fpm would fail loudly on an
+# unresolved ${VAR} instead of running on its own internal defaults.
+if [ -n "${PHP_FPM_MAX_CHILDREN_EFFECTIVE+set}" ]; then
+  if [ -n "${PHP_FPM_WORKER_MEMORY+set}" ]; then
+    worker_mb="$(to_mb PHP_FPM_WORKER_MEMORY "$PHP_FPM_WORKER_MEMORY")"
+  else
+    worker_mb=64
+  fi
+
+  reserve=$(( OPCACHE_MB + 64 ))
+  # 0.8 headroom: the raw budget (limit - reserve) commits every remaining MB to
+  # workers, leaving nothing for the FPM master, this script, or a worker that
+  # exceeds the worker_mb assumption (memory_limit alone permits up to 4x). It is
+  # applied before the worker_mb floor so the floor still means one full worker.
+  usable=$(( (MEM_MB - reserve) * 8 / 10 ))
+  [ "$usable" -lt "$worker_mb" ] && usable=$worker_mb
+
+  # "pinned" = the operator set this one explicitly, so nothing below may
+  # move it. max_children needs no such flag: it is the ceiling the other
+  # three are clamped to, never the value that yields.
+  start_pinned=0; min_spare_pinned=0; max_spare_pinned=0
+
+  if [ -n "${PHP_FPM_MAX_CHILDREN+set}" ]; then
+    max_children="$(to_int PHP_FPM_MAX_CHILDREN "$PHP_FPM_MAX_CHILDREN")"
+  else
+    max_children=$(( usable / worker_mb ))
+    [ "$max_children" -lt 4 ] && max_children=4
+  fi
+
+  # The floors below (2, 4) sanitize the *derived* defaults; they must not
+  # override a value the operator explicitly typed, or a deliberately small
+  # pool becomes impossible to configure. The ceiling clamps at the bottom are
+  # different: php-fpm itself refuses to start if any of these exceed
+  # max_children, whichever source they came from, so silently capping is
+  # safer than shipping a config php-fpm will reject outright.
+  if [ -n "${PHP_FPM_START_SERVERS+set}" ]; then
+    start="$(to_int PHP_FPM_START_SERVERS "$PHP_FPM_START_SERVERS")"
+    start_pinned=1
+  else
+    start=$(( max_children / 4 ))
+    [ "$start" -lt 2 ] && start=2
+  fi
+
+  if [ -n "${PHP_FPM_MIN_SPARE+set}" ]; then
+    min_spare="$(to_int PHP_FPM_MIN_SPARE "$PHP_FPM_MIN_SPARE")"
+    min_spare_pinned=1
+  else
+    min_spare=$start
+  fi
+
+  if [ -n "${PHP_FPM_MAX_SPARE+set}" ]; then
+    max_spare="$(to_int PHP_FPM_MAX_SPARE "$PHP_FPM_MAX_SPARE")"
+    max_spare_pinned=1
+  else
+    max_spare=$(( max_children / 2 ))
+    [ "$max_spare" -lt 4 ] && max_spare=4
+  fi
+
+  [ "$start" -gt "$max_children" ] && start=$max_children
+  [ "$min_spare" -gt "$max_children" ] && min_spare=$max_children
+  [ "$max_spare" -gt "$max_children" ] && max_spare=$max_children
+
+  # php-fpm also refuses to start unless min_spare <= max_spare and
+  # min_spare <= start_servers <= max_spare. Pinning one value on a container whose
+  # others autotune (`-e PHP_FPM_MAX_SPARE=8` on 4GB: max_children 44, min_spare 11)
+  # makes the derived neighbors contradict it, so the derived values yield to the
+  # pinned one. Two contradicting pinned values are left as typed: neither is ours
+  # to overrule, and php-fpm's own error names the pair.
+  if [ "$max_spare_pinned" = 0 ] && [ "$max_spare" -lt "$min_spare" ]; then
+    max_spare=$min_spare
+  fi
+  if [ "$min_spare_pinned" = 0 ] && [ "$min_spare" -gt "$max_spare" ]; then
+    min_spare=$max_spare
+  fi
+  if [ "$start_pinned" = 0 ]; then
+    if [ "$start" -lt "$min_spare" ]; then
+      start=$min_spare
+    fi
+    if [ "$start" -gt "$max_spare" ]; then
+      start=$max_spare
+    fi
+  fi
+
+  export PHP_FPM_MAX_CHILDREN_EFFECTIVE="$max_children"
+  export PHP_FPM_START_SERVERS_EFFECTIVE="$start"
+  export PHP_FPM_MIN_SPARE_EFFECTIVE="$min_spare"
+  export PHP_FPM_MAX_SPARE_EFFECTIVE="$max_spare"
+fi
+
+exec "$@"

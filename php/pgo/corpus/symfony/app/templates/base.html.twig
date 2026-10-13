@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{% block title %}PGO corpus{% endblock %}</title>
+</head>
+<body>
+<header><h1><a href="{{ path('index') }}">PGO training corpus</a></h1></header>
+<main>{% block body %}{% endblock %}</main>
+<footer>rendered {{ "now"|date("Y-m-d") }}</footer>
+</body>
+</html>

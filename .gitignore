@@ -1,0 +1,12 @@
+.DS_Store
+*.profraw
+*.profdata
+__pycache__/
+
+# Local maintainer notes, not published.
+/CLAUDE.md
+/AGENTS.md
+/docs/
+
+# Opt-in local benchmark log (tests/bench.sh --record).
+/tests/bench/results.tsv

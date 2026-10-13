@@ -1,0 +1,31 @@
+# See corpus/laravel/endpoints for the format. Drupal's docroot is web/, and its
+# database is the sqlite file `drush site:install` was pointed at, so the app
+# needs no server beside php (Debian's libsqlite 3.46.1 clears the 3.45 Drupal
+# 11 asks for). Only the 8.4 and 8.5 tiers carry Drupal -- see corpus/tiers.
+#
+# Node ids are what corpus/drupal/seed.php creates: articles 1-20 (each tagged,
+# each with three anonymous comments), basic pages 21-22. Tags are terms 1-5.
+#
+# The expected substrings are the seeded content, not site chrome: every Drupal
+# page carries the site name in its <title> and a "Log in" link in the header, so
+# an access-denied or error page would satisfy those too.
+#
+# The byte floors sit at about half of what each page weighs on 11.4.8 (34 KB front
+# page, 15-30 KB the rest), well above any error page (13 KB) once the expected
+# substring is also required.
+docroot web
+version composer drupal/core
+database web/sites/default/files/.ht.sqlite SELECT COUNT(*) FROM node_field_data
+# The front page view: ten promoted article teasers, newest first.
+path / required 16384 Corpus article 20
+# A full article: body, tags and its comment thread.
+path /node/1 required 8192 commenter0
+# A basic page, which has no comments or tags.
+path /node/21 required 8192 Corpus handbook
+# The taxonomy term view: a Views listing filtered by tag.
+path /taxonomy/term/1 required 8192 corpus-tag-1
+# Node search over the index `drush cron` built at corpus build time. The query
+# string is URL-safe as written, since curl runs without -g in verify.sh and
+# train.sh.
+path /search/node?keys=corpus required 8192 Corpus article 1
+path /user/login required 8192 user-login-form

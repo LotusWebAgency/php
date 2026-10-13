@@ -1,0 +1,49 @@
+{
+    "name": "dementev/pgo-corpus-drupal",
+    "description": "Drupal workload for the lotuswebagency/php PGO training corpus.",
+    "type": "project",
+    "license": "GPL-2.0-or-later",
+    "require": {
+        "php": "^8.4",
+        "composer/installers": "^2.3",
+        "drupal/core-composer-scaffold": "11.4.8",
+        "drupal/core-recommended": "11.4.8",
+        "drush/drush": "^13"
+    },
+    "conflict": {
+        "drupal/drupal": "*"
+    },
+    "config": {
+        "allow-plugins": {
+            "composer/installers": true,
+            "drupal/core-composer-scaffold": true,
+            "php-http/discovery": true,
+            "symfony/runtime": true
+        },
+        "optimize-autoloader": true,
+        "platform": {
+            "php": "8.4.26"
+        },
+        "preferred-install": {
+            "*": "dist"
+        },
+        "sort-packages": true
+    },
+    "extra": {
+        "drupal-scaffold": {
+            "locations": {
+                "web-root": "web/"
+            }
+        },
+        "installer-paths": {
+            "web/core": ["type:drupal-core"],
+            "web/libraries/{$name}": ["type:drupal-library"],
+            "web/modules/contrib/{$name}": ["type:drupal-module"],
+            "web/profiles/contrib/{$name}": ["type:drupal-profile"],
+            "web/themes/contrib/{$name}": ["type:drupal-theme"],
+            "drush/Commands/contrib/{$name}": ["type:drupal-drush"]
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

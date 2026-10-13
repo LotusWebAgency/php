@@ -1,0 +1,746 @@
+{
+  "extensions": [
+    {
+      "name": "bcmath",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-bcmath",
+      "libs": [],
+      "why": "PrestaShop price arithmetic; Laravel money handling"
+    },
+    {
+      "name": "calendar",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-calendar",
+      "libs": [],
+      "why": "PrestaShop legacy invoicing date/calendar conversions"
+    },
+    {
+      "name": "ctype",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "Laravel framework requirement; on by default"
+    },
+    {
+      "name": "curl",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-curl",
+      "libs": ["libcurl4-openssl-dev"],
+      "why": "Guzzle/Laravel HTTP client, WordPress HTTP API, Composer downloads"
+    },
+    {
+      "name": "dom",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": ["libxml2-dev"],
+      "why": "WordPress KSES sanitization, PrestaShop XML templating; on by default"
+    },
+    {
+      "name": "exif",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-exif",
+      "libs": [],
+      "why": "WordPress media library image orientation/metadata handling"
+    },
+    {
+      "name": "fileinfo",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "Laravel/Symfony upload MIME-type validation; on by default"
+    },
+    {
+      "name": "filter",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "Laravel/WordPress request input validation and sanitization; on by default"
+    },
+    {
+      "name": "ftp",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-ftp",
+      "libs": [],
+      "why": "WordPress core filesystem API for plugin/upgrade FTP installs"
+    },
+    {
+      "name": "gd",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-gd --with-jpeg --with-webp --with-freetype",
+      "libs": ["libjpeg-dev", "libpng-dev", "libwebp-dev", "libfreetype-dev"],
+      "why": "WordPress/PrestaShop thumbnail generation and image resizing",
+      "overrides": {
+        "7.0": {"configure": "--with-gd --with-jpeg-dir=/usr --with-png-dir=/usr --with-freetype-dir=/usr --with-webp-dir=/usr"},
+        "7.1": {"configure": "--with-gd --with-jpeg-dir=/usr --with-png-dir=/usr --with-freetype-dir=/usr --with-webp-dir=/usr"},
+        "7.2": {"configure": "--with-gd --with-jpeg-dir=/usr --with-png-dir=/usr --with-freetype-dir=/usr --with-webp-dir=/usr"},
+        "7.3": {"configure": "--with-gd --with-jpeg-dir=/usr --with-png-dir=/usr --with-freetype-dir=/usr --with-webp-dir=/usr"}
+      }
+    },
+    {
+      "name": "gettext",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-gettext",
+      "libs": [],
+      "why": "PrestaShop/WordPress multi-language storefront translation catalogs"
+    },
+    {
+      "name": "gmp",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-gmp",
+      "libs": ["libgmp-dev"],
+      "why": "Laravel/PrestaShop payment-gateway big-integer cryptography"
+    },
+    {
+      "name": "hash",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "Laravel password/signature hashing; on by default"
+    },
+    {
+      "name": "iconv",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-iconv",
+      "libs": [],
+      "why": "WordPress/PrestaShop legacy character-set conversion on CSV/XML import"
+    },
+    {
+      "name": "intl",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-intl",
+      "libs": ["libicu-dev"],
+      "why": "Laravel localization, WordPress date/number formatting, PrestaShop multi-locale storefronts",
+      "overrides": {
+        "7.0": {"configure": "--enable-intl --with-icu-dir"}
+      }
+    },
+    {
+      "name": "json",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "Laravel/WordPress REST API payloads; on by default"
+    },
+    {
+      "name": "mbstring",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-mbstring",
+      "libs": ["libonig-dev"],
+      "why": "WordPress/Laravel/PrestaShop multibyte/UTF-8 string handling"
+    },
+    {
+      "name": "mysqli",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-mysqli=mysqlnd",
+      "libs": [],
+      "why": "WordPress core database layer"
+    },
+    {
+      "name": "mysqlnd",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "Shared MySQL driver backing mysqli and pdo_mysql; enabled in the fixed preamble"
+    },
+    {
+      "name": "opcache",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-opcache",
+      "libs": [],
+      "why": "Laravel/WordPress/PrestaShop production request-latency baseline",
+      "overrides": {
+        "8.5": {"configure": null}
+      }
+    },
+    {
+      "name": "openssl",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-openssl",
+      "libs": ["libssl-dev"],
+      "why": "Laravel encryption, WordPress HTTPS API calls, PrestaShop payment TLS"
+    },
+    {
+      "name": "pcntl",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-pcntl",
+      "libs": [],
+      "why": "Laravel Octane/queue worker signal handling"
+    },
+    {
+      "name": "pdo",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "Laravel Eloquent database abstraction; on by default"
+    },
+    {
+      "name": "pdo_mysql",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-pdo-mysql=mysqlnd",
+      "libs": [],
+      "why": "Laravel/WordPress/PrestaShop MySQL persistence layer"
+    },
+    {
+      "name": "pdo_pgsql",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-pdo-pgsql",
+      "libs": ["libpq-dev"],
+      "why": "Laravel Postgres-backed applications"
+    },
+    {
+      "name": "pdo_sqlite",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-pdo-sqlite",
+      "libs": ["libsqlite3-dev"],
+      "why": "Laravel local/testing SQLite database driver",
+      "overrides": {
+        "7.0": {"configure": "--with-pdo-sqlite=/usr"},
+        "7.1": {"configure": "--with-pdo-sqlite=/usr"},
+        "7.2": {"configure": "--with-pdo-sqlite=/usr"},
+        "7.3": {"configure": "--with-pdo-sqlite=/usr"}
+      }
+    },
+    {
+      "name": "pgsql",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-pgsql",
+      "libs": ["libpq-dev"],
+      "why": "Laravel raw Postgres connections outside PDO"
+    },
+    {
+      "name": "phar",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "Composer's own phar bootstrap; on by default"
+    },
+    {
+      "name": "posix",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "Laravel Artisan/Octane process management; on by default on non-Windows"
+    },
+    {
+      "name": "readline",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-readline",
+      "libs": ["libreadline-dev"],
+      "why": "Laravel Tinker and php -a interactive REPL history"
+    },
+    {
+      "name": "session",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "WordPress/PrestaShop native PHP session handling; on by default"
+    },
+    {
+      "name": "shmop",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-shmop",
+      "libs": [],
+      "why": "PrestaShop legacy shared-memory cache modules"
+    },
+    {
+      "name": "simplexml",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": ["libxml2-dev"],
+      "why": "WordPress feed/XML-RPC parsing; on by default"
+    },
+    {
+      "name": "soap",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-soap",
+      "libs": ["libxml2-dev"],
+      "why": "PrestaShop webservice API and legacy B2B SOAP integrations"
+    },
+    {
+      "name": "sockets",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-sockets",
+      "libs": [],
+      "why": "Laravel Octane Swoole/RoadRunner transport, WordPress cron over raw sockets"
+    },
+    {
+      "name": "sodium",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.2",
+      "configure": "--with-sodium",
+      "libs": ["libsodium-dev"],
+      "why": "WordPress signature verification since 5.2"
+    },
+    {
+      "name": "sqlite3",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-sqlite3",
+      "libs": ["libsqlite3-dev"],
+      "why": "Laravel local development database",
+      "overrides": {
+        "7.0": {"configure": "--with-sqlite3=/usr"},
+        "7.1": {"configure": "--with-sqlite3=/usr"},
+        "7.2": {"configure": "--with-sqlite3=/usr"},
+        "7.3": {"configure": "--with-sqlite3=/usr"}
+      }
+    },
+    {
+      "name": "sysvmsg",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-sysvmsg",
+      "libs": [],
+      "why": "PrestaShop legacy queue-worker IPC modules"
+    },
+    {
+      "name": "sysvsem",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-sysvsem",
+      "libs": [],
+      "why": "Laravel queue worker mutual-exclusion locking"
+    },
+    {
+      "name": "sysvshm",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-sysvshm",
+      "libs": [],
+      "why": "PrestaShop legacy shared-memory object cache modules"
+    },
+    {
+      "name": "tokenizer",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "Composer/Laravel autoloading and static analysis tooling; on by default"
+    },
+    {
+      "name": "xml",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": ["libxml2-dev"],
+      "why": "WordPress core XML-RPC/feed parsing; on by default"
+    },
+    {
+      "name": "xmlreader",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": ["libxml2-dev"],
+      "why": "PrestaShop import/export XML feed streaming; on by default"
+    },
+    {
+      "name": "xmlwriter",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": ["libxml2-dev"],
+      "why": "PrestaShop product-feed XML generation; on by default"
+    },
+    {
+      "name": "xsl",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-xsl",
+      "libs": ["libxslt1-dev"],
+      "why": "PrestaShop legacy theme XSLT transformations"
+    },
+    {
+      "name": "zip",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-zip",
+      "libs": ["libzip-dev"],
+      "why": "WordPress/PrestaShop plugin and module archive installation",
+      "overrides": {
+        "7.0": {"configure": "--enable-zip --with-libzip=/usr"},
+        "7.1": {"configure": "--enable-zip --with-libzip=/usr"},
+        "7.2": {"configure": "--enable-zip --with-libzip=/usr"},
+        "7.3": {"configure": "--enable-zip"}
+      }
+    },
+    {
+      "name": "zlib",
+      "source": "core",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-zlib",
+      "libs": ["zlib1g-dev"],
+      "why": "Composer/Laravel HTTP response gzip compression"
+    },
+    {
+      "name": "igbinary",
+      "source": "pecl",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-igbinary",
+      "libs": [],
+      "why": "Compact serializer backing Laravel/WordPress Redis and memcached caches"
+    },
+    {
+      "name": "redis",
+      "source": "pecl",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-redis --enable-redis-igbinary --enable-redis-zstd",
+      "libs": [],
+      "why": "Laravel cache/queue/session, WP object cache, PS cache",
+      "overrides": {
+        "7.0": {"version": "5.3.7"},
+        "7.1": {"version": "5.3.7"},
+        "7.2": {"version": "5.3.7"},
+        "7.3": {"version": "5.3.7"}
+      }
+    },
+    {
+      "name": "imagick",
+      "source": "pecl",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--with-imagick=/opt/imagemagick",
+      "libs": [],
+      "why": "WordPress and PrestaShop image processing"
+    },
+    {
+      "name": "memcached",
+      "source": "pecl",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-memcached",
+      "libs": ["libmemcached-dev", "zlib1g-dev"],
+      "why": "Laravel/WordPress distributed object-cache backend"
+    },
+    {
+      "name": "apcu",
+      "source": "pecl",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-apcu",
+      "libs": [],
+      "why": "WordPress/Laravel single-node opcode-adjacent user cache"
+    },
+    {
+      "name": "zstd",
+      "source": "pecl",
+      "linkage": "static",
+      "php": ">=7.0",
+      "configure": "--enable-zstd --with-libzstd",
+      "libs": ["libzstd-dev"],
+      "why": "Compression backend for the redis igbinary/zstd combo, plus standalone PrestaShop payload compression. --with-libzstd links debian's libzstd instead of the copy the pecl tarball bundles in ext/zstd/zstd -- see php/system-libs.lock"
+    },
+    {
+      "name": "amqp",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": "--with-amqp",
+      "libs": ["librabbitmq-dev"],
+      "why": "Laravel queue driver for RabbitMQ-backed job processing. Default pin 2.2.0 declares a 7.4.0 floor, so 7.0-7.3 pin 1.11.0 (declares 5.6.0, no max)",
+      "overrides": {
+        "7.0": {"version": "1.11.0"},
+        "7.1": {"version": "1.11.0"},
+        "7.2": {"version": "1.11.0"},
+        "7.3": {"version": "1.11.0"}
+      }
+    },
+    {
+      "name": "bz2",
+      "source": "core",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": "--with-bz2",
+      "libs": ["libbz2-dev"],
+      "why": "Legacy PrestaShop import archives shipped as .bz2"
+    },
+    {
+      "name": "ffi",
+      "source": "core",
+      "linkage": "shared",
+      "php": ">=7.4",
+      "configure": "--with-ffi",
+      "libs": ["libffi-dev"],
+      "why": "Occasionally needed; shipped disabled because it escapes every PHP-level sandbox"
+    },
+    {
+      "name": "imap",
+      "source": "core",
+      "linkage": "shared",
+      "php": ">=7.0,<8.4",
+      "configure": "--with-imap --with-imap-ssl",
+      "libs": ["libc-client-dev", "libkrb5-dev"],
+      "why": "Legacy mail plugins; removed from core in 8.4"
+    },
+    {
+      "name": "ldap",
+      "source": "core",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": "--with-ldap",
+      "libs": ["libldap2-dev"],
+      "why": "WordPress/Laravel enterprise SSO via LDAP directory auth"
+    },
+    {
+      "name": "lz4",
+      "source": "github",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": "--enable-lz4 --with-lz4-includedir=/usr",
+      "url": "https://github.com/kjdev/php-ext-lz4/archive/refs/tags/0.7.1.tar.gz",
+      "libs": ["liblz4-dev"],
+      "why": "Opt-in fast-compression session serializer for high-traffic Laravel APIs"
+    },
+    {
+      "name": "mcrypt",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=7.0,<8.0",
+      "configure": null,
+      "libs": ["libmcrypt-dev"],
+      "why": "PrestaShop 1.6 itself, not just its modules: its Cookie class builds Rijndael from _RIJNDAEL_KEY_/_RIJNDAEL_IV_ unconditionally, and the installer only writes those when mcrypt is loaded, so a 1.6 shop without it cannot log into the back office. Dead after 7.x. 7.2+ is PECL -- pecl.lock pins 1.0.9, whose package.xml declares a 7.2.0 floor; 7.0 and 7.1 still carry ext/mcrypt in php-src, so the overrides build that instead of a package that refuses them",
+      "overrides": {
+        "7.0": {"source": "core", "configure": "--with-mcrypt"},
+        "7.1": {"source": "core", "configure": "--with-mcrypt"}
+      }
+    },
+    {
+      "name": "mongodb",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=8.1",
+      "configure": null,
+      "libs": [],
+      "why": "Laravel MongoDB driver for document-store integrations -- the pinned release's own configure refuses anything below PHP 8.1 (\"Need a PHP version >= 8.1.0\")"
+    },
+    {
+      "name": "msgpack",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "why": "Opt-in compact serialization for high-throughput Laravel queues"
+    },
+    {
+      "name": "pcov",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=7.1",
+      "configure": null,
+      "libs": [],
+      "why": "PHPUnit code-coverage driver for Laravel/PrestaShop CI pipelines"
+    },
+    {
+      "name": "protobuf",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=8.2",
+      "configure": null,
+      "libs": [],
+      "why": "gRPC clients used by Laravel microservice integrations -- the pinned release's package.xml declares an 8.2.0 floor; on 8.0 it fails mid-compile on arginfo stubs (arginfo_offsetGet/current/key) that 8.0's Zend headers do not declare"
+    },
+    {
+      "name": "snmp",
+      "source": "core",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": "--with-snmp=/opt/net-snmp",
+      "libs": [],
+      "why": "Legacy PrestaShop server-monitoring modules polling network devices. Links the vendored client-only net-snmp (deps/build-netsnmp.sh), not Debian's libsnmp40t64, which hard-depends on libperl5.40"
+    },
+    {
+      "name": "ssh2",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": "--with-ssh2",
+      "libs": ["libssh2-1-dev"],
+      "why": "Laravel deployment tooling SSH/SFTP automation. Default pin 1.5.0 declares an 8.0.0 floor, so 7.0-7.4 pin 1.3.1 (declares 7.0.0, no max)",
+      "overrides": {
+        "7.0": {"version": "1.3.1"},
+        "7.1": {"version": "1.3.1"},
+        "7.2": {"version": "1.3.1"},
+        "7.3": {"version": "1.3.1"},
+        "7.4": {"version": "1.3.1"}
+      }
+    },
+    {
+      "name": "swoole",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=8.2",
+      "configure": null,
+      "libs": [],
+      "why": "Laravel Octane's high-performance async application server -- the pinned release's own php_swoole_private.h #errors \"require PHP version 8.2 or later\" (Fiber support, zend_fibers.h)"
+    },
+    {
+      "name": "tidy",
+      "source": "core",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": "--with-tidy",
+      "libs": ["libtidy-dev"],
+      "why": "WordPress/PrestaShop legacy HTML cleanup on import"
+    },
+    {
+      "name": "uuid",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": "--with-uuid",
+      "libs": ["uuid-dev"],
+      "why": "Laravel UUID primary keys without the pure-PHP fallback"
+    },
+    {
+      "name": "xdebug",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": null,
+      "libs": [],
+      "always_available": true,
+      "why": "Local debugging/profiling for Laravel and PrestaShop development, never in production. always_available marks it as one of the extensions every image must carry, whatever the pins say, so a remote container can be debugged and recovered quickly, enforced by scripts/test_ext_registry.py. The default pin (3.5.3) declares an 8.0.0 floor, so 7.0-7.4 pin the newest release that declares support for each -- 3.1.6 covers 7.2-7.4 (declares 7.2.0-8.1.99), 2.9.8 covers 7.1 (7.1.0-7.4.99), 2.6.1 covers 7.0 (7.0.0, no max). Ranges read from each candidate's own package.xml, not from release notes",
+      "overrides": {
+        "7.0": {"version": "2.6.1"},
+        "7.1": {"version": "2.9.8"},
+        "7.2": {"version": "3.1.6"},
+        "7.3": {"version": "3.1.6"},
+        "7.4": {"version": "3.1.6"}
+      }
+    },
+    {
+      "name": "xmlrpc",
+      "source": "core",
+      "linkage": "shared",
+      "php": ">=7.0,<8.0",
+      "configure": "--with-xmlrpc",
+      "libs": [],
+      "why": "Legacy WordPress XML-RPC endpoints; removed from core in 8.0"
+    },
+    {
+      "name": "yaml",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": "--with-yaml",
+      "libs": ["libyaml-dev"],
+      "why": "Symfony/Laravel config-file parsing without the Composer polyfill. Default pin 2.3.0 declares a 7.1.0 floor, so 7.0 pins 2.0.4 (declares 7.0.0-dev, no max)",
+      "overrides": {
+        "7.0": {"version": "2.0.4"}
+      }
+    },
+    {
+      "name": "brotli",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": "--with-brotli",
+      "libs": ["libbrotli-dev"],
+      "why": "Opt-in brotli response compression for Laravel/WordPress behind a CDN"
+    },
+    {
+      "name": "event",
+      "source": "pecl",
+      "linkage": "shared",
+      "php": ">=7.0",
+      "configure": "--with-event-core --with-event-libevent-dir",
+      "libs": ["libevent-dev"],
+      "why": "Opt-in libevent-backed async I/O for custom Laravel worker processes"
+    },
+    {
+      "name": "snuffleupagus",
+      "source": "github",
+      "linkage": "shared",
+      "php": ">=7.2",
+      "configure": "--enable-snuffleupagus",
+      "url": "https://github.com/jvoisin/snuffleupagus/archive/refs/tags/v0.14.0.tar.gz",
+      "subdir": "src",
+      "libs": ["libpcre2-dev"],
+      "why": "Virtual patching and hardening; shipped disabled, opt-in per framework. conf/snuffleupagus/*.rules vendor this tag's config/default.rules: a bump here re-syncs them (procedure in default.rules' header), and scripts/test_ext_registry.py holds the two tags together"
+    }
+  ]
+}

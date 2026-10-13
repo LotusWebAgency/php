@@ -1,0 +1,10 @@
+# The build context is php/, scripts/, deps/, conf/, rootfs/ and shim/;
+# everything below is never read by a build.
+.git
+.github
+docs
+tests
+ci
+vex
+*.md
+LICENSE

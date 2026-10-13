@@ -1,0 +1,11 @@
+# See corpus/laravel/endpoints for the format.
+docroot public
+version composer symfony/framework-bundle
+database var/corpus.sqlite SELECT COUNT(*) FROM article
+# / renders 20 rows through Twig inheritance; /article/N a single row plus its
+# comments; /api/articles serializes 50 rows to JSON. Between them the profile
+# gets Twig's compiled-template path, the router, and pdo_sqlite under both a
+# render and a serialize workload.
+path / required 2048 PGO training corpus
+path /article/3 required 1024 commenter0
+path /api/articles required 4096 sit-eiusmod-3

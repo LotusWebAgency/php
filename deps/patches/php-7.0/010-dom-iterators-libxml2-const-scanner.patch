@@ -1,0 +1,39 @@
+Guard ext/dom's xmlHashScanner callback the way php-src itself does from 7.1 on.
+
+libxml2 2.9.8 added `const` to the `name` parameter of xmlHashScanner:
+
+    void (*xmlHashScanner)(void *payload, void *data, const xmlChar *name);
+
+php-src fixed this in 7.1 (ext/dom/dom_iterators.c) with a LIBXML_VERSION guard
+that picks the const signature on 2.9.8 and newer; 7.0 never received the
+backport and still declares itemHashScanner with a plain `xmlChar *name`. On
+trixie (libxml2 2.9.14, LIBXML_VERSION 20914) the two xmlHashScan() call sites
+therefore pass a function pointer whose type does not match the parameter, which
+clang 16 and newer report as -Wincompatible-function-pointer-types -- an error
+by default, not a warning.
+
+This is a diagnostics-only mismatch (const qualification on a pointer parameter,
+identical ABI on every platform this image targets), so it could equally be
+silenced with -Wno-incompatible-function-pointer-types. It is patched instead
+because a -Wno- flag applies to the whole tree for the whole compile, and this
+build deliberately keeps `make` strict so a real pointer bug in php-src still
+fails: see php/build.sh's CONFIGURE_ONLY_CFLAGS/MAKE_ONLY_CFLAGS split. The
+patch is 7.0-only -- 7.1 through 8.0 already carry this exact guard upstream.
+
+Verbatim backport of the 7.1.33 form of the same function.
+
+--- a/ext/dom/dom_iterators.c
++++ b/ext/dom/dom_iterators.c
+@@ -42,7 +42,11 @@
+ 	xmlNotation *notation;
+ };
+ 
+-static void itemHashScanner (void *payload, void *data, xmlChar *name) /* {{{ */
++#if LIBXML_VERSION >= 20908
++static void itemHashScanner (void *payload, void *data, const xmlChar *name) /* {{{ */
++#else
++static void itemHashScanner (void *payload, void *data, xmlChar *name)
++#endif
+ {
+ 	nodeIterator *priv = (nodeIterator *)data;
+ 

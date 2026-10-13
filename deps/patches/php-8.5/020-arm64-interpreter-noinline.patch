@@ -1,0 +1,38 @@
+PHP 8.5 / clang aarch64: keep execute_ex out of class-linking callers.
+
+With PGO + ThinLTO, clang 19 can inline execute_ex into zend_do_link_class,
+whose dynamic alloca uses x19 as the frame base. A preserve_none opcode call
+clobbers x19, and the generated caller does not restore its frame base. Class
+linking through an autoload handler then segfaults instead of resolving the class.
+Keeping execute_ex out of line avoids that compiler frame-base preservation
+failure while retaining the TAILCALL VM and its optimized opcode handlers.
+
+No configure or extension-registry change can target this inlining boundary.
+Disabling PGO, ThinLTO or TAILCALL globally would discard working optimizations;
+this workaround affects only the executor on clang aarch64. Patch both the
+shipped executor and its generator template so regeneration preserves it.
+Remove after a toolchain update passes this autoload regression without the
+patch, with PGO + ThinLTO on aarch64.
+
+--- a/Zend/zend_vm_execute.h
++++ b/Zend/zend_vm_execute.h
+@@ -112693,6 +112693,8 @@
+ #if defined(_WIN64) && defined(_M_X64)
+ /* See save_xmm_x86_64_ms_masm.asm */
+ void execute_ex_real(zend_execute_data *ex)
++#elif defined(__clang__) && defined(__aarch64__)
++ZEND_API zend_never_inline void execute_ex(zend_execute_data *ex)
+ #else
+ ZEND_API void execute_ex(zend_execute_data *ex)
+ #endif
+--- a/Zend/zend_vm_execute.skl
++++ b/Zend/zend_vm_execute.skl
+@@ -10,6 +10,8 @@
+ #if defined(_WIN64) && defined(_M_X64)
+ /* See save_xmm_x86_64_ms_masm.asm */
+ void {%EXECUTOR_NAME%}_ex_real(zend_execute_data *ex)
++#elif defined(__clang__) && defined(__aarch64__)
++ZEND_API zend_never_inline void {%EXECUTOR_NAME%}_ex(zend_execute_data *ex)
+ #else
+ ZEND_API void {%EXECUTOR_NAME%}_ex(zend_execute_data *ex)
+ #endif

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Enable shared extensions by writing ini files. Idempotent; refuses names that
+# have no .so, so a typo fails loudly instead of silently doing nothing.
+set -euo pipefail
+
+# Zend extensions load through zend_extension= instead of extension=. xdebug
+# refuses to load any other way ("Xdebug MUST be loaded as a Zend extension");
+# pcov is a plain extension and fails as a zend_extension. opcache is compiled
+# in and never reaches this script; snuffleupagus does, via the
+# PHP_SNUFFLEUPAGUS branch of docker-php-entrypoint.
+ZEND_EXTENSIONS="xdebug opcache snuffleupagus"
+is_zend() {
+  case " $ZEND_EXTENSIONS " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# --list-zend prints the zend-extension list, one name per line, so the smoke
+# test can pick a subject that exists on the PHP version under test (xdebug is
+# absent from 7.x). It reads the same variable as is_zend(), so they cannot disagree.
+if [ "${1:-}" = "--list-zend" ]; then
+  printf '%s\n' $ZEND_EXTENSIONS
+  exit 0
+fi
+
+CONF_DIR="${PHP_CONF_DIR:-/usr/local/etc/php/conf.d}"
+EXT_DIR="$(php -r 'echo ini_get("extension_dir");')"
+
+# Reject anything that is not a plain extension name, so the 20-<name>.ini
+# filename can never traverse out of conf.d.
+is_valid_name() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+for name in "$@"; do
+  name="$(echo "$name" | tr -d ' ')"
+  [ -n "$name" ] || continue
+  if ! is_valid_name "$name"; then
+    echo "php-ext-enable: invalid extension name: '${name}'" >&2
+    exit 1
+  fi
+  if [ ! -f "${EXT_DIR}/${name}.so" ]; then
+    echo "php-ext-enable: no such extension: ${name}" >&2
+    echo "available: $(cd "$EXT_DIR" && ls *.so 2>/dev/null | sed 's/\.so$//' | tr '\n' ' ')" >&2
+    exit 1
+  fi
+  # Always write the ".so" suffix: PHP 7.0 and 7.1 do not append one to a bare
+  # extension=/zend_extension= value and fail to load it on every invocation.
+  if is_zend "$name"; then
+    echo "zend_extension=${name}.so" > "${CONF_DIR}/20-${name}.ini"
+  else
+    echo "extension=${name}.so" > "${CONF_DIR}/20-${name}.ini"
+  fi
+  echo "enabled ${name}"
+done

@@ -1,0 +1,16 @@
+# Symfony 3.4: the "controller:" shorthand arrived in 4.1, so routes name the
+# controller through defaults._controller instead. Same three routes, same
+# controller class, as every other tier.
+index:
+    path: /
+    defaults: { _controller: 'App\Controller\CorpusController::index' }
+
+article:
+    path: /article/{id}
+    defaults: { _controller: 'App\Controller\CorpusController::article' }
+    requirements:
+        id: '\d+'
+
+api_articles:
+    path: /api/articles
+    defaults: { _controller: 'App\Controller\CorpusController::apiArticles' }

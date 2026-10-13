@@ -1,0 +1,34 @@
+Correct ext/snmp's get_gc handler signature, the way php-src does from 7.4 on.
+
+zend_object_handlers.h has declared the handler as
+
+  typedef HashTable *(*zend_object_get_gc_t)(zval *object, zval **table, int *n);
+
+since PHP 7.0, but ext/snmp defines php_snmp_get_gc() with zval ***gc_data and
+assigns it to that slot anyway. One indirection too many, on every branch from
+7.0 to 7.3. Historically it compiled with a warning; clang 16 and newer make
+-Wincompatible-function-pointer-types an error by default, so ext/snmp no
+longer builds at all:
+
+  error: incompatible function pointer types assigning to 'zend_object_get_gc_t'
+  ... from 'HashTable *(zval *, zval ***, int *)'
+
+php-src fixed it in 7.4 by changing the parameter to zval **, leaving the body
+(*gc_data = NULL; *gc_data_count = 0;) untouched. This is that change, and it
+is a pure signature correction: the two writes are to a pointer slot of the
+same width either way, which is why the mismatch never misbehaved at runtime
+and why nobody noticed for four branches.
+
+Note this is a *shared* extension here (php/ext.json), so the failure lands in
+php/build-shared-ext.sh's phpize pass rather than in the main build.
+--- a/ext/snmp/snmp.c
++++ b/ext/snmp/snmp.c
+@@ -2022,7 +2022,7 @@
+ }
+ /* }}} */
+ 
+-static HashTable *php_snmp_get_gc(zval *object, zval ***gc_data, int *gc_data_count) /* {{{ */
++static HashTable *php_snmp_get_gc(zval *object, zval **gc_data, int *gc_data_count) /* {{{ */
+ {
+ 	*gc_data = NULL;
+ 	*gc_data_count = 0;

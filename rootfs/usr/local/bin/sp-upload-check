@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Called by snuffleupagus's upload_validation feature (see
+# conf/snuffleupagus/default.rules) with the temp path of an uploaded file as
+# $1. Exit 0 allows the upload, any other exit code rejects it. The SP_*
+# environment variables are unused: content matters, not the claimed name.
+#
+# - Fail closed: every read is checked explicitly and rejects on failure, so an
+#   unreadable file is never accepted by falling through to the final `exit 0`.
+# - Matches `<?=` as well as `<?php`; both are complete webshell openers.
+#   `<script language="php">` is not matched: PHP 7.0 removed it as an opening tag.
+# - Archives skip content inspection (WordPress and PrestaShop installers upload
+#   zips by design, and a plugin's own "<?php" survives in the raw bytes), but
+#   must pass the format's own integrity check (`unzip -t`, `gzip -t`,
+#   `bzip2 -t`, `xz -t`). Magic bytes alone are attacker-controlled: a file of
+#   `PK\x03\x04` followed by raw PHP would otherwise be accepted unread.
+# - Each validator runs under `timeout`: `-t` decompresses the whole payload, so
+#   a small high-ratio bomb could burn seconds of CPU in one FPM worker. A
+#   timeout takes the same rejection path as a corrupt archive.
+# - Known limit: a genuinely valid zip containing a PHP file (`zip -0`) is
+#   accepted. Closing that would need content inspection, which breaks plugin
+#   and module uploads; upload_max_filesize, disable_functions and the ruleset's
+#   execution-prevention rules cover it instead.
+set -euo pipefail
+
+f="${1:?}"
+: "${ARCHIVE_CHECK_TIMEOUT:=5}"
+
+magic="$(head -c 8 -- "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')" || {
+  echo "sp-upload-check: could not read ${f}, rejecting" >&2
+  exit 1
+}
+
+# Exits the whole script: 0 if $f validates as the named archive format within
+# the timeout, 1 (with a diagnostic) otherwise.
+check_archive() {
+  local label="$1"; shift
+  if timeout "$ARCHIVE_CHECK_TIMEOUT" "$@" >/dev/null 2>&1; then
+    exit 0
+  fi
+  echo "sp-upload-check: ${f} has ${label} magic bytes but failed integrity validation (or exceeded ${ARCHIVE_CHECK_TIMEOUT}s), rejecting" >&2
+  exit 1
+}
+
+case "$magic" in
+  504b0304*|504b0506*|504b0708*) check_archive zip unzip -t -- "$f" ;;
+  1f8b*)                         check_archive gzip gzip -t -- "$f" ;;
+  425a68*)                       check_archive bzip2 bzip2 -t -- "$f" ;;
+  fd377a585a00*)                 check_archive xz xz -t -- "$f" ;;
+esac
+
+# Piped straight into grep: `$(...)` truncates at the first NUL byte, so a
+# polyglot with a NUL before its "<?php"/"<?=" payload would escape the scan.
+if head -c 4096 -- "$f" | grep -qiE '<\?php|<\?='; then
+  exit 1
+fi
+[ "${PIPESTATUS[0]}" -eq 0 ] || {
+  echo "sp-upload-check: could not read ${f}, rejecting" >&2
+  exit 1
+}
+exit 0

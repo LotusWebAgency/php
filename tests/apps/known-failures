@@ -1,0 +1,13 @@
+# Checks a cell is allowed to fail: an upstream defect in that application
+# release on that PHP. Anything not listed
+# here still fails the cell. A listed check that passes is reported, so a row can
+# be dropped once upstream (or the matrix) moves on.
+#
+# One row per check: app, set, PHP version, then the check's name exactly as the
+# suite prints it, then " -- " and why. `appsets.py check` refuses a row whose
+# (app, set, php) is not a cell in tests/apps/sets. The CLI suites
+# (tests/apps/cli-lib.sh) honor this file; the HTTP suites do not read it.
+#
+# app        set   php   check -- why
+prestashop   8.2   8.4   console: cache:warmup -- PrestaShop 8.2.8 ships Twig 3.4.3, which compiles the closure-based format_date function by its name, and PHP 8.4 renamed closures to {closure:Class::method():line}: var/cache/prod/twig/b1/b1e1b05d9c03efdcacccb95a73f1d2fb.php line 110 is a ParseError. Same cause makes the back office Customer Service thread pages fatal.
+prestashop   8.2   8.4   console: container compiles from cold -- the same cache:warmup and the same Twig 3.4.3 ParseError, run by the cli-builder suite (suite/builder.sh) before cli.sh.
