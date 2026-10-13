@@ -3,7 +3,7 @@
 # runner does not re-download the same source tarballs in every build leg.
 #
 #   ci/sources.sh list          print "<sha256> <url> <cache-entry>" for every sha-pinned download
-#   ci/sources.sh fetch <dir>   download whatever <dir> lacks (verified, via deps/fetch-verified.sh)
+#   ci/sources.sh fetch <dir>   download whatever <dir> lacks (verified, via deps/fetch-verified.sh), drop unlisted entries
 #   ci/sources.sh seed <dir>    copy <dir> into the php-src-cache mount of the current buildx builder
 #
 # deps/fetch-verified.sh names a cache entry by its sha256 alone, so the third
@@ -92,6 +92,14 @@ fetch() {
   rows="$(list)"
   local total fetched=0 skipped=0
   total="$(wc -l <<<"$rows")"
+  # Entries whose pin is gone would otherwise ride along in every restored
+  # cache and seed forever.
+  local f keep
+  keep="$(awk '{print $3}' <<<"$rows")"
+  for f in "$dir"/*; do
+    [ -f "$f" ] || continue
+    grep -qxF "$(basename "$f")" <<<"$keep" || rm -f "$f"
+  done
   while read -r sha url entry; do
     if [ -f "$dir/$entry" ] && echo "${sha}  ${dir}/${entry}" | sha256sum -c - >/dev/null 2>&1; then
       skipped=$((skipped + 1))

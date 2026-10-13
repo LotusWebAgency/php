@@ -249,15 +249,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Cache the pinned sources
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore the pinned sources
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: restore
         with:
           path: ${{ runner.temp }}/php-src-cache
-          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock') }}
+          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock', 'ci/sources.sh') }}
           restore-keys: php-src-
 
+      # Saved only when every pinned file arrived: a partial set under the exact
+      # key would never be completed until a lock changed. A failure here never
+      # fails a build leg (they do not need this job to succeed); it only means
+      # the legs fetch the missing files themselves, as they always could.
       - name: Fetch whatever the cache lacks
+        id: fetch
         run: ./ci/sources.sh fetch "$RUNNER_TEMP/php-src-cache"
+
+      - name: Save the pinned sources
+        if: steps.restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/php-src-cache
+          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock', 'ci/sources.sh') }}
 
   # ----------------------------------------------------------- verify-matrix
   # What the verify job below builds, and on which architectures. A pull
@@ -396,19 +409,23 @@ jobs:
               mirrors = ["mirror.gcr.io", "public.ecr.aws/docker"]
 
       # The run's source tarballs (see the sources job), into this builder's
-      # php-src-cache mount. Fetch covers a cache miss; neither step can change
-      # what is built.
+      # php-src-cache mount. Whatever is missing the build fetches itself, so
+      # one dead upstream URL only fails the legs that need it; neither step
+      # can change what is built.
       - name: Restore the pinned sources
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/php-src-cache
-          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock') }}
+          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock', 'ci/sources.sh') }}
           restore-keys: php-src-
 
       - name: Seed the builder's source cache
         run: |
-          ./ci/sources.sh fetch "$RUNNER_TEMP/php-src-cache"
-          ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
+          if [ -n "$(ls -A "$RUNNER_TEMP/php-src-cache" 2>/dev/null)" ]; then
+            ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
+          else
+            echo "::warning::no source cache restored; the build fetches its sources itself"
+          fi
 
       - name: Log in to GHCR (corpus and cache pull, dev image push)
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -666,7 +683,7 @@ jobs:
   # that would be 7 bootstrap PHP compiles plus 7 application corpus builds on a
   # single runner, past any sensible timeout whenever a shared input changes.
   corpus:
-    needs: [preflight, corpus-matrix, sources]
+    needs: [preflight, corpus-matrix]
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     name: corpus ${{ matrix.tier.floor }} ${{ matrix.arch.name }}
     strategy:
@@ -752,21 +769,25 @@ jobs:
           fi
 
       # The run's source tarballs (see the sources job), into this builder's
-      # php-src-cache mount. Fetch covers a cache miss; neither step can change
-      # what is built.
+      # php-src-cache mount. Whatever is missing the build fetches itself, so
+      # one dead upstream URL only fails the legs that need it; neither step
+      # can change what is built.
       - name: Restore the pinned sources
         if: steps.reuse.outputs.reused != 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/php-src-cache
-          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock') }}
+          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock', 'ci/sources.sh') }}
           restore-keys: php-src-
 
       - name: Seed the builder's source cache
         if: steps.reuse.outputs.reused != 'true'
         run: |
-          ./ci/sources.sh fetch "$RUNNER_TEMP/php-src-cache"
-          ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
+          if [ -n "$(ls -A "$RUNNER_TEMP/php-src-cache" 2>/dev/null)" ]; then
+            ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
+          else
+            echo "::warning::no source cache restored; the build fetches its sources itself"
+          fi
 
       - name: Build this tier's corpus (skipped if reused)
         if: steps.reuse.outputs.reused != 'true'
@@ -941,19 +962,23 @@ jobs:
               mirrors = ["mirror.gcr.io", "public.ecr.aws/docker"]
 
       # The run's source tarballs (see the sources job), into this builder's
-      # php-src-cache mount. Fetch covers a cache miss; neither step can change
-      # what is built.
+      # php-src-cache mount. Whatever is missing the build fetches itself, so
+      # one dead upstream URL only fails the legs that need it; neither step
+      # can change what is built.
       - name: Restore the pinned sources
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/php-src-cache
-          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock') }}
+          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock', 'ci/sources.sh') }}
           restore-keys: php-src-
 
       - name: Seed the builder's source cache
         run: |
-          ./ci/sources.sh fetch "$RUNNER_TEMP/php-src-cache"
-          ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
+          if [ -n "$(ls -A "$RUNNER_TEMP/php-src-cache" 2>/dev/null)" ]; then
+            ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
+          else
+            echo "::warning::no source cache restored; the build fetches its sources itself"
+          fi
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -1183,7 +1208,7 @@ jobs:
   # that target's merge leg; fail-fast: false leaves the others unaffected.
   merge:
     needs: [build, release-matrix]
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && needs.build.result != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     name: merge ${{ matrix.target.name }}
     strategy:
       fail-fast: false
