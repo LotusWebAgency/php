@@ -7,10 +7,10 @@
 # that was meant, and a version appearing under two tiers is two independent pins.
 #
 # Versions follow what each tier's floor PHP supports:
-#   WordPress 7.0 needs php 7.4     ($required_php_version, checked at boot)
+#   WordPress 7.1 needs php 7.4     ($required_php_version, checked at boot)
 #   WordPress 6.9 needs php 7.2.24
 #   WordPress 6.5 needs php 7.0.0
-#   sqlite-database-integration 3.0 needs php 7.2, 2.2 php 7.2, 2.1 php 7.0
+#   sqlite-database-integration 3.1 needs php 7.2, 2.2 php 7.2, 2.1 php 7.0
 #   laravel/laravel v12 needs ^8.2, v10 ^8.1, v6 ^7.2.5, v5.8 ^7.1.3, v5.5 >=7.0.0
 #
 # The drop-in is pinned to the line that shipped alongside its tier's WordPress,
@@ -132,17 +132,17 @@
 #
 # tier  name          version   sha256                                                            url
 8.5     laravel-app   12.12.2   8977f1d10b7bbf53898a77b84e5e94ce0b823ccca072f5f9d0fd10b199f96cd9  https://github.com/laravel/laravel/archive/refs/tags/v12.12.2.tar.gz
-8.5     wordpress     7.0.7     e4f12b690853e4cf65aa674d018536d5c46a58698313c5997ca0c5d2c6b8ba0d  https://wordpress.org/wordpress-7.0.7.tar.gz
-8.5     wp-sqlite     3.0.2     1602e75577ad9b3a7e3e4a6a44a81b9541cdee2124d48928faf61c6fd3cd4f74  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.0.2.zip
+8.5     wordpress     7.1.3     d2a09acb6a15e3b9c471d72557753c266d6f41a79ed19bfe04cbfe49e283b2a5  https://wordpress.org/wordpress-7.1.3.tar.gz
+8.5     wp-sqlite     3.1.0     e260e3ada78676f1c0f4e09eb9ebcb9ecce4d4b85f0c6e5a70fb9a93f5b9847f  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.1.0.zip
 8.4     laravel-app   12.12.2   8977f1d10b7bbf53898a77b84e5e94ce0b823ccca072f5f9d0fd10b199f96cd9  https://github.com/laravel/laravel/archive/refs/tags/v12.12.2.tar.gz
-8.4     wordpress     7.0.7     e4f12b690853e4cf65aa674d018536d5c46a58698313c5997ca0c5d2c6b8ba0d  https://wordpress.org/wordpress-7.0.7.tar.gz
-8.4     wp-sqlite     3.0.2     1602e75577ad9b3a7e3e4a6a44a81b9541cdee2124d48928faf61c6fd3cd4f74  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.0.2.zip
+8.4     wordpress     7.1.3     d2a09acb6a15e3b9c471d72557753c266d6f41a79ed19bfe04cbfe49e283b2a5  https://wordpress.org/wordpress-7.1.3.tar.gz
+8.4     wp-sqlite     3.1.0     e260e3ada78676f1c0f4e09eb9ebcb9ecce4d4b85f0c6e5a70fb9a93f5b9847f  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.1.0.zip
 8.2     laravel-app   12.12.2   8977f1d10b7bbf53898a77b84e5e94ce0b823ccca072f5f9d0fd10b199f96cd9  https://github.com/laravel/laravel/archive/refs/tags/v12.12.2.tar.gz
-8.2     wordpress     7.0.7     e4f12b690853e4cf65aa674d018536d5c46a58698313c5997ca0c5d2c6b8ba0d  https://wordpress.org/wordpress-7.0.7.tar.gz
-8.2     wp-sqlite     3.0.2     1602e75577ad9b3a7e3e4a6a44a81b9541cdee2124d48928faf61c6fd3cd4f74  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.0.2.zip
+8.2     wordpress     7.1.3     d2a09acb6a15e3b9c471d72557753c266d6f41a79ed19bfe04cbfe49e283b2a5  https://wordpress.org/wordpress-7.1.3.tar.gz
+8.2     wp-sqlite     3.1.0     e260e3ada78676f1c0f4e09eb9ebcb9ecce4d4b85f0c6e5a70fb9a93f5b9847f  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.1.0.zip
 8.1     laravel-app   10.3.3    00d981a312f9f2ae2bd7b44cc83a2a970d7153c224fdb0543786b6044cfd68c8  https://github.com/laravel/laravel/archive/refs/tags/v10.3.3.tar.gz
-8.1     wordpress     7.0.7     e4f12b690853e4cf65aa674d018536d5c46a58698313c5997ca0c5d2c6b8ba0d  https://wordpress.org/wordpress-7.0.7.tar.gz
-8.1     wp-sqlite     3.0.2     1602e75577ad9b3a7e3e4a6a44a81b9541cdee2124d48928faf61c6fd3cd4f74  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.0.2.zip
+8.1     wordpress     7.1.3     d2a09acb6a15e3b9c471d72557753c266d6f41a79ed19bfe04cbfe49e283b2a5  https://wordpress.org/wordpress-7.1.3.tar.gz
+8.1     wp-sqlite     3.1.0     e260e3ada78676f1c0f4e09eb9ebcb9ecce4d4b85f0c6e5a70fb9a93f5b9847f  https://downloads.wordpress.org/plugin/sqlite-database-integration.3.1.0.zip
 7.2     laravel-app   6.20.1    d8280bfc2cc0c89aa647b8dc89fdc02f80eb25dd8336e10583244c693592738c  https://github.com/laravel/laravel/archive/refs/tags/v6.20.1.tar.gz
 7.2     wordpress     6.9.10    a1c0dc12e2271c6afaabf329d5af7a976f8d2c8c592773178a5baaeafc2d4f4a  https://wordpress.org/wordpress-6.9.10.tar.gz
 7.2     wp-sqlite     2.2.23    44be096a14ebcea424b5e4bf764436ec85fb067f74ab47822c4c5346df21591e  https://downloads.wordpress.org/plugin/sqlite-database-integration.2.2.23.zip

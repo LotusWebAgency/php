@@ -19,7 +19,7 @@ APPTEST_BUILDER_REPO="${APPTEST_BUILDER_REPO:-dementev/php-fpm-with-ext}"
 # The fixture image is this MariaDB plus the populated datadir and the app
 # tree. Pinned by digest: a fixture has to be rebuilt deliberately, never
 # because a tag moved under it.
-APPTEST_DB_IMAGE="mariadb:11.8@sha256:79d59758afc91b89b120b0a8904d637f5a3b3e1c4900f29b740d6d46c72fef68"
+APPTEST_DB_IMAGE="mariadb:11.8@sha256:6422478cb8e159f080fb1d8ccf65101e26fe51385787fde7d16c3b165a331f15"
 APPTEST_DB_DATADIR=/var/lib/mysql-fixture
 APPTEST_DB_PASSWORD=apptest
 # The same server flags at build time and at test time, so the fixture's

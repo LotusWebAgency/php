@@ -49,7 +49,7 @@ mcrypt        1.0.9     2a9ef0817d3bf677f6d7baf8e325629a2758974735d8abad65663847
 # support for a PHP this project still builds. Same mechanism as redis above,
 # honored by build-shared-ext.sh too. Every version below is the newest release
 # whose own package.xml declares support for that PHP.
-xdebug@7.0    2.6.1     dae691d6c052073b886e0c6e1306a707bca9fd18a1e3485384ef6c4aacf1bd77  7.0.0    -
+xdebug@7.0    2.8.1     838be3974e2555bbbd796eb57c34840659815f23079417b5042e8b534fe61520  7.0.0    -
 xdebug@7.1    2.9.8     f555b6cc58d96c9965af942d22e0f1818b7a477a410c76b1ab0eebe85a762f8a  7.1.0    7.4.99
 xdebug@7.2    3.1.6     554eca0b4d5b7b93cb2258fab0b0bd84cc8721e74322a2255c14e137cbcad5d2  7.2.0    8.1.99
 xdebug@7.3    3.1.6     554eca0b4d5b7b93cb2258fab0b0bd84cc8721e74322a2255c14e137cbcad5d2  7.2.0    8.1.99
@@ -59,11 +59,11 @@ amqp@7.0      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f
 amqp@7.1      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f331c2f08  5.6.0    -
 amqp@7.2      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f331c2f08  5.6.0    -
 amqp@7.3      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f331c2f08  5.6.0    -
-ssh2@7.0      1.3.1     9093a1f8d24dc65836027b0e239c50de8d5eaebf8396bc3331fdd38c5d69afd9  7.0.0    -
-ssh2@7.1      1.3.1     9093a1f8d24dc65836027b0e239c50de8d5eaebf8396bc3331fdd38c5d69afd9  7.0.0    -
-ssh2@7.2      1.3.1     9093a1f8d24dc65836027b0e239c50de8d5eaebf8396bc3331fdd38c5d69afd9  7.0.0    -
-ssh2@7.3      1.3.1     9093a1f8d24dc65836027b0e239c50de8d5eaebf8396bc3331fdd38c5d69afd9  7.0.0    -
-ssh2@7.4      1.3.1     9093a1f8d24dc65836027b0e239c50de8d5eaebf8396bc3331fdd38c5d69afd9  7.0.0    -
+ssh2@7.0      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95da4d8764  7.0.0    -
+ssh2@7.1      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95da4d8764  7.0.0    -
+ssh2@7.2      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95da4d8764  7.0.0    -
+ssh2@7.3      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95da4d8764  7.0.0    -
+ssh2@7.4      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95da4d8764  7.0.0    -
 # source=github entries. No pecl.php.net version here -- the tag is pinned in
 # ext.json's url, and this row carries only the sha256 of that exact tarball
 # (computed locally against the fetched tarball, as above).

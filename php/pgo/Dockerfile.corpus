@@ -173,7 +173,7 @@ RUN --mount=type=cache,target=/composer-cache,id=php-pgo-composer-cache,sharing=
 # "/?p=1" render a page instead of the installer.
 #
 # WordPress and drop-in versions are per tier because WordPress enforces its own
-# PHP floor at boot: 7.0 refuses to run below 7.4, 6.9 below 7.2.24.
+# PHP floor at boot: 7.1 refuses to run below 7.4, 6.9 below 7.2.24.
 RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked,uid=33,gid=33 \
     set -eux; \
     /corpus-src/fetch.sh "$CORPUS_TIER" wordpress /tmp/wp.tar.gz; \
