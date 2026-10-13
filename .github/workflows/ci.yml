@@ -70,13 +70,17 @@
 #     (buildkitd-config-inline below); jobs that pull through the runner's own
 #     daemon get mirror.gcr.io as its registry mirror (ci/hub-mirror.sh), and
 #     so does the BuildKit image: every job that starts a docker-container
-#     builder runs hub-mirror.sh first. The Dockerfile frontend named in
+#     builder runs hub-mirror.sh first and retries the pinned BuildKit pull
+#     before setup bootstraps it. Manifest-only work uses imagetools directly,
+#     without starting a builder. The Dockerfile frontend named in
 #     each `# syntax=` line is pinned by its multi-arch index digest as well
 #     (Renovate's dockerfile manager keeps it current). A pinned digest means no
 #     source can change what is pulled.
 #   - The run's only Docker Hub reads are hub-verify's few anonymous ones.
-# Registry calls that can still meet a 429/5xx run under ci/retry.sh, which
-# retries only 429/5xx/network errors with backoff.
+# Registry calls that can still meet a 429/5xx run under ci/retry.sh; builds also
+# retry transient HTTP and apt failures, never deterministic build errors.
+# Trivy's vulnerability DB is refreshed once per run in parallel with preflight,
+# then shared as an artifact so matrix scans use the same DB without updating it.
 name: ci
 
 on:
@@ -141,6 +145,11 @@ jobs:
       - name: Route Docker Hub pulls through mirror.gcr.io
         run: ./ci/hub-mirror.sh
 
+      # Warm the daemon's image store under the retry policy; the action's
+      # builder bootstrap otherwise pulls this image without that backoff.
+      - name: Pull the pinned BuildKit image
+        run: ./ci/retry.sh docker pull "$BUILDKIT_IMAGE"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
@@ -172,6 +181,55 @@ jobs:
 
       - name: tests/test-attest.sh
         run: ./tests/test-attest.sh
+
+  # ---------------------------------------------------------------- trivy-db
+  # One vulnerability DB refresh per run, parallel with preflight, instead of
+  # every verify/build leg racing the registry and the same dated cache key.
+  # The artifact gives every architecture the same DB for its scan and recorded
+  # test-result predicate; a failed refresh stops those legs before they build.
+  trivy-db:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.SETUP_TRIVY_VERSION }}
+          cache: true
+
+      - name: Date for the Trivy DB cache key
+        id: trivy_date
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the Trivy DB cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.cache/trivy
+          key: cache-trivy-${{ steps.trivy_date.outputs.date }}
+          restore-keys: cache-trivy-
+
+      # A dated cache hit can still need an update: the immutable daily entry
+      # can outlive the DB's next-update time. Refresh it here once, then share
+      # the refreshed files even when the existing cache key cannot be replaced.
+      # The DB is an OCI artifact, so registry failures go through the retry policy.
+      - name: Download the Trivy DB
+        run: ./ci/retry.sh trivy --cache-dir "$GITHUB_WORKSPACE/.cache/trivy" image --download-db-only
+
+      # Include the whole cache directory, including hidden files, so consumers
+      # restore exactly what the pinned Trivy release downloaded.
+      - name: Upload this run's Trivy DB
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: trivy-db
+          path: ${{ github.workspace }}/.cache/trivy
+          retention-days: 1
+          include-hidden-files: true
+          if-no-files-found: error
 
   # ----------------------------------------------------------- verify-matrix
   # What the verify job below builds, and on which architectures. A pull
@@ -231,8 +289,8 @@ jobs:
   # on develop must only fail the legs that mount it, not skip every other leg
   # (same reasoning as `build`'s condition).
   verify:
-    needs: [preflight, verify-matrix, corpus-merge]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.verify-matrix.result == 'success' }}
+    needs: [preflight, verify-matrix, corpus-merge, trivy-db]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.verify-matrix.result == 'success' && needs.trivy-db.result == 'success' }}
     name: verify ${{ matrix.target.name }} ${{ matrix.arch.name }}
     strategy:
       fail-fast: false
@@ -270,36 +328,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Trivy's binary and vulnerability DB are fetched here, before any build or
-      # test, so the scan steps run on what is already on disk: they skip the
-      # action's own setup and cache restore and set TRIVY_SKIP_DB_UPDATE (which
-      # cannot be set job-wide: it conflicts with --download-db-only below).
+      # Install the pinned binary and use this run's prepared DB. Every scan
+      # skips setup, cache restore and DB updates, so matrix legs make no DB
+      # registry requests after a long build.
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
           version: ${{ env.SETUP_TRIVY_VERSION }}
           cache: true
 
-      - name: Date for the Trivy DB cache key
-        id: trivy_date
-        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the Trivy DB cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Download this run's Trivy DB
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: trivy-db
           path: ${{ github.workspace }}/.cache/trivy
-          key: cache-trivy-${{ steps.trivy_date.outputs.date }}
-          restore-keys: cache-trivy-
-
-      # A no-op when the restored DB is still current. The vulnerability DB is
-      # an OCI artifact on GHCR, so the registry kinds of failure apply.
-      - name: Download the Trivy DB
-        run: ./ci/retry.sh trivy --cache-dir "$GITHUB_WORKSPACE/.cache/trivy" image --download-db-only
 
       # The BuildKit image is pulled by this daemon: mirror.gcr.io first, Docker
       # Hub when the mirror misses a blob.
       - name: Route Docker Hub pulls through mirror.gcr.io
         run: ./ci/hub-mirror.sh
+
+      # Warm the daemon's image store under the retry policy; the action's
+      # builder bootstrap otherwise pulls this image without that backoff.
+      - name: Pull the pinned BuildKit image
+        run: ./ci/retry.sh docker pull "$BUILDKIT_IMAGE"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -369,10 +421,10 @@ jobs:
         run: |
           set -euo pipefail
           read -ra bake_targets <<<"$TARGET_BAKE"
-          # Retried on a Docker Hub 429/5xx/network error (ci/retry.sh); the second
-          # attempt is mostly layer-cache hits. Five attempts (30s to 5min waits);
-          # a build that fails for real is never retried, only a registry error.
-          RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
+          # Retry transient registry, HTTP and apt failures from the build,
+          # with mostly layer-cache hits on the next attempt. Five attempts
+          # (30s to 5min waits); deterministic build failures are not retried.
+          RETRY_KIND=registry,http,apt RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
             --set "*.platform=$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
             --load
@@ -395,7 +447,7 @@ jobs:
         run: |
           set -euo pipefail
           slug="php-${TARGET_PHP//./_}"
-          RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm" \
+          RETRY_KIND=registry,http,apt RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm" \
             --set "*.platform=$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
             --load
@@ -412,6 +464,7 @@ jobs:
           ignore-unfixed: true
           skip-setup-trivy: true
           cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
         env:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
@@ -427,6 +480,7 @@ jobs:
           ignore-unfixed: true
           skip-setup-trivy: true
           cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
         env:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
@@ -470,16 +524,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The BuildKit image is pulled by this daemon: mirror.gcr.io first, Docker
-      # Hub when the mirror misses a blob.
-      - name: Route Docker Hub pulls through mirror.gcr.io
-        run: ./ci/hub-mirror.sh
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
-
+      # imagetools talks directly to GHCR without a BuildKit builder, so this
+      # job needs neither a BuildKit image pull nor a Docker Hub mirror.
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -704,16 +750,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The BuildKit image is pulled by this daemon: mirror.gcr.io first, Docker
-      # Hub when the mirror misses a blob.
-      - name: Route Docker Hub pulls through mirror.gcr.io
-        run: ./ci/hub-mirror.sh
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
-
+      # imagetools talks directly to GHCR without a BuildKit builder, so this
+      # job needs neither a BuildKit image pull nor a Docker Hub mirror.
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -757,8 +795,8 @@ jobs:
   # Hub credentials here (no `release` environment, no login): every Docker Hub
   # base image is read anonymously, through the mirrors.
   build:
-    needs: [corpus-merge, release-matrix]
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    needs: [corpus-merge, release-matrix, trivy-db]
+    if: ${{ !cancelled() && needs.trivy-db.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     strategy:
       fail-fast: false
       matrix:
@@ -796,31 +834,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Trivy's binary and vulnerability DB are fetched here, before any build or
-      # test, so the scan steps run on what is already on disk: they skip the
-      # action's own setup and cache restore and set TRIVY_SKIP_DB_UPDATE (which
-      # cannot be set job-wide: it conflicts with --download-db-only below).
+      # Install the pinned binary and use this run's prepared DB. Every scan
+      # skips setup, cache restore and DB updates, so matrix legs make no DB
+      # registry requests after a long build.
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
           version: ${{ env.SETUP_TRIVY_VERSION }}
           cache: true
 
-      - name: Date for the Trivy DB cache key
-        id: trivy_date
-        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the Trivy DB cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Download this run's Trivy DB
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: trivy-db
           path: ${{ github.workspace }}/.cache/trivy
-          key: cache-trivy-${{ steps.trivy_date.outputs.date }}
-          restore-keys: cache-trivy-
-
-      # A no-op when the restored DB is still current. The vulnerability DB is
-      # an OCI artifact on GHCR, so the registry kinds of failure apply.
-      - name: Download the Trivy DB
-        run: ./ci/retry.sh trivy --cache-dir "$GITHUB_WORKSPACE/.cache/trivy" image --download-db-only
 
       # matrix.json's "image" field is the one source of truth for the Docker Hub
       # repository. Nothing is pushed there from this job: it is the repository
@@ -833,6 +860,11 @@ jobs:
       # Hub when the mirror misses a blob.
       - name: Route Docker Hub pulls through mirror.gcr.io
         run: ./ci/hub-mirror.sh
+
+      # Warm the daemon's image store under the retry policy; the action's
+      # builder bootstrap otherwise pulls this image without that backoff.
+      - name: Pull the pinned BuildKit image
+        run: ./ci/retry.sh docker pull "$BUILDKIT_IMAGE"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -887,14 +919,14 @@ jobs:
         run: |
           set -euo pipefail
           read -ra bake_targets <<<"$TARGET_BAKE"
-          # Retried on a registry 429/5xx/network error (ci/retry.sh), with a warm
-          # layer cache. Safe for a push by digest: every attempt starts by deleting
+          # Retry transient registry, HTTP and apt failures with a warm layer
+          # cache. Safe for a push by digest: every attempt starts by deleting
           # metadata.json, so the digest read below is always the one the attempt
           # that succeeded wrote -- never a leftover of a failed one -- and nothing
           # else carries a digest forward (DIGEST goes to GITHUB_ENV only after
           # this). Whatever a failed attempt pushed stays an untagged, unreferenced
           # orphan in the staging repository.
-          RETRY_ATTEMPTS=5 ./ci/retry.sh bash -c 'rm -f metadata.json; exec "$@"' retry-bake \
+          RETRY_KIND=registry,http,apt RETRY_ATTEMPTS=5 ./ci/retry.sh bash -c 'rm -f metadata.json; exec "$@"' retry-bake \
             docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
             --set '*.platform='"$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
@@ -966,6 +998,7 @@ jobs:
           ignore-unfixed: true
           skip-setup-trivy: true
           cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
         env:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
@@ -982,14 +1015,15 @@ jobs:
           ignore-unfixed: true
           skip-setup-trivy: true
           cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
         env:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
 
       # Which scanner and database gave the verdict, for the test-result predicate.
-      # Best effort and never a gate: the actions above own the scan; the binary
-      # setup-trivy put on PATH and the action's default cache dir are where this
-      # looks, and a miss only leaves the two fields out of the predicate.
+      # Best effort and never a gate: this uses the pinned binary on PATH and
+      # the same shared DB cache as the scans. A miss only leaves the two fields
+      # out of the predicate.
       - name: Record the Trivy version
         run: |
           trivy --version --format json --cache-dir "$GITHUB_WORKSPACE/.cache/trivy" > "$RUNNER_TEMP/trivy-info.json" \
@@ -1106,16 +1140,8 @@ jobs:
       - name: Derive Docker Hub image from matrix.json
         run: echo "DOCKERHUB_IMAGE=docker.io/$(jq -r .image matrix.json)" >> "$GITHUB_ENV"
 
-      # The BuildKit image is pulled by this daemon: mirror.gcr.io first, Docker
-      # Hub when the mirror misses a blob.
-      - name: Route Docker Hub pulls through mirror.gcr.io
-        run: ./ci/hub-mirror.sh
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
-
+      # imagetools talks directly to GHCR without a BuildKit builder. The
+      # version check below also pulls only from GHCR, so no Hub mirror is needed.
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
