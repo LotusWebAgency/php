@@ -231,6 +231,34 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  # ----------------------------------------------------------------- sources
+  # Every sha-pinned source tarball the build fetches (php-src, PECL, vendored
+  # libraries, the PGO corpus apps; ci/sources.sh list), downloaded once per lock
+  # change into an actions cache instead of from php.net, PECL, GitHub and
+  # SourceForge in every build leg. The legs restore it and seed their builder's
+  # php-src-cache mount before the first bake. A miss anywhere only means that
+  # leg fetches the file itself: deps/fetch-verified.sh re-checks every sha256 it
+  # reads from the mount, and a mount's content is not part of any cache key, so
+  # the cache can never change what is built.
+  sources:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache the pinned sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/php-src-cache
+          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock') }}
+          restore-keys: php-src-
+
+      - name: Fetch whatever the cache lacks
+        run: ./ci/sources.sh fetch "$RUNNER_TEMP/php-src-cache"
+
   # ----------------------------------------------------------- verify-matrix
   # What the verify job below builds, and on which architectures. A pull
   # request gets the bake `pr` subset (php-7_0-fpm, php-8_2-fpm, php-8_5-fpm,
@@ -289,7 +317,7 @@ jobs:
   # on develop must only fail the legs that mount it, not skip every other leg
   # (same reasoning as `build`'s condition).
   verify:
-    needs: [preflight, verify-matrix, corpus-merge, trivy-db]
+    needs: [preflight, verify-matrix, corpus-merge, trivy-db, sources]
     if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.verify-matrix.result == 'success' && needs.trivy-db.result == 'success' }}
     name: verify ${{ matrix.target.name }} ${{ matrix.arch.name }}
     strategy:
@@ -366,6 +394,21 @@ jobs:
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io", "public.ecr.aws/docker"]
+
+      # The run's source tarballs (see the sources job), into this builder's
+      # php-src-cache mount. Fetch covers a cache miss; neither step can change
+      # what is built.
+      - name: Restore the pinned sources
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/php-src-cache
+          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock') }}
+          restore-keys: php-src-
+
+      - name: Seed the builder's source cache
+        run: |
+          ./ci/sources.sh fetch "$RUNNER_TEMP/php-src-cache"
+          ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
 
       - name: Log in to GHCR (corpus and cache pull, dev image push)
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -623,7 +666,7 @@ jobs:
   # that would be 7 bootstrap PHP compiles plus 7 application corpus builds on a
   # single runner, past any sensible timeout whenever a shared input changes.
   corpus:
-    needs: [preflight, corpus-matrix]
+    needs: [preflight, corpus-matrix, sources]
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     name: corpus ${{ matrix.tier.floor }} ${{ matrix.arch.name }}
     strategy:
@@ -707,6 +750,23 @@ jobs:
               echo "note: $TIER_BUILDER not available yet, build-corpus.sh will bootstrap"
             fi
           fi
+
+      # The run's source tarballs (see the sources job), into this builder's
+      # php-src-cache mount. Fetch covers a cache miss; neither step can change
+      # what is built.
+      - name: Restore the pinned sources
+        if: steps.reuse.outputs.reused != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/php-src-cache
+          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock') }}
+          restore-keys: php-src-
+
+      - name: Seed the builder's source cache
+        if: steps.reuse.outputs.reused != 'true'
+        run: |
+          ./ci/sources.sh fetch "$RUNNER_TEMP/php-src-cache"
+          ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
 
       - name: Build this tier's corpus (skipped if reused)
         if: steps.reuse.outputs.reused != 'true'
@@ -795,7 +855,7 @@ jobs:
   # Hub credentials here (no `release` environment, no login): every Docker Hub
   # base image is read anonymously, through the mirrors.
   build:
-    needs: [corpus-merge, release-matrix, trivy-db]
+    needs: [corpus-merge, release-matrix, trivy-db, sources]
     if: ${{ !cancelled() && needs.trivy-db.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     strategy:
       fail-fast: false
@@ -879,6 +939,21 @@ jobs:
           buildkitd-config-inline: |
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io", "public.ecr.aws/docker"]
+
+      # The run's source tarballs (see the sources job), into this builder's
+      # php-src-cache mount. Fetch covers a cache miss; neither step can change
+      # what is built.
+      - name: Restore the pinned sources
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/php-src-cache
+          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock') }}
+          restore-keys: php-src-
+
+      - name: Seed the builder's source cache
+        run: |
+          ./ci/sources.sh fetch "$RUNNER_TEMP/php-src-cache"
+          ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
 
       - name: Log in to GHCR
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
