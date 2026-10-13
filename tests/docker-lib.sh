@@ -15,4 +15,21 @@
 # Anything that publishes a port or talks to another container (the TLS block
 # in smoke.sh, test-snuffleupagus.sh) keeps plain `docker run`.
 DRUN_FLAGS=(--pull never --network none)
-drun() { docker run "${DRUN_FLAGS[@]}" "$@"; }
+#
+# The docker client copies a container's stdout and stderr concurrently, so a
+# caller's `out=$(drun ... 2>&1)` can splice a stderr warning into the middle of
+# a stdout line and break the exact-line greps the suites rely on. When both
+# streams go to the same pipe or file, drun holds stderr back and appends it
+# after the container exits.
+drun() {
+  if [ -t 1 ] || [ ! /dev/stdout -ef /dev/stderr ]; then
+    docker run "${DRUN_FLAGS[@]}" "$@"
+    return
+  fi
+  local errf rc=0
+  errf=$(mktemp)
+  docker run "${DRUN_FLAGS[@]}" "$@" 2>"$errf" || rc=$?
+  cat "$errf" >&2
+  rm -f "$errf"
+  return "$rc"
+}
