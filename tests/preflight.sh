@@ -21,7 +21,7 @@ ok()      { echo "ok: $*"; }
 fail()    { echo "FAIL: $*" >&2; FAILED+=("$*"); }
 
 # ---------------------------------------------------------- 1. matrix drift
-section "1/8 matrix.gen.hcl drift (scripts/gen_matrix.py --check)"
+section "1/9 matrix.gen.hcl drift (scripts/gen_matrix.py --check)"
 if python3 scripts/gen_matrix.py --check; then
   ok "matrix.gen.hcl matches matrix.json"
 else
@@ -29,7 +29,7 @@ else
 fi
 
 # -------------------------------------------------------------- 2. pgo tiers
-section "2/8 PGO corpus tiers (scripts/pgo_tiers.py check)"
+section "2/9 PGO corpus tiers (scripts/pgo_tiers.py check)"
 if python3 scripts/pgo_tiers.py check; then
   ok "every pgo=true version has a tier, every opt-out has a reason"
 else
@@ -37,7 +37,7 @@ else
 fi
 
 # --------------------------------------------------- 3. bake --print + COMPILER
-section "3/8 bake --print for every target and the pr subset (both platforms), COMPILER cross-check"
+section "3/9 bake --print for every target and the pr subset (both platforms), COMPILER cross-check"
 bake_print() {  # bake_print <group> -> the rendered JSON, or empty + FAIL on error
   local out
   if ! out=$(docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$1" --print 2>&1); then
@@ -132,7 +132,7 @@ print(f"pr legs: {len(legs)}, targets they bake: {len(ci)}, bake pr group: {len(
 fi
 
 # ------------------------------------------------------------- 4. shellcheck
-section "4/8 shellcheck on every shell file"
+section "4/9 shellcheck on every shell file"
 command -v shellcheck >/dev/null || fail "shellcheck not found on this host"
 if command -v shellcheck >/dev/null; then
   # rootfs's runtime scripts have no .sh extension (they ship as bare
@@ -168,7 +168,7 @@ if command -v shellcheck >/dev/null; then
 fi
 
 # ----------------------------------------------------- 5. fetch-verified.sh
-section "5/8 deps/fetch-verified.sh (tests/test-fetch-verified.sh)"
+section "5/9 deps/fetch-verified.sh (tests/test-fetch-verified.sh)"
 if bash "$HERE/test-fetch-verified.sh"; then
   ok "test-fetch-verified.sh"
 else
@@ -176,7 +176,7 @@ else
 fi
 
 # --------------------------------------------- 6. python unit/lock-format tests
-section "6/8 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex, retry helper; tests/apps/: app cell planner)"
+section "6/9 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex, retry helper; tests/apps/: app cell planner)"
 # Covers, among others, the lock-file format checks:
 # scripts/test_versions_lock.py (deps/versions.lock), scripts/test_release_keys.py
 # (php/release-keys.asc), scripts/test_fetch_verified_sync.py (the two
@@ -211,7 +211,7 @@ else
 fi
 
 # ----------------------------------------------- 7. matrix <-> label consistency
-section "7/8 matrix.json <-> local image com.lotuswebagency.compiler labels (report-only for missing)"
+section "7/9 matrix.json <-> local image com.lotuswebagency.compiler labels (report-only for missing)"
 # Whatever fpm images already exist locally (from an earlier build-all.sh run,
 # or a one-off bake) get cross-checked against matrix.json right now, the same
 # comparison tests/smoke.sh makes per image at test time -- catching a stale
@@ -248,7 +248,7 @@ fi
 rm -f "$label_check_out"
 
 # --------------------------------- 8. build-all.sh vs bake --print target lists
-section "8/8 tests/build-all.sh's target list vs bake --print's target list"
+section "8/9 tests/build-all.sh's target list vs bake --print's target list"
 # tests/build-all.sh enumerates every image it builds from
 # scripts/gen_matrix.py --github targets -- the same source matrix.gen.hcl's
 # TARGETS variable is rendered from -- rather than naming a flavor or a count
@@ -285,6 +285,20 @@ print(f"gen_matrix targets: {len(gen_names)}, bake --print targets: {len(bake_na
 else
   fail "no bake --print JSON available (section 3) to compare build-all.sh's target list against"
 fi
+
+# ------------------------------------------------------------- 9. runners
+section "9/9 no ubuntu-slim runners in .github/workflows"
+# ubuntu-slim runs jobs in a 1-vCPU container: a compile or test job there is
+# several times slower and a 180-minute build leg times out. Every runs-on and
+# matrix runner label must name a full VM image.
+slim_rc=0
+slim_hits="$(grep -rnE 'ubuntu-slim' .github/workflows)" || slim_rc=$?
+case "$slim_rc" in
+  0) echo "$slim_hits"
+     fail "ubuntu-slim runner label in .github/workflows (1 vCPU); use ubuntu-26.04 / ubuntu-26.04-arm" ;;
+  1) ok "no ubuntu-slim runner labels" ;;
+  *) fail "could not scan .github/workflows for runner labels (grep exit $slim_rc)" ;;
+esac
 
 # ------------------------------------------------------------------ summary
 echo
