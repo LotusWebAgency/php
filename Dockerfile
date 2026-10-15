@@ -539,7 +539,12 @@ COPY --from=php-build /tmp/runtime-packages.txt /tmp/runtime-packages.txt
 # upgrade: BASE_IMAGE is digest-pinned, so without it a Debian security fix to a
 # package the base already ships (e.g. libpcre2-8-0 on the legacy era) waits for
 # the next digest bump instead of landing in the weekly rebuild.
+# DEBIAN_ARCHIVE_STATE (CI: a hash of the trixie, trixie-updates and
+# trixie-security Release dates) re-runs this layer the day Debian publishes a
+# fix, instead of replaying the week-keyed cache until the next ISO week.
+ARG DEBIAN_ARCHIVE_STATE=""
 RUN set -eux; \
+    echo "debian archive state: ${DEBIAN_ARCHIVE_STATE:-unset}"; \
     apt-get update; \
     apt-get upgrade -y; \
     apt-get install -y --no-install-recommends \

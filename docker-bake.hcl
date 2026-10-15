@@ -37,12 +37,16 @@ variable "ARCH" { default = "" }
 # main writes a cache ref.
 variable "CACHE_PUSH" { default = true }
 variable "CACHE_WEEK" { default = "" }
+# Busts only the runtime apt layer when Debian's archive changes (see the
+# Dockerfile's runtime-base stage); ci/debian-archive-state.sh computes it.
+variable "DEBIAN_ARCHIVE_STATE" { default = "" }
 
 target "_common" {
   dockerfile = "Dockerfile"
   context    = "."
   args = {
-    BASE_IMAGE = BASE_IMAGE
+    BASE_IMAGE           = BASE_IMAGE
+    DEBIAN_ARCHIVE_STATE = DEBIAN_ARCHIVE_STATE
   }
   labels = {
     "org.opencontainers.image.source"        = "https://github.com/LotusWebAgency/php"

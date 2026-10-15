@@ -439,6 +439,7 @@ jobs:
           {
             echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)"
             echo "CACHE_WEEK=$(date -u +%G-W%V)"
+            echo "DEBIAN_ARCHIVE_STATE=$(./ci/debian-archive-state.sh)"
           } >> "$GITHUB_ENV"
 
       # A pull request that changes any build input (a Renovate base-digest bump,
@@ -993,6 +994,7 @@ jobs:
             echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)"
             echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "CACHE_WEEK=$(date -u +%G-W%V)"
+            echo "DEBIAN_ARCHIVE_STATE=$(./ci/debian-archive-state.sh)"
           } >> "$GITHUB_ENV"
 
       - name: Pull and verify this target's hash-pinned PGO corpus
