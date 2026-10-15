@@ -729,13 +729,13 @@ CMD ["php", "-a"]
 # Node 24 LTS for cli-builder, copied from the official image (trixie ships the
 # unmaintained Node 20). Pinned by multi-arch index digest so amd64 and arm64 both
 # resolve it and a retag cannot change what ships.
-FROM node:24-trixie-slim@sha256:173f125896c3b47ddf056734c7ea789d04595a6a08769a8f78e0df642781fb66 AS node24
+FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315 AS node24
 
 # Node, npm and semantic-release as one tree for cli-builder, finished here so no
 # intermediate npm lands in a shipped layer (upgrading npm in a later RUN left the
 # bundled 11.19 copy, ~20MB, underneath).
 #
-# npm moves past the bundled 11.19.0 to 11.21.0, which ships the fixed tar and
+# npm moves past the bundled 11.19.1 to 11.21.0, which ships the fixed tar and
 # ip-address; its bundled brace-expansion and undici are still behind their fixes
 # in every npm release (see .trivyignore). /out is built by hand because
 # /usr/local/bin also holds the node image's docker-entrypoint.sh and yarn.
