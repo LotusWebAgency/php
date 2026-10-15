@@ -672,7 +672,7 @@ stripos($last, "Invalid object identifier") === false || $fail("SNMPv2-MIB::sysD
 $last = "";
 snmpget("127.0.0.1:1", "public", "NO-SUCH-MIB::nothing.0", 100000, 0);
 stripos($last, "Invalid object identifier") !== false || $fail("control: an unknown MIB name did not fail on the name ($last), so the resolution check above proves nothing");
-echo "snmp-ok";
+echo "snmp-ok\n";
 PHP
 )
   [ "$snmp_out" = "snmp-ok" ] || { echo "FAIL: ext-snmp functional check printed: $snmp_out"; exit 1; }

@@ -19,17 +19,24 @@ DRUN_FLAGS=(--pull never --network none)
 # The docker client copies a container's stdout and stderr concurrently, so a
 # caller's `out=$(drun ... 2>&1)` can splice a stderr warning into the middle of
 # a stdout line and break the exact-line greps the suites rely on. When both
-# streams go to the same pipe or file, drun holds stderr back and appends it
-# after the container exits.
+# streams go to the same pipe or file, drun holds both back and writes stdout,
+# then stderr, after the container exits -- starting stderr on a new line, so a
+# stdout without a trailing newline (`echo "ok";` in PHP) cannot glue the first
+# stderr line onto its last line.
 drun() {
   if [ -t 1 ] || [ ! /dev/stdout -ef /dev/stderr ]; then
     docker run "${DRUN_FLAGS[@]}" "$@"
     return
   fi
-  local errf rc=0
+  local outf errf rc=0
+  outf=$(mktemp)
   errf=$(mktemp)
-  docker run "${DRUN_FLAGS[@]}" "$@" 2>"$errf" || rc=$?
+  docker run "${DRUN_FLAGS[@]}" "$@" >"$outf" 2>"$errf" || rc=$?
+  cat "$outf"
+  if [ -s "$outf" ] && [ -s "$errf" ] && [ "$(tail -c1 "$outf" | od -An -c | tr -d ' ')" != '\n' ]; then
+    echo
+  fi
   cat "$errf" >&2
-  rm -f "$errf"
+  rm -f "$outf" "$errf"
   return "$rc"
 }

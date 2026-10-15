@@ -74,6 +74,9 @@ registry+='|tls handshake timeout|connection reset by peer|i/o timeout|unexpecte
 registry+='|temporary failure in name resolution|client\.timeout exceeded|net/http: request canceled'
 # GHCR may reject a just-accepted layer; pushing again completes it.
 registry+='|(^|: )unknown blob$'
+# Docker Hub's CDN now and then serves an index whose attestation manifest is
+# not there yet; the same digest pulls on the next attempt.
+registry+='|httpreadseeker: failed open: could not fetch content descriptor'
 
 net='temporary failure in name resolution|temporary failure resolving|could not resolve (host|proxy)'
 net+='|lookup [^ ]+( on [^ ]+)?: (no such host|server misbehaving|i/o timeout)|getaddrinfo .* failed'
