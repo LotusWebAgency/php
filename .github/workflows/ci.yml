@@ -120,7 +120,7 @@ env:
   BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.34.0@sha256:b059f8d7226d0b326bc871af489a5dddf65e36af4d20d14251b072974d9ee87c
   # The Trivy release the prepare steps install; the scan steps skip the
   # action's own setup and run it.
-  SETUP_TRIVY_VERSION: v0.75.0
+  SETUP_TRIVY_VERSION: v0.76.0
   # The Cosign release cosign-installer fetches (its own default is older).
   COSIGN_VERSION: v3.1.3
 
@@ -299,10 +299,12 @@ jobs:
           amd64='{"name":"amd64","runner":"ubuntu-26.04","platform":"linux/amd64"}'
           arm64='{"name":"arm64","runner":"ubuntu-26.04-arm","platform":"linux/arm64"}'
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            echo "legs=$(python3 scripts/gen_matrix.py --github pr | jq -c '.include')" >> "$GITHUB_OUTPUT"
+            legs="$(python3 scripts/gen_matrix.py --github pr | jq -ce '.include | select(length > 0)')"
+            echo "legs=$legs" >> "$GITHUB_OUTPUT"
             echo "arches=[$amd64]" >> "$GITHUB_OUTPUT"
           else
-            echo "legs=$(python3 scripts/gen_matrix.py --github build | jq -c '.include')" >> "$GITHUB_OUTPUT"
+            legs="$(python3 scripts/gen_matrix.py --github build | jq -ce '.include | select(length > 0)')"
+            echo "legs=$legs" >> "$GITHUB_OUTPUT"
             echo "arches=[$amd64,$arm64]" >> "$GITHUB_OUTPUT"
           fi
 
@@ -422,7 +424,7 @@ jobs:
       - name: Seed the builder's source cache
         run: |
           if [ -n "$(ls -A "$RUNNER_TEMP/php-src-cache" 2>/dev/null)" ]; then
-            ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
+            ./ci/retry.sh ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
           else
             echo "::warning::no source cache restored; the build fetches its sources itself"
           fi
@@ -527,6 +529,8 @@ jobs:
           cache: false
           cache-dir: ${{ github.workspace }}/.cache/trivy
         env:
+          # The image just loaded, never a same-named tag on Docker Hub.
+          TRIVY_IMAGE_SRC: docker
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
 
@@ -543,6 +547,8 @@ jobs:
           cache: false
           cache-dir: ${{ github.workspace }}/.cache/trivy
         env:
+          # The image just loaded, never a same-named tag on Docker Hub.
+          TRIVY_IMAGE_SRC: docker
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
 
@@ -645,8 +651,11 @@ jobs:
 
       - id: matrix
         run: |
-          echo "targets=$(python3 scripts/gen_matrix.py --github targets | jq -c '.include')" >> "$GITHUB_OUTPUT"
-          echo "legs=$(python3 scripts/gen_matrix.py --github build | jq -c '.include')" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          targets="$(python3 scripts/gen_matrix.py --github targets | jq -ce '.include | select(length > 0)')"
+          legs="$(python3 scripts/gen_matrix.py --github build | jq -ce '.include | select(length > 0)')"
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+          echo "legs=$legs" >> "$GITHUB_OUTPUT"
 
   # ------------------------------------------------------------ corpus-matrix
   # The 7 corpus tiers (scripts/pgo_tiers.py list) as a matrix for the corpus and
@@ -665,9 +674,10 @@ jobs:
 
       - id: matrix
         run: |
-          tiers="$(python3 scripts/pgo_tiers.py list | jq -R -s -c '
+          set -euo pipefail
+          tiers="$(python3 scripts/pgo_tiers.py list | jq -R -s -ce '
             split("\n") | map(select(length > 0) | split("\t")) |
-            map({floor: .[0], builder: .[2], tag: .[3]})
+            map({floor: .[0], builder: .[2], tag: .[3]}) | select(length > 0)
           ')"
           echo "tiers=$tiers" >> "$GITHUB_OUTPUT"
 
@@ -747,7 +757,7 @@ jobs:
         run: |
           set -euo pipefail
           per_arch_ref="${TIER_TAG}-${INPUTS_HASH}-${ARCH_NAME}"
-          if docker manifest inspect "$per_arch_ref" >/dev/null 2>&1; then
+          if ./ci/retry.sh docker manifest inspect "$per_arch_ref" >/dev/null 2>&1; then
             echo "ok: tier $TIER/$ARCH_NAME unchanged -- $per_arch_ref already in GHCR"
             echo "reused=true" >> "$GITHUB_OUTPUT"
           else
@@ -785,7 +795,7 @@ jobs:
         if: steps.reuse.outputs.reused != 'true'
         run: |
           if [ -n "$(ls -A "$RUNNER_TEMP/php-src-cache" 2>/dev/null)" ]; then
-            ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
+            ./ci/retry.sh ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
           else
             echo "::warning::no source cache restored; the build fetches its sources itself"
           fi
@@ -851,12 +861,12 @@ jobs:
           amd64_ref="${hash_tag}-amd64"
           arm64_ref="${hash_tag}-arm64"
           for ref in "$amd64_ref" "$arm64_ref"; do
-            docker manifest inspect "$ref" >/dev/null 2>&1 || {
+            ./ci/retry.sh docker manifest inspect "$ref" >/dev/null 2>&1 || {
               echo "FAIL: missing $ref -- its corpus leg did not succeed" >&2
               exit 1
             }
           done
-          if docker manifest inspect "$hash_tag" >/dev/null 2>&1; then
+          if ./ci/retry.sh docker manifest inspect "$hash_tag" >/dev/null 2>&1; then
             echo "ok: $hash_tag already published, nothing to assemble"
           else
             docker buildx imagetools create -t "$TIER_TAG" -t "$hash_tag" "$amd64_ref" "$arm64_ref"
@@ -877,8 +887,8 @@ jobs:
   # Hub credentials here (no `release` environment, no login): every Docker Hub
   # base image is read anonymously, through the mirrors.
   build:
-    needs: [corpus-merge, release-matrix, trivy-db, sources]
-    if: ${{ !cancelled() && needs.trivy-db.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    needs: [preflight, corpus-merge, release-matrix, trivy-db, sources]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.trivy-db.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     strategy:
       fail-fast: false
       matrix:
@@ -976,7 +986,7 @@ jobs:
       - name: Seed the builder's source cache
         run: |
           if [ -n "$(ls -A "$RUNNER_TEMP/php-src-cache" 2>/dev/null)" ]; then
-            ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
+            ./ci/retry.sh ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
           else
             echo "::warning::no source cache restored; the build fetches its sources itself"
           fi
@@ -1150,7 +1160,7 @@ jobs:
               --repository "$DOCKERHUB_IMAGE" --php "$TARGET_PHP" --flavor "$2" --uarch "$TARGET_UARCH" \
               --arch "$ARCH_NAME" --image-digest "$platform_digest" --inputs-hash "$INPUTS_HASH" \
               --git-sha "$GITHUB_SHA" --git-ref "$GITHUB_REF" \
-              --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" \
+              --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
               --smoke-log "$3" --trivy-outcome "$4" --trivy-severity "$TRIVY_SEVERITY" \
               --trivy-info "$RUNNER_TEMP/trivy-info.json" --out "$5"
           }
@@ -1433,7 +1443,7 @@ jobs:
   # still well inside the run's time.
   promote:
     needs: [merge, release-matrix]
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && needs.merge.result != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     name: promote ${{ matrix.target.name }}
     environment: release
     strategy:

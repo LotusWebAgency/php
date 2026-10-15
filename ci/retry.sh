@@ -107,6 +107,10 @@ while :; do
   if tail -n 20 "$errfile" | grep -Eiq "$deny"; then
     exit "$rc"
   fi
+  # Transient patterns read a wider tail than the deny check, but still only the
+  # tail: an early "connection refused" (a PGO server-start wait, say) must not
+  # turn a later deterministic build failure into a retry.
+  window="$(tail -n 40 "$errfile")"
   matched_kind=''
   for kind in "${kinds[@]}"; do
     [ "$kind" != composer ] || kind=http
@@ -117,12 +121,12 @@ while :; do
       git) transient="$git" ;;
       net) continue ;;
     esac
-    if grep -Eiq "$transient" "$errfile"; then
+    if grep -Eiq "$transient" <<<"$window"; then
       matched_kind="$kind"
       break
     fi
   done
-  if [ -z "$matched_kind" ] && grep -Eiq "$net" "$errfile"; then
+  if [ -z "$matched_kind" ] && grep -Eiq "$net" <<<"$window"; then
     matched_kind=net
   fi
   [ -n "$matched_kind" ] || exit "$rc"
