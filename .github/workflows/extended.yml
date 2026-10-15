@@ -1,9 +1,10 @@
 # The tests ci.yml does not run, on native amd64 and arm64 runners, against the
 # images develop CI already tested and pushed to GHCR
 # (ghcr.io/lotuswebagency/php/dev, see ci.yml and README.md): the -v3
-# instruction-set check, the ext-builder end to end, the PGO corpus-tier replay,
-# the Laravel/WordPress/PrestaShop suites and, on request, the benchmark. It is
-# the only coverage these suites get on arm64 (arm64 under QEMU crashes in
+# instruction-set check, the PGO corpus-tier replay, the
+# Laravel/WordPress/PrestaShop suites and, on request, the benchmark. It also
+# repeats the ext-builder end to end against the pushed images. It is the only
+# coverage these suites get on arm64 (arm64 under QEMU crashes in
 # opcache, so they cannot be run on an amd64 workstation).
 #
 # A workflow of its own, never a job of ci.yml: it must not gate develop, and a

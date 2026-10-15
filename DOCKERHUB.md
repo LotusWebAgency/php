@@ -60,7 +60,7 @@ not Graviton2/3, Ampere Altra or Apple silicon. Use the baseline tag on a Mac.
 |---|---|
 | `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` that needs no web server. |
 | `cli` | `php -a` by default. Scripts, cron jobs, queue workers. |
-| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, the MariaDB client, Node.js 24 LTS with npm and corepack, semantic-release and Composer. No compiler. For build stages. |
+| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, `mariadb-dump`, Node.js 24 LTS with npm and corepack, semantic-release and Composer. No compiler. For build stages. |
 | `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, libc6-dev and the PHP headers with `phpize`. Runs as root. For build stages. |
 
 All images run `tini` as PID 1. All but `ext-builder` run as `www-data` (UID 33).

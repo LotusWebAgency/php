@@ -43,7 +43,7 @@ interpreter in them gets no upstream fixes. See [SUPPORT.md](SUPPORT.md).
 
 | Tag shape | Example | Meaning |
 |---|---|---|
-| `{version}-{flavor}` | `8.5-fpm` | Every baseline image. |
+| `{version}-{flavor}` | `8.5-fpm` | Every published image. |
 | `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64` / `armv8-a` baseline. 8.4 and 8.5 only, not for `ext-builder`. |
 | `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image (`default_version` in `matrix.json`, currently 8.5). |
 | `{release}-{flavor}[-v3]` | `8.5.11-fpm` | Full patch version. Read from the built image (`PHP_VERSION`) after tests and the Trivy gate, so a tag cannot name a version the image does not contain. |
@@ -64,7 +64,7 @@ reproducible builds: `FROM lotuswebagency/php:8.4-fpm@sha256:...`.
 |---|---|
 | `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` (`php-fpm-healthcheck`) that needs no web server. |
 | `cli` | `php -a` by default. Scripts, cron jobs, queue workers. |
-| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, the MariaDB client, Node.js 24 LTS with npm and corepack, semantic-release and [Composer](https://getcomposer.org/) (installed with signature verification). No compiler. For build stages. |
+| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, `mariadb-dump`, Node.js 24 LTS with npm and corepack, semantic-release and [Composer](https://getcomposer.org/) (installed with signature verification). No compiler. For build stages. |
 | `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, libc6-dev and the PHP headers with `phpize` / `php-config`. Runs as root, no Composer, no Node.js. For build stages. |
 
 All images use `tini` as PID 1. All but `ext-builder` run as `www-data` (UID 33).
@@ -273,7 +273,7 @@ ENV PHP_EXT_ENABLE=myext
 not loaded by default. Four rulesets are baked into `/usr/local/etc/php/snuffleupagus/`: `default`,
 `wordpress`, `prestashop` and `laravel`. Enable one with `PHP_SNUFFLEUPAGUS=prestashop`. Snuffleupagus is not available on PHP 7.0 and 7.1. Rulesets are
 for serving; build and deploy (Composer included) with `cli-builder` and no ruleset. No ruleset enables
-`readonly_exec`; the PrestaShop one disables it explicitly because PrestaShop rewrites its own cache
+`readonly_exec`; the PrestaShop and Laravel ones disable it explicitly because both frameworks rewrite their own cache
 files. `sp.xxe_protection`
 is off in all of them: it does not carry into requests, and on PHP 7 it disables the application's own
 `libxml_disable_entity_loader(true)`. libxml2 2.9 and later loads external entities only if the
@@ -315,13 +315,13 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
 
   | Tier floor | Serves | PrestaShop | Laravel skeleton | Symfony | WordPress | Drupal |
   |---|---|---|---|---|---|---|
-  | 8.5 | 8.5 | 9.2.0 | 12.12.2 | 7 | 7.0.6 | 11.4.8 |
-  | 8.4 | 8.4 | 8.2.8 | 12.12.2 | 7 | 7.0.6 | 11.4.8 |
-  | 8.2 | 8.2, 8.3 | 8.2.8 | 12.12.2 | 7 | 7.0.6 | none |
-  | 8.1 | 8.1 | 8.2.8 | 10.3.3 | 6.4 | 7.0.6 | none |
-  | 7.2 | 7.2-8.0 | 8.2.8 | 6.20.1 | 5.4 | 6.9.9 | none |
-  | 7.1 | 7.1 | 1.7.8.11 | 5.8.35 | 4.4 | 6.5.12 | none |
-  | 7.0 | 7.0 | 1.6.1.24 | 5.5.28 | 3.4 | 6.5.12 | none |
+  | 8.5 | 8.5 | 9.2.0 | 12.12.2 | 7 | 7.1.3 | 11.4.8 |
+  | 8.4 | 8.4 | 8.2.8 | 12.12.2 | 7 | 7.1.3 | 11.4.8 |
+  | 8.2 | 8.2, 8.3 | 8.2.8 | 12.12.2 | 7 | 7.1.3 | none |
+  | 8.1 | 8.1 | 8.2.8 | 10.3.3 | 6.4 | 7.1.3 | none |
+  | 7.2 | 7.2-8.0 | 8.2.8 | 6.20.1 | 5.4 | 6.9.10 | none |
+  | 7.1 | 7.1 | 1.7.8.11 | 5.8.35 | 4.4 | 6.5.13 | none |
+  | 7.0 | 7.0 | 1.6.1.24 | 5.5.28 | 3.4 | 6.5.13 | none |
 
 - **Pinned sources.** Every fetched tarball is verified by sha256 (`deps/fetch-verified.sh`). PHP
   releases are also GPG-verified against php.net's release keys (`php/release-keys.asc`); PECL
@@ -427,9 +427,9 @@ nothing. `tests/build-all.sh` sets the label; for a manual `bake`, set `INPUTS_H
 Snuffleupagus and ELF-hardening tests. Application suites (Laravel, WordPress, PrestaShop) are in
 [tests/apps/](tests/apps/README.md). Python unit tests live in `scripts/`, `ci/` and `tests/apps/`.
 
-`tests/extended.sh` runs the suites the main gate skips (`-v3` check, ext-builder, corpus-tier replay,
-application suites, benchmark) against images a `develop` run pushed to GHCR, instead of rebuilding
-all 50 targets. Log in to `ghcr.io` with a token that has `read:packages`, then:
+`tests/extended.sh` runs the suites the main gate does not (`-v3` check, corpus-tier replay,
+application suites, and on request the benchmark) against images a `develop` run pushed to GHCR,
+instead of rebuilding all 50 targets. Log in to `ghcr.io` with a token that has `read:packages`, then:
 
 ```sh
 tests/extended.sh pull && tests/extended.sh all

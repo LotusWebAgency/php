@@ -3,7 +3,7 @@
 Real applications, populated with data, run against every image in the
 matrix: **Laravel**, **WordPress** (with WooCommerce where it runs) and
 **PrestaShop**. The point is what `tests/smoke.sh` can't show: a PHP compiled
-from source with PGO, LTO and a hardened toolchain still runs the software
+from source with PGO and a hardened toolchain still runs the software
 people deploy on it, on the data they already have.
 
 ```sh
@@ -35,10 +35,20 @@ people deploy on it, on the data they already have.
 ## The cells
 
 ```
-# app        set    php        flags                 db
-laravel      13     8.3-8.5    builder,v3,hardened   mariadb
-wordpress    6.9    7.2,8.5    hardened              mariadb
-prestashop   8.2    7.2,8.1-8.4    builder,hardened      mariadb
+# app        set    php           flags                 db
+laravel      9      8.0,8.2       hardened              mariadb
+laravel      10     8.1,8.3       hardened              mariadb
+laravel      12     8.2,8.5       hardened              mariadb
+laravel      13     8.3-8.5       builder,v3,hardened   mariadb
+wordpress    4.9    7.0,7.2       -                     mariadb
+wordpress    5.9    7.0,8.1       -                     mariadb
+wordpress    6.9    7.2,8.5       hardened              mariadb
+wordpress    7.1    7.4-8.5       builder,v3,hardened   mariadb
+prestashop   1.6    7.0-7.1       hardened              mariadb
+prestashop   1.7    7.1-7.3       hardened              mariadb
+prestashop   8.0    7.4,8.1       hardened              mariadb
+prestashop   8.2    7.2,8.1-8.4   builder,hardened      mariadb
+prestashop   9.2    8.1-8.5       builder,v3,hardened   mariadb
 ```
 
 A **cell** is one application release on one image: (app, set, PHP version,
