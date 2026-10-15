@@ -1096,7 +1096,7 @@ TLS_URL="${BUILD_CHECK_TLS_URL:-https://www.php.net/}"
 #                     curl_errno 60 or 77, or a stream error naming "certificate
 #                     verify failed" or the unloadable cafile
 #   FAIL:<reason>     any other error
-#   TRANSIENT:<why>   DNS, connect, timeout, reset or TLS-handshake errors that
+#   TRANSIENT:<why>   DNS, connect, unreachable, timeout, reset or TLS-handshake errors that
 #                     persisted through every attempt
 # A transient error is retried with a short backoff, so one flaky resolver
 # lookup does not fail an image. The negative control passes only on VERIFY: a
@@ -1105,7 +1105,7 @@ TLS_URL="${BUILD_CHECK_TLS_URL:-https://www.php.net/}"
 TLS_PHP='
 $url = getenv("TLS_URL"); $via = getenv("TLS_VIA"); $neg = getenv("TLS_EXPECT") === "verify-fail";
 $verify_re = "/certificate verify failed|failed loading cafile/i";
-$transient_re = "/getaddrinfo|timed out|refused|reset/i";
+$transient_re = "/getaddrinfo|timed out|refused|reset|unreachable|no route to host/i";
 $reason = "no attempt made";
 for ($attempt = 1; $attempt <= 4; $attempt++) {
     if ($attempt > 1) { sleep(2 * ($attempt - 1)); }
