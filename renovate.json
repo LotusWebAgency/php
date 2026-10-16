@@ -15,15 +15,18 @@
   ],
   "customManagers": [
     {
-      "description": "The base image pinned in matrix.json and in matrix.gen.hcl generated from it; both match the same dependency, so one PR updates both and the drift check stays green. docker-bake.hcl overrides the Dockerfile's own ARG BASE_IMAGE with it",
+      "description": "The base image pinned in matrix.json, in matrix.gen.hcl generated from it and in the ARG BASE_IMAGE defaults of the Dockerfile and the bootstrap-corpus Dockerfile; all match the same dependency, so one PR updates every occurrence and tests/preflight.sh's all-digests-identical check stays green. docker-bake.hcl overrides the ARG defaults with matrix.json's, but ci/sources.sh pulls the Dockerfile's",
       "customType": "regex",
       "managerFilePatterns": [
         "/^matrix\\.json$/",
-        "/^matrix\\.gen\\.hcl$/"
+        "/^matrix\\.gen\\.hcl$/",
+        "/^Dockerfile$/",
+        "/^php/pgo/Dockerfile\\.bootstrap-corpus$/"
       ],
       "matchStrings": [
         "\"base\": \"(?<depName>[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[a-f0-9]+)\"",
-        "variable \"BASE_IMAGE\" \\{ default = \"(?<depName>[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[a-f0-9]+)\" \\}"
+        "variable \"BASE_IMAGE\" \\{ default = \"(?<depName>[^:\"]+):(?<currentValue>[^@\"]+)@(?<currentDigest>sha256:[a-f0-9]+)\" \\}",
+        "ARG BASE_IMAGE=(?<depName>[^:\\s]+):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[a-f0-9]+)"
       ],
       "datasourceTemplate": "docker",
       "versioningTemplate": "loose"
@@ -79,7 +82,7 @@
       "automerge": false
     },
     {
-      "description": "matrix.json is the single source of truth for the wolfi base: docker-bake.hcl always overrides the ARG BASE_IMAGE default of the Dockerfile and of php/pgo/Dockerfile.bootstrap-corpus (both are built only through bake), so Renovate must not pin or bump that default a second time",
+      "description": "The built-in dockerfile manager must not also pin or bump the wolfi base ARG default of the Dockerfile and of php/pgo/Dockerfile.bootstrap-corpus: the custom regex manager above already updates them together with matrix.json",
       "matchManagers": [
         "dockerfile"
       ],
@@ -93,13 +96,15 @@
       "enabled": false
     },
     {
-      "description": "Auto-merge the matrix.json base-image digest pin the same way as the Dockerfile bases",
+      "description": "Auto-merge the base-image digest pin (matrix.json and every ARG default) the same way as the Dockerfile bases",
       "matchManagers": [
         "custom.regex"
       ],
       "matchFileNames": [
         "matrix.json",
-        "matrix.gen.hcl"
+        "matrix.gen.hcl",
+        "Dockerfile",
+        "php/pgo/Dockerfile.bootstrap-corpus"
       ],
       "matchUpdateTypes": [
         "digest",

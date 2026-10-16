@@ -17,12 +17,14 @@
 #   RETRY_KIND      what counts as transient, comma-separated (default "registry"):
 #                   registry  429, 5xx and GHCR's `unknown blob` from docker, buildx, cosign
 #                   http      curl/composer transfer errors, HTTP 408/429/5xx (`composer` is an alias)
-#                   apk       `temporary error`, `network error`, `fetch ... failed` from apk
+#                   apk       `temporary error (try again later)`, `network error`, `network connection
+#                             aborted`, `fetch <url> failed` from apk
 #                   git       RPC failures, HTTP 429/5xx, TLS handshake failures
 #                   net       DNS, refused/reset/timed-out connections, truncated transfers;
 #                             every kind includes it
 #                   Certificate errors, sha256 mismatches, unresolvable composer
-#                   requirements, apk's `UNTRUSTED signature`, missing repositories and
+#                   requirements, apk's `UNTRUSTED signature`/`BAD signature`, `No such file or
+#                   directory` (apk's 404), missing repositories and
 #                   failed authentication are never retried, whatever else matched.
 #                   apk's `unable to select packages` alone is not transient either, but
 #                   apk prints it after a failed index fetch too (`temporary error`
@@ -91,11 +93,20 @@ net+='|http/2 stream [0-9]+ was not closed cleanly|i/o timeout|client\.timeout e
 http='curl: \((6|7|18|28|35|52|55|56|92)\)|curl error (6|7|18|28|35|52|55|56|92) while downloading'
 http+='|returned error: (408|429|5[0-9][0-9])|\(HTTP/[0-9.]+ (408|429|5[0-9][0-9])'
 http+='|the requested url returned error: (408|429|5[0-9][0-9])'
-apk='temporary error|network error|fetch .* failed'
+# apk-tools 2.14 (libapk's apk_error_str, checked against a local repository
+# answering each status): 503 -> `temporary error (try again later)`, a dropped
+# transfer -> `network error (check Internet connection and firewall)` or
+# `network connection aborted`; a 404 is `No such file or directory`, a 403
+# `Permission denied`, a 429 `IO ERROR`, a refused connection `could not connect
+# to server (check repositories file)` -- those are not transient. The `fetch
+# <url> failed` form comes from older apk releases.
+apk='temporary error \(try again later\)|network error \(check internet connection|network connection aborted'
+apk+='|fetch https?://[^ ]+ failed'
 git='rpc failed; (curl [0-9]+|http (429|5[0-9][0-9]))'
 git+='|the requested url returned error: (429|5[0-9][0-9])|gnutls_handshake\(\) failed'
 deny='ssl certificate problem|certificate verify failed|sha256 mismatch|your requirements could not be resolved'
 deny+='|api rate limit exceeded|repository not found|authentication failed|untrusted signature'
+deny+='|bad signature|no such file'
 
 errfile="$(mktemp)"
 trap 'rm -f "$errfile"' EXIT

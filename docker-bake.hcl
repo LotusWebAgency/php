@@ -59,9 +59,11 @@ target "_common" {
     "org.opencontainers.image.created"       = CREATED != "" ? CREATED : timestamp()
     "com.lotuswebagency.inputs-hash"         = INPUTS_HASH
     # The base's repository and pinned digest, both split from BASE_IMAGE
-    # (repo:tag@sha256:...) so they cannot drift from what the build used.
-    "org.opencontainers.image.base.name"      = split(":", BASE_IMAGE)[0]
-    "org.opencontainers.image.base.digest"    = split("@", BASE_IMAGE)[1]
+    # (repo:tag@sha256:...) so they cannot drift from what the build used. The
+    # name drops the @digest, then a :tag only when it follows the last "/" (a
+    # registry port, host:5000/x, is not a tag); a digest-less override gets "".
+    "org.opencontainers.image.base.name"      = regex_replace(split("@", BASE_IMAGE)[0], ":[^:/]*$", "")
+    "org.opencontainers.image.base.digest"    = try(split("@", BASE_IMAGE)[1], "")
   }
   # A list, not two --set flags: a second `--set '*.attest=...'` replaces the
   # first and would drop the SBOM. Push only: the docker exporter a local build

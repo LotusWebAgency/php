@@ -283,10 +283,31 @@ class RetryTest(unittest.TestCase):
                     self.assertEqual((proc.returncode, calls), (9, 1))
                     self.assertNotIn("retry.sh", proc.stderr)
 
+    def test_apk_404_and_hard_failures_are_not_retried(self):
+        # Messages apk-tools 2.14 prints for a 404, 403, 429 and a refused connection.
+        lines = [
+            "WARNING: fetching https://packages.wolfi.dev/os: No such file or directory",
+            "WARNING: fetching https://packages.wolfi.dev/os: Permission denied",
+            "WARNING: fetching https://packages.wolfi.dev/os: IO ERROR",
+            "WARNING: fetching https://packages.wolfi.dev/os: could not connect to server (check repositories file)",
+            "ERROR: https://packages.wolfi.dev/os/x86_64/curl-8.0-r0.apk: BAD signature",
+            "ERROR: unable to select packages: curl (no such package)",
+            "fetch https://packages.wolfi.dev/os/x86_64/APKINDEX.tar.gz",
+            "WARNING: fetching https://packages.wolfi.dev/os: No such file or directory; "
+            "ERROR: x.apk: temporary error (try again later)",
+        ]
+        for line in lines:
+            with self.subTest(line=line[:80]):
+                self.reset()
+                proc, calls = self.run_retry(f"{line}|ok", kind="apk", rc=9)
+                self.assertEqual((proc.returncode, calls), (9, 1))
+                self.assertNotIn("retry.sh", proc.stderr)
+
     def test_permanent_errors_override_transient_matches(self):
         denied = ["SSL certificate problem", "certificate verify failed", "sha256 mismatch",
                   "Your requirements could not be resolved", "API rate limit exceeded",
-                  "UNTRUSTED signature", "Repository not found", "Authentication failed"]
+                  "UNTRUSTED signature", "BAD signature", "No such file or directory",
+                  "Repository not found", "Authentication failed"]
         kinds = ("registry", "net", "http", "composer", "apk", "git", "registry,http,apk,git")
         for kind in kinds:
             for line in denied:

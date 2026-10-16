@@ -22,6 +22,6 @@ done
 if [ "$ok" -eq 1 ]; then
   cat "$tmp/x86_64" "$tmp/aarch64" | sha256sum | cut -c1-16
 else
-  echo "wolfi-index-state: could not read every APKINDEX; falling back to the date" >&2
+  echo "::warning::wolfi-index-state: could not read every APKINDEX; falling back to the date" >&2
   date -u +%F
 fi

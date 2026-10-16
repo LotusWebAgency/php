@@ -140,6 +140,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    outputs:
+      wolfi-index-state: ${{ steps.wolfi.outputs.index-state }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -204,6 +206,19 @@ jobs:
 
       - name: tests/test-attest.sh
         run: ./tests/test-attest.sh
+
+      # Wolfi's index changes many times a day. Computed here once and handed to
+      # every verify and build leg on both architectures through needs.preflight,
+      # so the image that was verified is built from the same index as the one
+      # that is published. The runtime apk-upgrade layer rebuilds whenever this
+      # value moved (cheap; the php-build stages stay cached).
+      - name: Pin the Wolfi index state for every build leg
+        id: wolfi
+        run: |
+          set -euo pipefail
+          WOLFI_INDEX_STATE="$(./ci/wolfi-index-state.sh)"
+          [ -n "$WOLFI_INDEX_STATE" ] || { echo "::error::ci/wolfi-index-state.sh printed no index state"; exit 1; }
+          echo "index-state=$WOLFI_INDEX_STATE" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------- trivy-db
   # One vulnerability DB refresh per run, parallel with preflight, instead of
@@ -372,6 +387,8 @@ jobs:
       # step (and a fork's token is read-only whatever is asked for here).
       packages: write
     env:
+      # The same value in every leg of both jobs, computed once in preflight.
+      WOLFI_INDEX_STATE: ${{ needs.preflight.outputs.wolfi-index-state }}
       TARGET_NAME: ${{ matrix.target.name }}
       TARGET_BAKE: ${{ matrix.target.bake }}
       TARGET_TAG: ${{ matrix.target.tags[0] }}
@@ -464,7 +481,6 @@ jobs:
           {
             echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)"
             echo "CACHE_WEEK=$(date -u +%G-W%V)"
-            echo "WOLFI_INDEX_STATE=$(./ci/wolfi-index-state.sh)"
           } >> "$GITHUB_ENV"
 
       # A pull request that changes any build input (a Renovate base-digest bump,
@@ -930,6 +946,8 @@ jobs:
       contents: read
       packages: write # GHCR: corpus pull, build-cache push, the staged image push
     env:
+      # The same value in every leg of both jobs, computed once in preflight.
+      WOLFI_INDEX_STATE: ${{ needs.preflight.outputs.wolfi-index-state }}
       TARGET_NAME: ${{ matrix.target.name }}
       TARGET_BAKE: ${{ matrix.target.bake }}
       TARGET_TAG: ${{ matrix.target.tags[0] }}
@@ -1027,7 +1045,6 @@ jobs:
             echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)"
             echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "CACHE_WEEK=$(date -u +%G-W%V)"
-            echo "WOLFI_INDEX_STATE=$(./ci/wolfi-index-state.sh)"
           } >> "$GITHUB_ENV"
 
       - name: Pull and verify this target's hash-pinned PGO corpus
