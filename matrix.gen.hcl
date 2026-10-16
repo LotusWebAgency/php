@@ -66,4 +66,4 @@ variable "BOOTSTRAP_TARGETS" {
   ]
 }
 
-variable "BASE_IMAGE" { default = "debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f" }
+variable "BASE_IMAGE" { default = "cgr.dev/chainguard/wolfi-base:latest@sha256:256c88bb066424045021090932d50be93c8e3f2ce3586707702a401b146f3e43" }

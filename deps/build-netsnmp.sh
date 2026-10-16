@@ -43,6 +43,11 @@ bash "$HERE/fetch-verified.sh" "$url" "$sha" /tmp/net-snmp.tar.gz
 mkdir -p /tmp/net-snmp && tar xf /tmp/net-snmp.tar.gz -C /tmp/net-snmp --strip-components=1
 cd /tmp/net-snmp
 
+# OpenSSL 4 made ASN1_STRING opaque; net-snmp 5.9.5.2 still reads its fields.
+for patch_file in "$HERE"/patches/net-snmp-"$version"/*.patch; do
+  patch -p1 --fuzz=0 < "$patch_file"
+done
+
 # Same posture as ImageMagick: one build shared by all PHP versions, baseline
 # flags, hardening from the shared flag scripts, self-referencing rpath.
 export CFLAGS

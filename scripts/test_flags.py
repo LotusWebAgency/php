@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -22,7 +23,7 @@ class TestCflags(unittest.TestCase):
             self.assertIn(expected, flags)
 
     def test_fortify_is_undefined_first(self):
-        # the base image may already define it; redefining without -U warns and may not apply
+        # the build environment may already define it; redefining without -U warns and may not apply
         flags = run("php/cflags.sh", "baseline")
         self.assertIn("-U_FORTIFY_SOURCE", flags)
         self.assertLess(flags.index("-U_FORTIFY_SOURCE"), flags.index("-D_FORTIFY_SOURCE=3"))
@@ -68,7 +69,7 @@ class TestLdflags(unittest.TestCase):
         self.assertNotIn("rpath", flags)
 
     def test_prefix_emits_rpath_for_that_prefix(self):
-        # A global LD_LIBRARY_PATH would let a vendored libcurl shadow Debian's
+        # A global LD_LIBRARY_PATH would let a vendored libcurl shadow the system's
         # for every process in the image; rpath binds the search path to the binary.
         flags = run("php/ldflags.sh", "/opt/php-deps")
         self.assertIn("-Wl,-rpath,/opt/php-deps/lib", flags)
@@ -85,12 +86,12 @@ class TestLdflags(unittest.TestCase):
 
 
 class TestRuntimeLibs(unittest.TestCase):
-    @unittest.skipUnless(shutil.which("gcc") and shutil.which("dpkg"),
-                          "requires gcc to build the test fixture and dpkg to resolve ownership")
+    @unittest.skipUnless(shutil.which("gcc") and shutil.which("apk"),
+                          "requires gcc to build the test fixture and apk to resolve ownership")
     def test_mixed_owned_and_unowned_libraries(self):
-        # One dependency resolves to a Debian package (libc6); the other, via
+        # One dependency resolves to a Wolfi package (glibc-<major.minor>); the other, via
         # rpath, to a scratch-built .so owned by no package (standing in for
-        # the vendored /opt/php-deps/lib). dpkg -S must not abort the script.
+        # a vendored library). The unowned one must be skipped, not abort the script.
         with tempfile.TemporaryDirectory() as tmp:
             td = Path(tmp)
             vendor = td / "vendor"
@@ -124,14 +125,35 @@ class TestRuntimeLibs(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             packages = result.stdout.strip().splitlines()
-            self.assertIn("libc6", packages)
-            self.assertNotIn("libunowned.so.1", packages)
+            self.assertTrue([p for p in packages if re.fullmatch(r"glibc(-[0-9.]+)?", p)], packages)
+            self.assertFalse([p for p in packages if "unowned" in p], packages)
+            self.assertIn("libunowned.so.1", result.stderr)
 
-    @unittest.skipUnless(shutil.which("gcc") and shutil.which("dpkg"),
-                          "requires gcc to build the test fixture and dpkg to resolve ownership")
+    @unittest.skipUnless(shutil.which("gcc") and shutil.which("apk"),
+                          "requires gcc to build the test fixture and apk to resolve ownership")
+    def test_names_carry_no_version_suffix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            tree = td / "bin"
+            tree.mkdir()
+            prog_src = td / "prog.c"
+            prog_src.write_text("int main(void) { return 0; }\n")
+            subprocess.run(["gcc", "-o", str(tree / "prog"), str(prog_src)],
+                           check=True, capture_output=True)
+
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts/runtime-libs.sh"), str(tree)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for name in result.stdout.split():
+                self.assertNotRegex(name, r"-[0-9][^-]*-r[0-9]+$")
+
+    @unittest.skipUnless(shutil.which("gcc") and shutil.which("apk"),
+                          "requires gcc to build the test fixture and apk to resolve ownership")
     def test_non_elf_executable_does_not_abort_the_script(self):
-        # ldd exits non-zero on an exec-bit script; xargs would report exit 123
-        # and pipefail would abort the script.
+        # The loader exits non-zero on an exec-bit script; xargs would report
+        # exit 123 and pipefail would abort the script.
         with tempfile.TemporaryDirectory() as tmp:
             td = Path(tmp)
             tree = td / "bin"
@@ -153,7 +175,7 @@ class TestRuntimeLibs(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("libc6", result.stdout.strip().splitlines())
+            self.assertTrue([p for p in result.stdout.split() if re.fullmatch(r"glibc(-[0-9.]+)?", p)], result.stdout)
 
 
 if __name__ == "__main__":

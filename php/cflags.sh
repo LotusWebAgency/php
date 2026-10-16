@@ -3,24 +3,11 @@
 set -euo pipefail
 UARCH="${1:-baseline}"
 
-# dpkg is the authority when present (Debian build stages); fall back to uname so
-# the script and its tests run on a non-Debian dev host too. An unmapped uname
-# fails loudly below, like an unmapped dpkg arch.
-if command -v dpkg >/dev/null 2>&1; then
-  ARCH="$(dpkg --print-architecture)"
-else
-  case "$(uname -m)" in
-    x86_64)  ARCH="amd64" ;;
-    aarch64) ARCH="arm64" ;;
-    *)
-      echo "unsupported architecture: $(uname -m)" >&2
-      exit 1
-      ;;
-  esac
-fi
+ARCH="$(bash "$(dirname "${BASH_SOURCE[0]}")/arch.sh")"
 
-# -U before -D: debian's build environment may already define _FORTIFY_SOURCE=2,
-# and redefining it without undefining first is a warning, not an override.
+# -U before -D: the build environment may already define _FORTIFY_SOURCE (Wolfi's
+# openssf compiler defaults do), and redefining it without undefining first is a
+# warning, not an override.
 COMMON="-O2 -fPIC -fstack-protector-strong -fstack-clash-protection"
 COMMON="$COMMON -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fno-semantic-interposition"
 # -std=gnu17 is pinned for every PHP version on both compilers, not just where
@@ -30,9 +17,9 @@ COMMON="$COMMON -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -fno-semantic-interpositio
 # ext/date/php_date.c) and risk the same in any PECL extension or vendored dep
 # built from source, silently if the K&R code merely changes behavior instead of
 # failing to compile. Pinning one dialect removes that class of drift. It costs
-# nothing on the clang path: Debian trixie's clang 19 already defaults to
-# gnu17 (__STDC_VERSION__ is 201710L with and without the flag), so this only
-# changes anything on the gcc path.
+# nothing on the clang path: clang 19 already defaults to gnu17
+# (__STDC_VERSION__ is 201710L with and without the flag), so this only changes
+# anything on the gcc path.
 COMMON="$COMMON -std=gnu17"
 
 case "$ARCH" in
@@ -53,8 +40,9 @@ case "$ARCH" in
       # (php/isa-note-x86-64-v3.S, php/build.sh).
       # Neither gold nor lld emits a PT_GNU_PROPERTY program header, so ld.so's
       # refusal relies on glibc reading the property from the legacy PT_NOTE
-      # segment: trixie's 2.41 does, a newer glibc may not. tests/test-uarch.sh
-      # proves the refusal at runtime on the shipped image.
+      # segment, which glibc 2.44 (Wolfi's) does not do, so the v3 refusal needs
+      # a loader-independent check. tests/test-uarch.sh proves it at runtime on
+      # the shipped image.
       # arm64 has no glibc equivalent of this check, so nothing is added there.
       if [ "${COMPILER:-clang}" = gcc ]; then MARCH="$MARCH -mneeded"; fi
     else MARCH="-march=x86-64 -mtune=generic"; fi

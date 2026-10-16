@@ -1,17 +1,10 @@
 # syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 # One Dockerfile for every published tag; docker-bake.hcl feeds it the matrix.
-ARG BASE_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:256c88bb066424045021090932d50be93c8e3f2ce3586707702a401b146f3e43
 ARG PHP_ERA=modern
 # Declared before any FROM so `FROM toolchain-select-${COMPILER}` can resolve it.
 # The toolchain-base stage redeclares it for use inside the stage.
 ARG COMPILER=clang
-
-# --- gcc16-toolchain ---
-# GCC 16.2 is not packaged for trixie, so COMPILER=gcc takes it from the official
-# image, pinned by multi-arch index digest (an arm64 build resolves it too). That
-# image is debian:13-slim plus a from-source GCC under /usr/local, copied out by
-# toolchain-select-gcc. buildkit builds this stage only when COMPILER=gcc.
-FROM gcc:16.2-trixie@sha256:17043c23ec2ad97fc3beca18da77275d26be5db5cd70ea0a5d73200e21a8e999 AS gcc16-toolchain
 
 # --- toolchain ---
 FROM ${BASE_IMAGE} AS toolchain-base
@@ -19,30 +12,46 @@ ARG COMPILER=clang
 # The compiler binary names COMPILER implies, supplied by docker-bake.hcl (clang
 # -> clang++ is not a string transform). Defaults are the clang set so a bare
 # `docker build` works. Bare names, not paths: ccache's masquerade symlinks in
-# /usr/lib/ccache dispatch on the argv[0] basename.
+# /usr/lib/ccache/bin dispatch on the argv[0] basename.
 ARG CXX_COMPILER=clang++
 ARG AR_COMPILER=llvm-ar
 ARG RANLIB_COMPILER=llvm-ranlib
 ARG NM_COMPILER=llvm-nm
-ENV DEBIAN_FRONTEND=noninteractive
-# gcc/g++ are installed only as a build-essential dependency and for the
-# binutils tools both toolchains share (build-only stage). Nothing compiles with
-# this gcc: toolchain-select-gcc puts GCC 16.2 ahead of it on PATH. PHP's HYBRID
-# VM pins execute_data/opline into registers via GCC global register variables
-# (HAVE_GCC_GLOBAL_REGS, Zend/zend_execute.c), a GNU-C extension clang lacks, so
-# COMPILER=gcc is the path that keeps that dispatch.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      build-essential clang lld llvm gcc g++ binutils-gold ccache pkg-config ca-certificates curl \
-      autoconf automake libtool bison re2c make patch xz-utils file \
-      gnupg dirmngr python3 dpkg-dev \
+# The base's repository is apk.cgr.dev/chainguard; every package here comes from
+# the public Wolfi index instead. The Wolfi signing key is already trusted by the
+# base, so only the URL changes.
+#
+# The build scripts are bash and use GNU grep/sed/find/coreutils options that the
+# base's busybox applets lack.
+#
+# build-base brings the native GCC 16.2 (toolchain-select-gcc asserts it) and the
+# binutils tools both toolchains share. PHP's HYBRID VM pins execute_data/opline
+# into registers via GCC global register variables (HAVE_GCC_GLOBAL_REGS,
+# Zend/zend_execute.c), a GNU-C extension clang lacks, so COMPILER=gcc is the
+# path that keeps that dispatch.
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
+    && apk add --cache-dir /var/cache/apk -U \
+      build-base clang-19 lld-19 llvm-19 binutils-gold ccache pkgconf ca-certificates curl \
+      bash coreutils findutils grep sed gawk diffutils \
+      autoconf automake libtool bison re2c patch xz file \
+      gpg gpg-agent python3 linux-headers \
     && case "$COMPILER" in clang|gcc) ;; *) echo "COMPILER must be clang or gcc, got COMPILER=$COMPILER" >&2; exit 1 ;; esac
+# Wolfi's compilers harden by default (gcc through /usr/local/bin wrappers that add
+# -specs openssf.spec, clang through /etc/clang/*.cfg) and bake in -march=x86-64-v2
+# -mtune=sapphirerapids (arm64: armv8-a+crc+crypto -mtune=neoverse-v2). Both switches
+# turn those defaults off so php/cflags.sh decides every flag. GCC_SPEC_FILE drops
+# only the hardening: gcc keeps its compiled-in -march/-mtune, so every compile,
+# vendored libraries included, must take its arch flags from php/cflags.sh.
+ENV GCC_SPEC_FILE=no-hardening.spec CLANG_NO_DEFAULT_CONFIG=1
+# ccache's default compiler check hashes the mtime of the compiler binary. For gcc
+# that is the openssf wrapper, which a gcc upgrade does not touch.
+ENV CCACHE_COMPILERCHECK="%compiler% --version"
 ENV CC=$COMPILER CXX=$CXX_COMPILER AR=$AR_COMPILER RANLIB=$RANLIB_COMPILER NM=$NM_COMPILER
 # Plain ENV rather than the ARG, which does not survive into child stages:
 # php/build.sh, php/pgo/train.sh and php/pgo/discriminator-control.sh branch on it.
 ENV COMPILER=$COMPILER
-ENV PATH=/usr/lib/ccache:$PATH
+ENV PATH=/usr/lib/ccache/bin:$PATH
 # gcc ships its own omp.h, found without -fopenmp. PECL imagick's config.m4 uses
 # that header plus a -lgomp link as its "GCC with OpenMP" probe and then adds
 # -lgomp to the static imagick, giving gcc builds a libgomp NEEDED entry that
@@ -50,32 +59,20 @@ ENV PATH=/usr/lib/ccache:$PATH
 # gcc answer "no OpenMP" like clang, matching deps/build-imagemagick.sh's
 # --disable-openmp. Nothing else includes <omp.h>.
 RUN if [ "$COMPILER" = "gcc" ]; then \
-      rm -f "$(dirname "$(gcc -print-libgcc-file-name)")/include/omp.h"; \
+      find /usr/lib /usr/lib64 -path '*/gcc/*/include/omp.h' -delete; \
     fi
 
-# The shipped compilers: COMPILER=clang (Debian trixie's clang 19, a plain
-# passthrough) and COMPILER=gcc (GCC 16.2 overlaid by toolchain-select-gcc).
-# `toolchain` resolves to the one COMPILER names.
+# The shipped compilers: COMPILER=clang (Wolfi's clang 19, a plain passthrough)
+# and COMPILER=gcc (Wolfi's GCC 16.2). `toolchain` resolves to the one COMPILER
+# names.
 FROM toolchain-base AS toolchain-select-clang
 
 FROM toolchain-base AS toolchain-select-gcc
-COPY --from=gcc16-toolchain /usr/local /opt/gcc16
-# GCC installs .la files whose libdir names the original /usr/local prefix. Once
-# the tree sits at /opt/gcc16, libtool resolves -lstdc++ (ext/intl, C++ PECL
-# modules) to that .la, warns "library ... was moved" and bakes /opt/gcc16/lib64
-# into the RUNPATH of php, php-fpm and swoole.so, a directory the runtime image
-# lacks. Without the .la files libtool treats -lstdc++ as a system library.
-RUN find /opt/gcc16 -name '*.la' -delete
-# Ahead of ccache's masquerade dir's target search, not of the dir itself: ccache
-# still intercepts every gcc/g++ call and its compiler_check=mtime hashes the real
-# binary, so gcc16 objects never collide with apt-gcc ones in the shared cache.
-ENV PATH=/usr/lib/ccache:/opt/gcc16/bin:$PATH
-# Same omp.h removal as above, for GCC 16's own copy.
-RUN rm -f "$(dirname "$(gcc -print-libgcc-file-name)")/include/omp.h"
-# Fail if gcc/cc do not resolve to GCC 16.2 (a stale PATH or masquerade
-# regression would otherwise build with the wrong compiler and still pass).
+# Fail if gcc/cc do not resolve to GCC 16.2 (a stale PATH, a masquerade
+# regression or a Wolfi bump past 16.2 would otherwise build with the wrong
+# compiler and still pass).
 RUN v="$(gcc -dumpfullversion)"; case "$v" in \
-      16.2*) echo "ok: COMPILER=gcc resolves to GCC $v (/opt/gcc16)" ;; \
+      16.2*) echo "ok: COMPILER=gcc resolves to GCC $v" ;; \
       *) echo "FATAL: COMPILER=gcc must resolve to GCC 16.2.x, got $v" >&2; exit 1 ;; \
     esac
 
@@ -86,13 +83,12 @@ FROM toolchain-select-${COMPILER} AS toolchain
 # default OpenMP support causes thread explosions in FPM workers. One stage that
 # both deps eras derive from, so it builds once per (arch, uarch, COMPILER).
 FROM toolchain AS imagemagick
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      libpng-dev libjpeg-dev libwebp-dev libtiff-dev libfreetype-dev \
-      libheif-dev libde265-dev
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add --cache-dir /var/cache/apk -U \
+      libpng-dev libjpeg-turbo-dev libwebp-dev tiff-dev freetype-dev \
+      libheif-dev libde265-dev openjpeg-dev
 COPY deps/build-imagemagick.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
-COPY php/cflags.sh php/ldflags.sh /build/php/
+COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
 RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
     bash /build/deps/build-imagemagick.sh /opt/imagemagick
 # Nothing upstream sets PKG_CONFIG_PATH; a flat assignment avoids buildkit's
@@ -100,49 +96,50 @@ RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
 ENV PKG_CONFIG_PATH=/opt/imagemagick/lib/pkgconfig
 
 # --- net-snmp ---
-# net-snmp's client library, vendored because the distro libsnmp40t64 depends on
-# libperl5.40 (~49 MB of perl in every runtime image, unpurgeable). Its own stage
-# so it neither invalidates nor waits for ImageMagick; both eras share the result.
-# It links Debian's libssl3 (libssl-dev below), never the legacy vendored OpenSSL.
+# net-snmp's client library, vendored so the runtime needs neither the distro's
+# net-snmp packages nor perl. Its own stage so it neither invalidates nor waits for
+# ImageMagick; both eras share the result. It links the system OpenSSL
+# (openssl-4.0-dev below), never the legacy vendored one; OpenSSL 4 made ASN1_STRING
+# opaque, which deps/patches/net-snmp-5.9.5.2 accounts for.
 # The deps stages COPY the whole prefix (ext-snmp needs net-snmp-config and the
 # headers); php/build.sh's stage_runtime_deps ships only the library and MIBs.
 FROM toolchain AS net-snmp
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends libssl-dev
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add --cache-dir /var/cache/apk -U openssl-4.0-dev
 COPY deps/build-netsnmp.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
-COPY php/cflags.sh php/ldflags.sh /build/php/
+COPY deps/patches/net-snmp-5.9.5.2 /build/deps/patches/net-snmp-5.9.5.2
+COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
 RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
     bash /build/deps/build-netsnmp.sh /opt/net-snmp
 
 # --- deps: modern ---
-# PHP 8.1+ links against what trixie ships.
+# PHP 8.1+ links against what Wolfi ships. The system OpenSSL is 4.0: curl-dev
+# requires openssl-4.0-dev, which conflicts with openssl-dev (3.6), so ext/openssl
+# builds against 4.0 too, with the SSL_CTX options patch from deps/patches.
 FROM imagemagick AS deps-modern
 # GD also needs libavif-dev; the other image libraries come from the imagemagick stage.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      libssl-dev libcurl4-openssl-dev libxml2-dev libxslt1-dev libicu-dev \
-      libonig-dev libzip-dev libsqlite3-dev libpq-dev zlib1g-dev libzstd-dev \
-      libbrotli-dev libavif-dev \
-      libsodium-dev libargon2-dev libgmp-dev libreadline-dev libmemcached-dev \
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add --cache-dir /var/cache/apk -U \
+      openssl-4.0-dev curl-dev libxml2-dev libxslt-dev icu-dev \
+      oniguruma-dev libzip-dev sqlite-dev postgresql-17-dev zlib-dev zstd-dev \
+      brotli-dev libavif-dev \
+      libsodium-dev argon2-dev gmp-dev readline-dev libmemcached-dev \
 # Shared-extension dependencies: one package per non-empty `libs` entry in
 # php/ext.json for each linkage:"shared" extension. libmcrypt-dev is for mcrypt
-# on PHP < 8.0. imap is absent: trixie has no libc-client-dev. libpcre2-dev is
+# on PHP < 8.0. imap is absent: Wolfi has no c-client. pcre2-dev is
 # snuffleupagus's build dependency (its config.m4 calls pcre2-config).
-      librabbitmq-dev libbz2-dev libffi-dev libldap2-dev liblz4-dev \
-      libmcrypt-dev libssh2-1-dev libtidy-dev uuid-dev \
-      libyaml-dev libevent-dev libpcre2-dev
-# ext-snmp links this instead of libsnmp-dev.
+      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.6-dev lz4-dev \
+      libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
+      yaml-dev libevent-dev pcre2-dev
+# ext-snmp links this instead of the distro's net-snmp-dev.
 COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 ENV PHP_DEPS_PREFIX=""
 
 # --- deps: legacy ---
-# PHP 7.0-8.0 cannot link against trixie's libraries: OpenSSL 3 support only
+# PHP 7.0-8.0 cannot link against Wolfi's libraries: OpenSSL 3 support only
 # became solid in 8.1, and ICU 74+ needs C++17 that ext/intl below 8.1 does not
-# use. This era vendors pinned copies (deps/versions.lock), except libxml2:
-# trixie's 2.9.14-series package carries security backports the upstream tarball
-# lacks, so libxml2-dev comes from apt.
+# use. This era vendors pinned copies (deps/versions.lock), except libxml2 and
+# libxslt, which come from apk.
 #
 # OpenSSL and ICU are built static-only by deps/build-deps.sh, so no EOL libssl.so
 # or duplicate ICU data exists in the image and neither needs an rpath. The rpath
@@ -151,36 +148,35 @@ ENV PHP_DEPS_PREFIX=""
 #
 # curl is vendored only for 7.0-7.2: ext/curl's config.m4 takes a DIR-style
 # --with-curl=DIR through 7.3 and is pure pkg-config (PKG_CHECK_MODULES) from 7.4.
-# 7.4-8.0 build against trixie's libcurl4-openssl-dev; 7.4 and 8.0 carry
+# 7.4-8.0 build against Wolfi's curl-dev; 7.4 and 8.0 carry
 # deps/patches/php-*/010-curl-openssl3-not-old.patch so ext/curl does not link
 # a second OpenSSL.
 #
 # Two further build-environment adjustments:
 #   - ext/gd's --with-freetype-dir=/usr (php/ext.json overrides, 7.0-7.3) needs
-#     a freetype-config script, which freetype dropped in 2.9.1; the shim is
-#     created below.
+#     a freetype-config script, which upstream freetype dropped in 2.9.1; Wolfi's
+#     package still ships one, and the shim below is created only if it is absent.
 #   - ext/intl's -DU_USING_ICU_NAMESPACE=1 (7.0-7.3 use unqualified `icu::`
 #     types) is a compile flag set in php/build.sh's CPPFLAGS/CXXFLAGS.
 FROM imagemagick AS deps-legacy
 ARG PHP_VERSION
 # The image libraries come from the imagemagick stage, as in deps-modern. ICU is
-# vendored, so no libicu-dev. libssl-dev is for ext-snmp only: net-snmp-config
+# vendored, so no icu-dev. openssl-4.0-dev is for ext-snmp only: net-snmp-config
 # adds -lssl -lcrypto, which needs the system libssl.so symlink. PHP itself is
 # pointed at the vendored OpenSSL by --with-openssl=/opt/php-deps (php/build.sh
 # asserts the substitution). No libavif-dev: GD has no AVIF before 8.1.
 # Otherwise the package set mirrors deps-modern and must be kept in sync by hand.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      libssl-dev libcurl4-openssl-dev libxslt1-dev libxml2-dev \
-      libonig-dev libzip-dev libsqlite3-dev libpq-dev zlib1g-dev libzstd-dev \
-      libbrotli-dev \
-      libsodium-dev libargon2-dev libgmp-dev libreadline-dev libmemcached-dev \
-      librabbitmq-dev libbz2-dev libffi-dev libldap2-dev liblz4-dev \
-      libmcrypt-dev libssh2-1-dev libtidy-dev uuid-dev \
-      libyaml-dev libevent-dev libpcre2-dev
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add --cache-dir /var/cache/apk -U \
+      openssl-4.0-dev curl-dev libxslt-dev libxml2-dev \
+      oniguruma-dev libzip-dev sqlite-dev postgresql-17-dev zlib-dev zstd-dev \
+      brotli-dev \
+      libsodium-dev argon2-dev gmp-dev readline-dev libmemcached-dev \
+      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.6-dev lz4-dev \
+      libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
+      yaml-dev libevent-dev pcre2-dev
 COPY deps/build-deps.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
-COPY php/cflags.sh php/ldflags.sh /build/php/
+COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
 RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
     bash /build/deps/build-deps.sh "$PHP_VERSION" /opt/php-deps
 # After the vendored build (twenty minutes of openssl + ICU + curl) so these
@@ -193,30 +189,29 @@ RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
 #     then calls --cflags and --libs. 7.4 moved gd to pkg-config.
 #
 #  2. /usr/include/gmp.h. ext/gmp's config.m4 searches $i/include/gmp.h and
-#     $i/include/$($CC -dumpmachine)/gmp.h, but Debian ships gmp.h only in the
-#     multiarch directory. Clang's -dumpmachine ("x86_64-pc-linux-gnu") differs
-#     from Debian's triple ("x86_64-linux-gnu"), so that fallback missed and
-#     configure died with "Unable to locate gmp.h". gcc matches, but the symlink
-#     stays unconditional and keyed off the found path, which also covers clang
-#     and arm64 triples that do not match.
+#     $i/include/$($CC -dumpmachine)/gmp.h. Wolfi ships gmp.h in /usr/include, so
+#     this is a no-op there; it stays keyed off the found path so a distro that
+#     moves the header into a triple directory still configures.
 RUN set -eu; \
     case "$PHP_VERSION" in \
       7.0|7.1|7.2|7.3) \
-        printf '%s\n' '#!/bin/sh' 'case "$1" in' \
-          '  --cflags) exec pkg-config --cflags freetype2 ;;' \
-          '  --libs) exec pkg-config --libs freetype2 ;;' \
-          '  --ftversion) exec pkg-config --modversion freetype2 ;;' \
-          '  --prefix) exec pkg-config --variable=prefix freetype2 ;;' \
-          'esac' 'exit 1' > /usr/bin/freetype-config; \
-        chmod +x /usr/bin/freetype-config; \
+        if [ ! -e /usr/bin/freetype-config ]; then \
+          printf '%s\n' '#!/bin/sh' 'case "$1" in' \
+            '  --cflags) exec pkg-config --cflags freetype2 ;;' \
+            '  --libs) exec pkg-config --libs freetype2 ;;' \
+            '  --ftversion) exec pkg-config --modversion freetype2 ;;' \
+            '  --prefix) exec pkg-config --variable=prefix freetype2 ;;' \
+            'esac' 'exit 1' > /usr/bin/freetype-config; \
+          chmod +x /usr/bin/freetype-config; \
+        fi; \
         gmp_h="$(find /usr/include -maxdepth 2 -name gmp.h -print -quit)"; \
-        [ -n "$gmp_h" ] || { echo "libgmp-dev is installed but no gmp.h was found under /usr/include" >&2; exit 1; }; \
+        [ -n "$gmp_h" ] || { echo "gmp-dev is installed but no gmp.h was found under /usr/include" >&2; exit 1; }; \
         [ -e /usr/include/gmp.h ] || ln -s "$gmp_h" /usr/include/gmp.h; \
         echo "gmp.h: $gmp_h -> /usr/include/gmp.h"; \
         ;; \
       *) : ;; \
     esac
-# ext-snmp links this instead of libsnmp-dev.
+# ext-snmp links this instead of the distro's net-snmp-dev.
 COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 # PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR (the latter set in php/build.sh) is what makes
 # PHP's ./configure find the vendored openssl and icu: PHP_SETUP_OPENSSL and
@@ -228,7 +223,7 @@ COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 #
 # 7.0 is the exception: its PHP_SETUP_ICU does not use pkg-config. It runs
 # icu-config from $PHP_ICU_DIR/bin or $PATH and fails with "Unable to detect ICU
-# prefix"; trixie ships no icu-config. So 7.0 alone needs
+# prefix"; Wolfi's icu-dev ships no icu-config. So 7.0 alone needs
 # --with-icu-dir=${PHP_DEPS_PREFIX}, which comes from a php/ext.json override
 # and is spliced in by php/build.sh (derived from ${PHP_DEPS_PREFIX}/bin/icu-config
 # existing, like --with-curl, so the version range lives in one place). Hence this
@@ -254,15 +249,14 @@ ARG PGO
 ARG ICU_VERSION
 WORKDIR /src
 
-# The clang profile runtime: Debian's `clang` does not pull it in, and without it
+# The clang profile runtime: Wolfi's `clang-19` does not pull it in, and without it
 # PGO pass 1 fails at the link on a missing libclang_rt.profile.a, twenty minutes
 # in. llvm-profdata (merges .profraw files) is asserted too. Installed here
 # rather than in `toolchain` because only this stage compiles with a profile
 # flag; upstream it would put ImageMagick and the legacy vendored libraries in
 # the invalidation path of every PGO change.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends libclang-rt-dev \
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add --cache-dir /var/cache/apk -U compiler-rt-19 \
     && { command -v llvm-profdata >/dev/null || { echo "llvm-profdata is missing; two-pass PGO cannot merge a profile" >&2; exit 1; }; } \
     && { [ -n "$(find /usr/lib/llvm-* -name 'libclang_rt.profile*' -print -quit)" ] \
          || { echo "no libclang_rt.profile under /usr/lib/llvm-*; -fprofile-generate cannot link" >&2; exit 1; }; }
@@ -281,7 +275,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # fail and autoconf would read that as a feature answer.
 # gcc needs gold for a different reason: its profile-guided hot/cold split puts
 # hot functions in .text.hot.* input sections, and the default bfd ld
-# (binutils 2.47 on trixie) does not fold them into a .text.hot output section,
+# (binutils 2.47) does not fold them into a .text.hot output section,
 # so assert_profile_reached_the_link would measure nothing. gold does. A
 # -fuse-ld=gold flag fails for the same libtool reason as lld.
 RUN set -eux; \
@@ -367,14 +361,13 @@ RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
 # /corpus-src stays read-only: it holds the endpoints files train.sh asserts
 # against, which training must not be able to rewrite.
 #
-# The apt cache mounts are for build.sh installing mariadb-server, which the
+# The apk cache mount is for build.sh installing mariadb-13.1, which the
 # PrestaShop corpus app needs while training (php/pgo/train.sh brackets it with
 # corpus/prestashop/db-up.sh and db-down.sh). It stays in this stage:
 # runtime-base copies only specific /usr/local paths out, and tests/smoke.sh
 # asserts the mariadb-server binaries are absent from shipped images.
 RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/var/cache/apk,sharing=locked \
     --mount=type=bind,from=corpus,source=/corpus,target=/corpus,rw \
     --mount=type=bind,from=corpus,source=/corpus-src,target=/corpus-src \
     bash /build/php/build.sh

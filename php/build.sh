@@ -13,10 +13,10 @@ PHP_VERSION="${PHP_VERSION:?php/build.sh needs PHP_VERSION}"
 PHP_ERA="${PHP_ERA:-modern}"
 UARCH="${UARCH:-baseline}"
 
-# Empty for the modern era, which links against what Debian ships. The legacy era
+# Empty for the modern era, which links against what Wolfi ships. The legacy era
 # points this at the vendored prefix; ldflags.sh turns it into an rpath on the
 # binary rather than a global LD_LIBRARY_PATH, which let a vendored libcurl
-# shadow Debian's for every process in the image.
+# shadow the system's for every process in the image.
 PHP_DEPS_PREFIX="${PHP_DEPS_PREFIX:-}"
 
 # configure-args.sh renders literal text that no shell re-expands, so a flag that
@@ -85,13 +85,13 @@ export EXTRA_LDFLAGS_PROGRAM="-pie"
 #
 # Neither lld (for this section) nor gold emits a PT_GNU_PROPERTY program header,
 # so the refusal depends on glibc's ld.so reading the property out of the legacy
-# PT_NOTE segment. trixie's glibc 2.41 does; glibc 2.44 does not. The runtime
-# proof in tests/test-uarch.sh guards that, not readelf.
+# PT_NOTE segment, which glibc 2.44 (Wolfi's) does not do. The runtime proof in
+# tests/test-uarch.sh guards that, not readelf.
 #
 # Linking this object (it has no GNU_PROPERTY_X86_FEATURE_1_AND) makes lld drop
 # any IBT/SHSTK marking; the shipped binaries carry none
 # (tests/assert-elf-hardening.sh).
-if [ "$UARCH" = v3 ] && [ "$(dpkg --print-architecture)" = amd64 ] && [ "${COMPILER:-clang}" = clang ]; then
+if [ "$UARCH" = v3 ] && [ "$(bash "$HERE/arch.sh")" = amd64 ] && [ "${COMPILER:-clang}" = clang ]; then
   ISA_NOTE_DIR="$(mktemp -d)"
   trap 'rm -rf "$ISA_NOTE_DIR"' EXIT
   ISA_NOTE_OBJ="$ISA_NOTE_DIR/isa-note-x86-64-v3.o"
@@ -132,7 +132,7 @@ if [ -n "$PHP_DEPS_PREFIX" ]; then
 fi
 
 # --with-curl carries the vendored prefix only on versions that vendor curl
-# (7.0-7.2 per deps/versions.lock; 7.3-8.0 link trixie's libcurl). On 7.0/7.1,
+# (7.0-7.2 per deps/versions.lock; 7.3-8.0 link the system libcurl). On 7.0/7.1,
 # ext/curl/config.m4 is pure CURL_DIR + $CURL_DIR/bin/curl-config, so splicing
 # the prefix onto a version that did not vendor curl fails configure. The
 # decision is derived from the artifact build-deps.sh produced, not from a
@@ -155,7 +155,7 @@ fi
 # PHP_SETUP_ICU has no pkg-config branch (zero occurrences of PKG_CONFIG in
 # 7.0.33, seven in 7.1.33): it shells out to icu-config, found at
 # $PHP_ICU_DIR/bin or on $PATH, and errors with "Unable to detect ICU prefix"
-# otherwise. Trixie has no system icu-config, so 7.0 has to be told.
+# otherwise. The system ICU ships no icu-config, so 7.0 has to be told.
 #
 # php/ext.json carries the flag as a 7.0 override on intl; only the value is
 # derived here, from the artifact deps/build-deps.sh left behind. Putting
@@ -184,7 +184,7 @@ render_configure_args() {
     # `sed` exits 0 whether or not it substituted anything, so a flag that is no
     # longer rendered (renamed in ext.json, moved behind a version gate, dropped)
     # would silently stop carrying the vendored prefix -- for --with-openssl, a
-    # legacy build quietly linking trixie's OpenSSL 3 instead of the vendored
+    # legacy build quietly linking the system OpenSSL instead of the vendored
     # 1.1.1w. Assert the substitution happened.
     printf '%s\n' "$args" | grep -qx -- "${flag}=${PHP_DEPS_PREFIX}" || {
       echo "PREFIXED_CONFIGURE_FLAGS names ${flag}, but php/configure-args.sh does not" \
@@ -435,7 +435,7 @@ case "${COMPILER:-clang}" in
     # .text.unlikely, and forcing it on fails in the assembler
     # (ext/standard/var_unserializer.c, 8.1/8.2). There -freorder-functions alone
     # already puts profiled-hot functions in .text.hot.* (gcc 16.2, gold).
-    if [ "$(dpkg --print-architecture)" = arm64 ]; then
+    if [ "$(bash "$HERE/arch.sh")" = arm64 ]; then
       LTO_CFLAGS="-ffunction-sections -freorder-functions"
     fi
     LTO_LDFLAGS="-Wl,-z,keep-text-section-prefix"
@@ -529,8 +529,8 @@ assert_profile_reached_the_link() {
 # that dies with SIGILL instead -- read the note off the shipped binaries.
 # This proves the note is there, not that ld.so acts on it: gold and lld emit
 # no PT_GNU_PROPERTY here, so the refusal relies on glibc reading the property
-# from PT_NOTE (trixie's 2.41 does, newer glibc may not). tests/test-uarch.sh
-# proves the enforcement at runtime on the shipped image.
+# from PT_NOTE (glibc 2.44 does not). tests/test-uarch.sh proves the
+# enforcement at runtime on the shipped image.
 assert_isa_note() {
   local want="$1"; shift
   local bin notes needed
@@ -750,7 +750,7 @@ assert_php_src_hardening() {
       # landing pad when it starts with "bti c"/"bti jc", or with paciasp/
       # pacibsp, which BTI also accepts as one -- gcc and clang emit the PAC
       # form instead of a separate bti on every function that saves LR
-      # (checked on the trixie gcc 14 and clang 19 under this cflags.sh output).
+      # (checked on gcc 14 and clang 19 under this cflags.sh output).
       # Neither mnemonic exists on x86_64, so this counter stays 0 there.
       php && first && /\t/ { total++; if ($0 ~ /endbr64/) endbr++; if ($0 ~ /\t(bti|paciasp|pacibsp)(\t|$)/) bti++; first = 0 }
       # The call target has to *end* at _chk. Unanchored, this also matched
@@ -790,8 +790,8 @@ assert_php_src_hardening() {
         ;;
       aarch64)
         # The same assertion for -mbranch-protection=standard, with the same 50%:
-        # the gap that matters is "most entries" against "none", since neither
-        # trixie's gcc nor the gcc:16 image enables branch protection by default.
+        # the gap that matters is "most entries" against "none", since gcc 16
+        # without the openssf spec does not enable branch protection by default.
         # Like CET's IBT/SHSTK note on x86, the GNU_PROPERTY_AARCH64_FEATURE_1
         # BTI/PAC note is not asserted: it is the AND over every input object,
         # gold (the gcc path's linker) does not emit it, and its absence is not a
@@ -831,11 +831,13 @@ assert_php_src_hardening() {
 # actually needs: one ifunc that survives is one alias edge in the summary
 # index, and ld.lld segfaults on the next build rather than here.
 assert_no_ifunc_symbols() {
-  local bin syms n control
+  local bin syms n control libc
+  libc="$(readlink -f /usr/lib/libc.so.6)"
+  [ -f "$libc" ] || { echo "FATAL: no libc.so.6 at /usr/lib/libc.so.6 for the IFUNC positive control" >&2; exit 1; }
   # Positive control on the same instrument, taken once: libc is full of defined
   # IFUNC symbols, so if this matcher cannot find any there it cannot have found
   # any in php either and every "0" below would mean nothing.
-  control="$(readelf -sW --dyn-syms /lib/*/libc.so.6 2>/dev/null | awk '$4=="IFUNC" && $7!="UND"' | wc -l)"
+  control="$(readelf -sW --dyn-syms "$libc" | awk '$4=="IFUNC" && $7!="UND"' | wc -l)"
   [ "$control" -gt 0 ] \
     || { echo "FATAL: the IFUNC matcher found none in libc -- it cannot measure anything, so the counts below prove nothing" >&2; exit 1; }
   for bin in "$@"; do
@@ -916,11 +918,14 @@ if [ "$PGO" = true ]; then
   # prestashop and no PGO=false build trains, so the server is installed here,
   # only when training is about to run. Fatal on failure: a run that silently
   # skipped PrestaShop would ship a profile that looks complete and is not.
-  apt-get update && apt-get install -y --no-install-recommends mariadb-server \
-    || { echo "FATAL: apt-get install mariadb-server failed -- cannot train the prestashop corpus app" >&2; exit 1; }
+  apk add --cache-dir /var/cache/apk -U mariadb-13.1 mariadb-13.1-client \
+    || { echo "FATAL: apk add mariadb-13.1 mariadb-13.1-client failed -- cannot train the prestashop corpus app" >&2; exit 1; }
   command -v mariadbd >/dev/null 2>&1 || command -v mysqld >/dev/null 2>&1 \
-    || { echo "FATAL: mariadb-server installed but neither mariadbd nor mysqld is on PATH" >&2; exit 1; }
-  echo "ok: mariadb-server installed for training"
+    || { echo "FATAL: mariadb-13.1 installed but neither mariadbd nor mysqld is on PATH" >&2; exit 1; }
+  # The corpus scripts drive the server with the mariadb and mysqladmin clients.
+  command -v mariadb >/dev/null 2>&1 && command -v mysqladmin >/dev/null 2>&1 \
+    || { echo "FATAL: the mariadb and mysqladmin clients are not on PATH after installing mariadb-13.1-client" >&2; exit 1; }
+  echo "ok: mariadb-13.1 installed for training"
 
   echo "=== training"
   PGO_TRAIN_SUMMARY="$TRAIN_SUMMARY" \
@@ -1027,7 +1032,7 @@ if [ "$PGO" = true ]; then
     # demote code the training workload simply never reached. -Wno-coverage-mismatch
     # tolerates a source line-map drift between pass 1 and pass 2 objects (LTO
     # can reorder inlining decisions between passes); both are gcc >=12 flags,
-    # present in trixie's default gcc.
+    # present in gcc 16.
     PROF_FLAGS_USED="-fprofile-use=$PROFRAW_DIR -fprofile-partial-training -Wno-coverage-mismatch -Wno-missing-profile"
     profdata_sha256="n/a-gcc"
     profile_merge="flat-accumulated-in-place"
@@ -1069,7 +1074,7 @@ assert_profile_reached_the_link "$([ "$PGO" = true ] && echo yes || echo no)" \
 assert_no_ifunc_symbols /usr/local/bin/php /usr/local/sbin/php-fpm
 # amd64 only: arm64 has no glibc check of this kind, its v3 (armv9-a) images
 # simply fault on an older core.
-if [ "$(dpkg --print-architecture)" = amd64 ]; then
+if [ "$(bash "$HERE/arch.sh")" = amd64 ]; then
   assert_isa_note "$([ "$UARCH" = v3 ] && echo v3 || echo baseline)" \
     /usr/local/bin/php /usr/local/sbin/php-fpm
 fi
