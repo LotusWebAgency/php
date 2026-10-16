@@ -38,7 +38,7 @@ image_of() { echo "lotuswebagency/php:${1}-fpm"; }
 #
 # Every tier's corpus includes PrestaShop, whose database is mariadbd, not a
 # bundled sqlite file (php/pgo/corpus/prestashop/db-up.sh). The runtime -fpm
-# images this replays against do not ship mariadb-server, but the tier's corpus
+# images this replays against do not ship the MariaDB server, but the tier's corpus
 # image does and is already local, so mariadbd runs there, started by the corpus
 # image's own db-up.sh against its own datadir, on --network none. A fresh
 # sidecar per replay also gives every replay the datadir as built: set-host.sh

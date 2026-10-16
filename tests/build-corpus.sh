@@ -51,6 +51,12 @@ WANT_ARCH="${PLATFORM#linux/}"
 have_image() {  # have_image <ref>: exists locally AND is of the wanted arch
   [ "$(docker image inspect --format '{{.Architecture}}' "$1" 2>/dev/null || true)" = "$WANT_ARCH" ]
 }
+# have_builder <ref>: have_image AND a Wolfi image. A cli-builder tag left over
+# from before the Wolfi base would otherwise be picked up as "already built" and
+# train the corpus on a Debian userland. Wolfi images carry apk; Debian ones do not.
+have_builder() {
+  have_image "$1" && docker run --rm --init --network none --entrypoint apk "$1" --version >/dev/null 2>&1
+}
 
 # Same instrument as tests/build-all.sh and tests/smoke.sh: a content hash of
 # the build-context inputs, baked in as a label, so a stale corpus can be told
@@ -64,8 +70,8 @@ export INPUTS_HASH
 INPUTS_HASH="$(bash "${ROOT}/scripts/inputs-hash.sh")"
 echo "inputs-hash: $INPUTS_HASH"
 
-# --network host is opt-in, off by default. Dockerfile.corpus apt-get installs
-# mariadb-server and runs PrestaShop's installer inside a RUN step, and on a
+# --network host is opt-in, off by default. Dockerfile.corpus apk-installs
+# mariadb-13.1 and runs PrestaShop's installer inside a RUN step, and on a
 # host whose default bridge network has no outbound the build cannot reach
 # anything without it. A CI runner or a host with working bridge networking does
 # not need it and should not carry the extra trust it implies (host networking
@@ -77,7 +83,7 @@ if [ "${BUILD_CORPUS_NETWORK_HOST:-0}" = "1" ]; then
   echo "note: BUILD_CORPUS_NETWORK_HOST=1 -- building with --network host"
 else
   echo "note: BUILD_CORPUS_NETWORK_HOST is unset/0 -- building with the default bridge network." \
-       "Set BUILD_CORPUS_NETWORK_HOST=1 if the build fails to reach GitHub/Packagist/npm (mariadb-server" \
+       "Set BUILD_CORPUS_NETWORK_HOST=1 if the build fails to reach GitHub/Packagist/npm (mariadb-13.1" \
        "install, PrestaShop's installer, composer/npm installs all need outbound access)."
 fi
 
@@ -96,14 +102,14 @@ while IFS=$'\t' read -r tier _release builder tag _versions; do
   # run: the release image is always preferred over the bootstrap one.
   bootstrap_tag="lotuswebagency/php:${tier}-cli-builder-bootstrap"
   bootstrap_target="php-${tier//./_}-cli-builder-bootstrap"
-  if have_image "$builder"; then
+  if have_builder "$builder"; then
     : # release cli-builder already built -- use it, nothing to do here
-  elif have_image "$bootstrap_tag"; then
+  elif have_builder "$bootstrap_tag"; then
     echo "=== tier $tier: $builder not built yet -- using existing bootstrap $bootstrap_tag"
     builder="$bootstrap_tag"
   else
     echo "=== tier $tier: neither $builder nor $bootstrap_tag exist -- bootstrapping $bootstrap_tag"
-    if ! (cd "$ROOT" && RETRY_KIND=registry,apt,http RETRY_ATTEMPTS=5 "$ROOT/ci/retry.sh" docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$bootstrap_target" \
+    if ! (cd "$ROOT" && RETRY_KIND=registry,http RETRY_ATTEMPTS=5 "$ROOT/ci/retry.sh" docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$bootstrap_target" \
            --set '*.platform='"$PLATFORM" --load); then
       echo "=== tier $tier -> $tag: FAIL -- bootstrap build of $bootstrap_tag failed" >&2
       results+=("$tier"$'\t'"FAIL"$'\t'"bootstrap build of $bootstrap_tag failed")
@@ -121,7 +127,7 @@ while IFS=$'\t' read -r tier _release builder tag _versions; do
   fi
 
   echo "=== tier $tier -> $tag (from $builder)"
-  if RETRY_KIND=registry,apt,http RETRY_ATTEMPTS=5 "$ROOT/ci/retry.sh" docker build "${NETWORK_ARGS[@]}" --platform "$PLATFORM" -f "${ROOT}/php/pgo/Dockerfile.corpus" \
+  if RETRY_KIND=registry,http RETRY_ATTEMPTS=5 "$ROOT/ci/retry.sh" docker build "${NETWORK_ARGS[@]}" --platform "$PLATFORM" -f "${ROOT}/php/pgo/Dockerfile.corpus" \
        --build-arg "BUILDER_IMAGE=${builder}" --build-arg "TIER=${tier}" \
        --build-arg "INPUTS_HASH=${INPUTS_HASH}" \
        -t "$tag" "${ROOT}/php/pgo"; then

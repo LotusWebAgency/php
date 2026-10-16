@@ -204,7 +204,7 @@ for app in "${apps[@]}"; do
 done
 
 # PrestaShop's database check needs mariadbd running. The corpus image carries
-# mariadb-server (Dockerfile.corpus installs it to build the datadir), so
+# mariadb-13.1 (Dockerfile.corpus installs it to build the datadir), so
 # db-up.sh starts it inside this --rm container, as root against the datadir
 # (root can read and write it whatever its owner), with no network at all.
 for app in "${mysql_apps[@]:-}"; do

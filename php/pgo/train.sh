@@ -218,7 +218,7 @@ while IFS=$'\t' read -r app docroot version paths; do
 
   # mysql: apps need a running server before anything is requested. db-up.sh and
   # db-down.sh are the scripts Dockerfile.corpus and tests/test-corpus*.sh use;
-  # installing mariadb-server is php/build.sh's job. The EXIT trap is set as soon
+  # installing mariadb-13.1 is php/build.sh's job. The EXIT trap is set as soon
   # as the database is up and cleared after the normal db-down.sh call, so any
   # fail() during this app's block still stops mariadbd instead of leaking it into
   # the next app's port or the merge step.

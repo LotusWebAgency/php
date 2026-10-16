@@ -50,7 +50,7 @@
 #        below WordPress 6.6's 7.2.24), with the 2.1 SQLite drop-in (php 7.0).
 #   7.0  Laravel 5.5 (php >=7.0.0), Symfony 3.4 (php >=7.0.8, the last branch
 #        below Symfony 4.4's 7.1.3), and the same WordPress 6.5 and 2.1 drop-in.
-#        This tier needs PHP 7.0 to link Debian's libsqlite (3.46.1) rather than
+#        This tier needs PHP 7.0 to link the system libsqlite (Wolfi's) rather than
 #        its bundled 3.14.2: the drop-in writes its type cache with UPSERT, which
 #        SQLite gained in 3.24, and WordPress otherwise dies at CREATE TABLE
 #        wp_users. php/system-libs.lock asserts the linkage per image.
