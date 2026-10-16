@@ -48,9 +48,9 @@ interpreter in them gets no upstream fixes. See [SUPPORT.md](SUPPORT.md).
 | `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image (`default_version` in `matrix.json`, currently 8.5). |
 | `{release}-{flavor}[-v3]` | `8.5.11-fpm` | Full patch version. Read from the built image (`PHP_VERSION`) after tests and the Trivy gate, so a tag cannot name a version the image does not contain. |
 
-`-v3` images need a newer CPU. On amd64 older than Haswell/Excavator they refuse to start: glibc
-reads a GNU property note on the `php` and `php-fpm` binaries and exits 127 with
-`CPU ISA level is lower than required`. arm64 has no such check, so an unsupported core gets SIGILL. `armv9-a` code needs Neoverse N2/V2-class cores (Graviton4, Google Axion, Azure Cobalt
+`-v3` images need a newer CPU. On amd64 older than Haswell/Excavator they refuse to start: a startup
+check in the `php` and `php-fpm` binaries exits 127 with
+`this build requires an x86-64-v3 CPU`. arm64 has no such check, so an unsupported core gets SIGILL. `armv9-a` code needs Neoverse N2/V2-class cores (Graviton4, Google Axion, Azure Cobalt
 100, NVIDIA Grace). It does not run on Graviton2/3 or Ampere Altra. Apple M4-M6 do not provide SVE2
 in normal mode, so `-v3` also dies with SIGILL in Docker Desktop and OrbStack. Use the baseline tag
 on a Mac.

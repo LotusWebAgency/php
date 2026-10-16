@@ -27,24 +27,9 @@ case "$ARCH" in
     SEC="-fcf-protection=full"
     if [ "$UARCH" = "v3" ]; then
       MARCH="-march=x86-64-v3 -mtune=generic"
-      # A v3 build must refuse to load on a CPU without x86-64-v3 -- glibc's
-      # ld.so prints "CPU ISA level is lower than required" and exits 127 --
-      # instead of dying later with SIGILL. It does that when the ELF carries
-      # GNU_PROPERTY_X86_ISA_1_NEEDED naming v3. -Wl,-z,x86-64-v3 is not usable
-      # here: gold (the gcc era's linker, see the Dockerfile's ld shim) fails on
-      # it with "unknown -z option", and lld (the clang era's) warns and ignores
-      # it, emitting no note at all. Only ld.bfd honors it. gcc's -mneeded marks
-      # every object it compiles and gold OR-merges that into the output
-      # (without it gold only records x86-64-baseline). clang has no such flag;
-      # the clang era links a hand-made note object instead
-      # (php/isa-note-x86-64-v3.S, php/build.sh).
-      # Neither gold nor lld emits a PT_GNU_PROPERTY program header, so ld.so's
-      # refusal relies on glibc reading the property from the legacy PT_NOTE
-      # segment, which glibc 2.44 (Wolfi's) does not do, so the v3 refusal needs
-      # a loader-independent check. tests/test-uarch.sh proves it at runtime on
-      # the shipped image.
-      # arm64 has no glibc equivalent of this check, so nothing is added there.
-      if [ "${COMPILER:-clang}" = gcc ]; then MARCH="$MARCH -mneeded"; fi
+      # A v3 build must refuse to start on a CPU without x86-64-v3. That is a
+      # constructor linked into the SAPI executables (php/isa-gate-x86-64-v3.c,
+      # php/build.sh), not a compiler or linker flag.
     else MARCH="-march=x86-64-v2 -mtune=generic"; fi
     ;;
   arm64)

@@ -219,82 +219,78 @@ else
     || fail "v3 image has only $v3_count v3-only instructions against baseline's $base_count -- not substantially higher (wanted >= $threshold), -march=x86-64-v3 may not have reached the compile"
   echo "ok: v3 image carries $v3_count AVX2/BMI2/FMA3 instructions vs baseline's $base_count -- x86-64-v3 codegen confirmed"
 
-  # ---------------------------------------------------------------- ISA note
-  # Strict on amd64: the v3 image must declare x86-64-v3 in its
-  # GNU_PROPERTY_X86_ISA_1_NEEDED note and the baseline image must not.
-  # That note is what makes glibc's ld.so refuse to start the binary on a CPU
-  # below v3 ("CPU ISA level is lower than required", exit 127) instead of
-  # dying later with SIGILL. -march alone records nothing the loader checks
-  # (gold only writes x86-64-baseline), so the note comes from -mneeded on the
-  # gcc era and from php/isa-note-x86-64-v3.S on the clang era -- see
-  # php/cflags.sh and php/build.sh, whose build-time assert_isa_note checks
-  # the same thing; this is the check on the shipped image. readelf only shows
-  # the note is there; the runtime refusal proof below shows it is enforced.
+  # ------------------------------------------------------------ startup gate
+  # A -v3 binary must refuse to start on a CPU without x86-64-v3 instead of
+  # dying later with SIGILL, and a baseline binary must not carry the gate.
+  # The gate is php/isa-gate-x86-64-v3.c, a priority-101 constructor linked
+  # into php and php-fpm (php/build.sh): glibc 2.44 acts on no GNU property
+  # note and neither gold nor lld emits PT_GNU_PROPERTY, so there is no loader
+  # check to lean on.
   #
-  isa_note() { readelf -n "$1" 2>/dev/null | grep -i "x86 ISA needed" || true; }
-  b_isa="$(isa_note "$tmp/baseline-php")"
-  v_isa="$(isa_note "$tmp/v3-php")"
-  grep -qi "x86-64-v3" <<<"$v_isa" \
-    || fail "v3 image's ISA note does not declare x86-64-v3 (got: '${v_isa:-no ISA note}') -- it would die with SIGILL on an older CPU instead of being refused at load time"
-  if grep -qi "x86-64-v3" <<<"$b_isa"; then
-    fail "baseline image's ISA note declares x86-64-v3: '$b_isa'"
+  # First half: the gate is in the shipped binaries. Its message is a string in
+  # .rodata, which strip keeps.
+  gate_marker='this build requires an x86-64-v3 CPU'
+  has_gate() { grep -aqF "$gate_marker" "$1"; }
+  has_gate "$tmp/v3-php" \
+    || fail "v3 image's php does not contain the x86-64-v3 gate -- it would die with SIGILL on an older CPU instead of being refused at startup"
+  if has_gate "$tmp/baseline-php"; then
+    fail "baseline image's php contains the x86-64-v3 gate -- it would refuse to start on a CPU it is meant to run on"
   fi
-  echo "ok: ISA notes agree with the instruction-count measurement (baseline: '${b_isa:-none}', v3: '$v_isa')"
+  echo "ok: the x86-64-v3 gate is in the v3 php and not in the baseline php"
 
-  # Where the image ships php-fpm (the fpm flavor), its note is checked too: it
-  # is a separate link from php's and, on the clang era, a separate note object.
+  # Where the image ships php-fpm (the fpm flavor), it is a separate link.
   if extract_bin "$V3" /usr/local/sbin/php-fpm "$tmp/v3-php-fpm"; then
-    fpm_isa="$(isa_note "$tmp/v3-php-fpm")"
-    grep -qi "x86-64-v3" <<<"$fpm_isa" \
-      || fail "v3 image's php-fpm ISA note does not declare x86-64-v3 (got: '${fpm_isa:-no ISA note}')"
+    has_gate "$tmp/v3-php-fpm" \
+      || fail "v3 image's php-fpm does not contain the x86-64-v3 gate"
     if extract_bin "$BASELINE" /usr/local/sbin/php-fpm "$tmp/baseline-php-fpm"; then
-      if grep -qi "x86-64-v3" <<<"$(isa_note "$tmp/baseline-php-fpm")"; then
-        fail "baseline image's php-fpm ISA note declares x86-64-v3"
+      if has_gate "$tmp/baseline-php-fpm"; then
+        fail "baseline image's php-fpm contains the x86-64-v3 gate"
       fi
     fi
-    echo "ok: php-fpm ISA note declares x86-64-v3 in the v3 image ('$fpm_isa')"
+    echo "ok: the x86-64-v3 gate is in the v3 php-fpm"
   else
-    echo "note: $V3 ships no /usr/local/sbin/php-fpm (not an fpm flavor); only php's note was checked"
+    echo "note: $V3 ships no /usr/local/sbin/php-fpm (not an fpm flavor); only php was checked"
   fi
 
-  # ------------------------------------------------- runtime refusal proof
-  # The note is only half of the gate. Whether the loader acts on it depends
-  # on the glibc in the image: neither gold (gcc era) nor lld (clang era) emits
-  # a PT_GNU_PROPERTY program header here, so the refusal rests on glibc still
-  # reading GNU_PROPERTY_X86_ISA_1_NEEDED out of the legacy PT_NOTE segment.
-  # trixie's 2.41 does; a glibc 2.44 does not (it runs such a binary), and a
-  # base-image bump to one would silently turn the gate off while every readelf
-  # check above stays green. So prove it end to end, on the shipped binaries
-  # and the shipped glibc: copy each one out, OR an ISA bit no CPU has (0x10)
-  # into its ISA_1_NEEDED word on the host (scripts/patch_isa_needed.py -- the
-  # image has no python), and run both copies inside the same image. The
-  # unpatched copy must run; the patched one must be refused by ld.so with
-  # exit 127. Running the unpatched copy from the same bind mount is the
-  # control: it shows a refusal is about the note, not the mount or the path.
-  # The timeout runs inside the container (PID 1 would ignore a client-side kill).
-  #
-  # The host CPU must itself be x86-64-v3 for the control to run, as for the
-  # v3 image's own php above; every CI runner is.
-  run_in_image() {  # run_in_image <image> <host-binary> -> output on stdout, exit status of the binary
-    drun --rm --init --label claude.adhoc=1 -v "$2:/isa-probe:ro" \
-      --entrypoint timeout "$1" 20 /isa-probe -v 2>&1
-  }
-  refusal_proof() {  # refusal_proof <label> <host-binary>
-    local label="$1" bin="$2" out rc
-    chmod 755 "$bin"
-    python3 "$ROOT/scripts/patch_isa_needed.py" "$bin" "$bin.patched" >/dev/null \
-      || fail "could not patch the ISA note of the v3 image's $label"
-    chmod 755 "$bin.patched"
-    rc=0; out="$(run_in_image "$V3" "$bin")" || rc=$?
-    [ "$rc" -eq 0 ] || fail "the unpatched $label copy does not run in $V3 (exit $rc): $out"
-    rc=0; out="$(run_in_image "$V3" "$bin.patched")" || rc=$?
-    if [ "$rc" -ne 127 ] || ! grep -q "CPU ISA level is lower than required" <<<"$out"; then
-      fail "the patched $label (ISA_1_NEEDED with an unsupported bit) was NOT refused by ld.so in $V3 (exit $rc: $out) -- the image's glibc no longer enforces the v3 note, so the -v3 gate is off"
-    fi
-    echo "ok: $label: unpatched runs, patched ISA_1_NEEDED is refused at load time (exit 127, 'CPU ISA level is lower than required')"
-  }
-  refusal_proof php "$tmp/v3-php"
-  if [ -s "$tmp/v3-php-fpm" ]; then refusal_proof php-fpm "$tmp/v3-php-fpm"; fi
+  # Second half: the gate fires. Run the shipped binaries on an emulated CPU
+  # below x86-64-v3 -- qemu-user's Nehalem has SSE4.2 (the x86-64-v2 the Wolfi
+  # userland needs) and no AVX/AVX2/BMI/FMA -- from inside the image, so the
+  # image's own glibc and libraries load. The static qemu binary is bind-mounted
+  # in. Controls: Haswell (AVX2, BMI, FMA) must start the same v3 binary, which
+  # shows a refusal is about the CPU and not about qemu or the path, and the
+  # baseline binary must start on Nehalem. The timeout runs inside the container
+  # (PID 1 would ignore a client-side kill).
+  qemu_bin=""
+  for candidate in qemu-x86_64-static qemu-x86_64; do
+    path="$(command -v "$candidate" || true)"
+    if [ -n "$path" ] && ! readelf -d "$path" 2>/dev/null | grep -q '(NEEDED)'; then qemu_bin="$path"; break; fi
+  done
+  if [ -z "$qemu_bin" ]; then
+    [ "${UARCH_ALLOW_NO_QEMU:-0}" = 1 ] \
+      || fail "no statically linked qemu-x86_64 on this host (qemu-user-static), so the -v3 refusal cannot be tested. Install it, or set UARCH_ALLOW_NO_QEMU=1 to skip this proof knowingly"
+    echo "WARNING: UARCH_ALLOW_NO_QEMU=1 -- the -v3 refusal was NOT tested on an emulated CPU" >&2
+  else
+    run_on_cpu() {  # run_on_cpu <image> <cpu> <binary-in-image> [args...] -> output, exit status of the binary
+      local image="$1" cpu="$2" bin="$3"; shift 3
+      drun --rm --init --label claude.adhoc=1 -v "$qemu_bin:/qemu:ro" \
+        --entrypoint timeout "$image" 60 /qemu -cpu "$cpu" "$bin" "$@" 2>&1
+    }
+    refusal_proof() {  # refusal_proof <label> <binary-in-image> <version-arg>
+      local label="$1" bin="$2" arg="$3" out rc
+      rc=0; out="$(run_on_cpu "$V3" Haswell-noTSX "$bin" "$arg")" || rc=$?
+      [ "$rc" -eq 0 ] || fail "$label does not start on an emulated Haswell (AVX2) CPU (exit $rc): $out"
+      rc=0; out="$(run_on_cpu "$V3" Nehalem "$bin" "$arg")" || rc=$?
+      if [ "$rc" -ne 127 ] || ! grep -qF "$gate_marker" <<<"$out"; then
+        fail "$label was NOT refused on an emulated Nehalem CPU without AVX2 (exit $rc: $out) -- the -v3 gate is off"
+      fi
+      echo "ok: $label starts on an emulated Haswell and is refused on a Nehalem (exit 127, '$gate_marker')"
+    }
+    refusal_proof php /usr/local/bin/php -v
+    if [ -s "$tmp/v3-php-fpm" ]; then refusal_proof php-fpm /usr/local/sbin/php-fpm -v; fi
+    rc=0; out="$(run_on_cpu "$BASELINE" Nehalem /usr/local/bin/php -v)" || rc=$?
+    [ "$rc" -eq 0 ] || fail "the baseline php does not start on an emulated Nehalem CPU (exit $rc): $out"
+    echo "ok: the baseline php starts on an emulated Nehalem (x86-64-v2) CPU"
+  fi
 fi
 
 # ------------------------------------------------------------------- sanity
