@@ -43,6 +43,13 @@ if [ "$(( ${VERSION%%.*} * 100 + ${VERSION#*.} ))" -ge 702 ]; then
   echo "--with-password-argon2"
 fi
 
+# Before 7.4, `make install` also installs the PEAR copy bundled in the release
+# tarball (PEAR 1.10.5 / Archive_Tar 1.4.3 in 7.0.33), which scanners flag and
+# the images do not document. 7.4 made it opt-in.
+if [ "$(( ${VERSION%%.*} * 100 + ${VERSION#*.} ))" -lt 704 ]; then
+  echo "--without-pear"
+fi
+
 python3 - "$VERSION" "$HERE/ext.json" "$SOURCES" <<'PY'
 import json, sys
 
