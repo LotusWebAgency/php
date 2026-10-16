@@ -36,6 +36,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
       bash coreutils findutils grep sed gawk diffutils \
       autoconf automake libtool bison re2c patch xz file \
       gpg gpg-agent python3 linux-headers \
+    && apk list -I gcc binutils clang-19 lld-19 llvm-19 | sort > /etc/compiler-revisions \
     && case "$COMPILER" in clang|gcc) ;; *) echo "COMPILER must be clang or gcc, got COMPILER=$COMPILER" >&2; exit 1 ;; esac
 # Wolfi's compilers harden by default (gcc through /usr/local/bin wrappers that add
 # -specs openssf.spec, clang through /etc/clang/*.cfg) and bake in -march=x86-64-v2
@@ -45,8 +46,11 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # vendored libraries included, must take its arch flags from php/cflags.sh.
 ENV GCC_SPEC_FILE=no-hardening.spec CLANG_NO_DEFAULT_CONFIG=1
 # ccache's default compiler check hashes the mtime of the compiler binary. For gcc
-# that is the openssf wrapper, which a gcc upgrade does not touch.
-ENV CCACHE_COMPILERCHECK="%compiler% --version"
+# that is the openssf wrapper script, which a gcc upgrade does not touch, and
+# `--version` does not change between apk revisions of one version. The check
+# hashes the installed package revisions instead (a file, so each compile pays one
+# cat rather than an apk run).
+ENV CCACHE_COMPILERCHECK="cat /etc/compiler-revisions"
 ENV CC=$COMPILER CXX=$CXX_COMPILER AR=$AR_COMPILER RANLIB=$RANLIB_COMPILER NM=$NM_COMPILER
 # Plain ENV rather than the ARG, which does not survive into child stages:
 # php/build.sh, php/pgo/train.sh and php/pgo/discriminator-control.sh branch on it.
@@ -344,7 +348,7 @@ WORKDIR /src/php-${PHP_RELEASE}
 # silent behavior change on a security-relevant binary; a patch whose context no
 # longer matches exactly must fail the build. --forward turns an already-applied
 # patch into an error instead of an interactive prompt; --batch keeps the rest
-# non-interactive. A version without a directory needs no patches (8.1-8.5);
+# non-interactive. A version without a directory needs no patches;
 # deps/patches/README.md records which versions carry what. The count is echoed
 # so "applied nothing" is visible in the log.
 RUN set -eux; \
