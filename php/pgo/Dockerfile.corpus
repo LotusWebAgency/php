@@ -367,13 +367,13 @@ RUN --network=none set -eux; \
 
 # Runtime uid 33 owns everything the training run touches. The second find is
 # the positive control for the first: /usr/local/bin/php is root-owned in every
-# flavor of this image, so if `find ! -uid 33` cannot see it, it could not have
+# flavor of this image, so if `find ! -user 33` cannot see it, it could not have
 # seen a root-owned file under /corpus either and the first check proved nothing.
 RUN --network=none set -eu; \
-    bad="$(find /corpus ! -uid 33 -print -quit)"; \
+    bad="$(find /corpus ! -user 33 -print -quit)"; \
     [ -z "$bad" ] || { echo "FATAL: $bad is not owned by uid 33" >&2; exit 1; }; \
-    control="$(find /usr/local/bin/php ! -uid 33 -print -quit)"; \
-    [ -n "$control" ] || { echo "FATAL: '! -uid 33' matched nothing on a root-owned file -- the check above measures nothing" >&2; exit 1; }; \
+    control="$(find /usr/local/bin/php ! -user 33 -print -quit)"; \
+    [ -n "$control" ] || { echo "FATAL: '! -user 33' matched nothing on a root-owned file -- the check above measures nothing" >&2; exit 1; }; \
     echo "ok: /corpus is uid 33 only (control: $control)"
 
 CMD ["cat", "/corpus/MANIFEST"]
