@@ -126,7 +126,8 @@ LIBDIR_ARG="--with-libdir=lib"
 # libtidy-dev shipped a forwarding header, Wolfi's tidy-html5-dev does not. The
 # forwarder lives in a build-only directory so it never reaches the image.
 TIDY_COMPAT_DIR="/tmp/php-docker-tidy-compat"
-if [ -f /usr/include/tidybuffio.h ] && [ ! -f /usr/include/buffio.h ]; then
+if [ $(( ${PHP_VERSION%%.*} * 100 + ${PHP_VERSION##*.} )) -lt 703 ] \
+   && [ -f /usr/include/tidybuffio.h ] && [ ! -f /usr/include/buffio.h ]; then
   mkdir -p "$TIDY_COMPAT_DIR"
   printf '#include <tidybuffio.h>\n' > "$TIDY_COMPAT_DIR/buffio.h"
   export CPPFLAGS="-I${TIDY_COMPAT_DIR} ${CPPFLAGS:-}"

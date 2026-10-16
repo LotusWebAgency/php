@@ -7,13 +7,16 @@
 # the Debian patch series; LIBXML_DOTTED_VERSION still reports 2.9.14. Each
 # library is two rows: Debian's orig tarball, then its debian.tar.xz, whose
 # debian/patches/series deps/build-deps.sh applies. A `-debian` row is a side
-# input of the row above it and is never built on its own. libxslt is built
-# against the libxml2 above it, so the order of these rows matters.
+# input of the row above it and is never built on its own. The debian.tar.xz rows
+# point at snapshot.debian.org: the pool drops superseded package versions, the
+# snapshot does not. The orig tarballs stay on the pool, where they persist.
+# libxslt is built against the libxml2 above it, so the order of these rows
+# matters.
 # era     name         version   applies-to   sha256                                                             url
 legacy    libxml2         2.9.14                                  7.0-8.0      4fe913dec8b1ab89d13b489b419a8203176ea39e931eaa0d25b17eafb9c279e9   https://deb.debian.org/debian/pool/main/libx/libxml2/libxml2_2.12.7+dfsg+really2.9.14.orig.tar.xz
-legacy    libxml2-debian  2.12.7+dfsg+really2.9.14-2.1+deb13u3    7.0-8.0      3b6d265f482d6a8fbe3c056d2006fb3b563b4a838f7258b388ac5f0b29206921   https://deb.debian.org/debian/pool/main/libx/libxml2/libxml2_2.12.7+dfsg+really2.9.14-2.1+deb13u3.debian.tar.xz
+legacy    libxml2-debian  2.12.7+dfsg+really2.9.14-2.1+deb13u3    7.0-8.0      3b6d265f482d6a8fbe3c056d2006fb3b563b4a838f7258b388ac5f0b29206921   https://snapshot.debian.org/archive/debian/20260609T203938Z/pool/main/libx/libxml2/libxml2_2.12.7+dfsg+really2.9.14-2.1+deb13u3.debian.tar.xz
 legacy    libxslt         1.1.35                                  7.0-8.0      8247f33e9a872c6ac859aa45018bc4c4d00b97e2feac9eebc10c93ce1f34dd79   https://deb.debian.org/debian/pool/main/libx/libxslt/libxslt_1.1.35.orig.tar.xz
-legacy    libxslt-debian  1.1.35-1.2+deb13u3                      7.0-8.0      6a51679fd4ccf179d5018cea8c50681248b595c2e3911d9b2f38b07ac79e7deb   https://deb.debian.org/debian/pool/main/libx/libxslt/libxslt_1.1.35-1.2+deb13u3.debian.tar.xz
+legacy    libxslt-debian  1.1.35-1.2+deb13u3                      7.0-8.0      6a51679fd4ccf179d5018cea8c50681248b595c2e3911d9b2f38b07ac79e7deb   https://snapshot.debian.org/archive/debian/20260503T204801Z/pool/main/libx/libxslt/libxslt_1.1.35-1.2+deb13u3.debian.tar.xz
 legacy    openssl      1.1.1w    7.0-8.0      cf3098950cb4d853ad95c0841f1f9c6d3dc102dccfcacd521d93925208b76ac8   https://www.openssl.org/source/old/1.1.1/openssl-1.1.1w.tar.gz
 legacy    icu          67.1      7.0-7.3      94a80cd6f251a53bd2a997f6f1b5ac6653fe791dfab66e1eb0227740fb86d5dc   https://github.com/unicode-org/icu/releases/download/release-67-1/icu4c-67_1-src.tgz
 legacy    icu          70.1      7.4-8.0      8d205428c17bf13bb535300669ed28b338a157b1c01ae66d31d0d3e2d47c3fd5   https://github.com/unicode-org/icu/releases/download/release-70-1/icu4c-70_1-src.tgz

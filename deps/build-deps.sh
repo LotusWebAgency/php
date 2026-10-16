@@ -110,6 +110,8 @@ while read -r era name version applies sha url; do
       # --static (PHP 7.4+, and the shared xmlrpc.so) needs the private libs
       # on the plain Libs line.
       sed -i -E 's/^(Libs:.*)$/\1 -lz -lm/' "$PREFIX/lib/pkgconfig/libxml-2.0.pc"
+      grep -qE '^Libs:.* -lz -lm$' "$PREFIX/lib/pkgconfig/libxml-2.0.pc" \
+        || { echo "FATAL: libxml-2.0.pc did not gain -lz -lm; static consumers would fail to link" >&2; exit 1; }
       ;;
     libxslt)
       # 0005-Drop-libdir-and-static-linking-information-from-xslt-config
@@ -126,15 +128,18 @@ while read -r era name version applies sha url; do
       # "Unsupported options".
       #
       # --openssldir is not a build output location: it is the compiled-in
-      # runtime default for the CA trust store, and "make install_sw" (libs and
-      # headers only) never populates it. Pointing it at the vendored prefix
-      # would leave default_cert_file/default_cert_dir dangling and break peer
-      # verification for every TLS stream PHP's openssl extension opens
-      # (file_get_contents, SoapClient, SMTP+TLS; curl resolves its CA bundle
-      # independently). /etc/ssl is Debian's maintained store. conf/openssl.ini
-      # also sets openssl.cafile explicitly, as an independent second line of
-      # defense.
-      ( cd "$work" && ./config --prefix="$PREFIX" --openssldir=/etc/ssl \
+      # runtime default for the config file and the CA trust store, and
+      # "make install_sw" (libs and headers only) never populates it. It must
+      # not be /etc/ssl: Wolfi's /etc/ssl/openssl.cnf is written for OpenSSL 4
+      # (".pragma includedir", ".include", provider sections), which 1.1.1w
+      # cannot parse, so openssl_pkey_new() and openssl_csr_new() fail with
+      # "def_load_bio:missing equal sign". The Dockerfile's runtime-conf stage
+      # fills /etc/ssl/openssl-1.1 with a 1.1-syntax openssl.cnf and symlinks
+      # to the system CA store, so peer verification (file_get_contents,
+      # SoapClient, SMTP+TLS; curl resolves its CA bundle independently) still
+      # finds it. conf/openssl.ini also sets openssl.cafile explicitly, as an
+      # independent second line of defense.
+      ( cd "$work" && ./config --prefix="$PREFIX" --openssldir=/etc/ssl/openssl-1.1 \
           no-shared no-tests \
         && make -j"$(nproc)" && make install_sw )
       ;;
