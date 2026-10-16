@@ -118,8 +118,9 @@ fi
 # $LDAP_LIBDIR/liblber.so, and its multiarch fallback on 7.1-8.0 uses
 # $($CC -dumpmachine), which clang spells x86_64-pc-linux-gnu. Passing
 # --with-libdir=lib explicitly keeps $PHP_LIBDIR pinned for every extension at
-# once, matching the main build, and makes PHP_ADD_LIBRARY_WITH_PATH skip a
-# redundant -L (build/php.m4 suppresses -L for /usr/$PHP_LIBDIR).
+# once (it is also the default the main build, which does not pass the flag,
+# configures with) and makes PHP_ADD_LIBRARY_WITH_PATH skip a redundant -L
+# (build/php.m4 suppresses -L for /usr/$PHP_LIBDIR).
 LIBDIR_ARG="--with-libdir=lib"
 echo "shared extensions: configuring with $LIBDIR_ARG"
 

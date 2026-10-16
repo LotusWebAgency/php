@@ -1,6 +1,7 @@
 # Source patches
 
-One directory per PHP minor version, `php-<version>/`. The `php-build` stage of the `Dockerfile`
+One directory per PHP minor version, `php-<version>/`, plus `net-snmp-<version>/` for the vendored
+net-snmp build. The `php-build` stage of the `Dockerfile`
 applies its patches after the release tarball is unpacked and GPG-verified, and before
 `buildconf --force`:
 
@@ -15,6 +16,7 @@ patch -p1 --batch --forward --fuzz=0 < <each *.patch, in filename order>
   be rewritten against the new source.
 - **A missing directory is normal.** The build prints how many patches it applied, so "applied
   nothing" is visible in the log.
+- **net-snmp** patches are applied the same way by `deps/build-netsnmp.sh` before it configures.
 
 ## Policy
 
@@ -26,24 +28,33 @@ the release tarball others audit, and the only one that breaks silently. Prefer,
 2. a registry change (`php/ext.json`, `php/pecl.lock`);
 3. a patch here.
 
-Five of the seven distinct patches are backports of fixes php-src made on a later branch. The
-remaining two address the legacy OpenSSL probe and ARM64 interpreter inlining on clang 19.
+Five of the eight distinct PHP patches are backports of fixes php-src made on a later branch. One is
+Wolfi's carried OpenSSL 4 fix, the other two address the legacy OpenSSL probe and ARM64 interpreter
+inlining on clang 19. The net-snmp patch is a local compatibility change.
 
 ## Patches
 
 | Patch | PHP | Problem | Upstream |
 |---|---|---|---|
-| `010-dom-iterators-libxml2-const-scanner` | 7.0 | `ext/dom` passes `itemHashScanner` to `xmlHashScan()` with a non-`const` `xmlChar *name`. libxml2 2.9.8 made it `const`, and clang 16+ treats the mismatch (`-Wincompatible-function-pointer-types`) as an error, so `ext/dom` does not build against trixie's libxml2 2.9.14. | php-src added a `#if LIBXML_VERSION >= 20908` guard in 7.1. This is that guard. |
+| `010-dom-iterators-libxml2-const-scanner` | 7.0 | `ext/dom` passes `itemHashScanner` to `xmlHashScan()` with a non-`const` `xmlChar *name`. libxml2 2.9.8 made it `const`, and clang 16+ treats the mismatch (`-Wincompatible-function-pointer-types`) as an error, so `ext/dom` does not build against libxml2 2.9.8 or later. | php-src added a `#if LIBXML_VERSION >= 20908` guard in 7.1. This is that guard. |
 | `020-intl-msgformat-adapter-php-prefix` | 7.0-7.3 | `ext/intl` defines `icu::MessageFormatAdapter::getArgTypeList()`, and ICU defines the same symbol in `umsg.cpp`. Harmless against a shared ICU, but a multiple-definition link error against the static ICU this project builds. | php-src renamed its methods to `phpGetArgTypeList` / `phpGetMessagePattern` in 7.4. This is that rename. |
 | `030-snmp-get-gc-handler-signature` | 7.0-7.3 | `ext/snmp` defines `php_snmp_get_gc()` with `zval ***gc_data` but the `zend_object_get_gc_t` slot takes `zval **`. clang 16+ makes this an error, so `snmp.so` does not build. | php-src corrected the parameter in 7.4. |
 | `040-zip-mkstemp-include-unistd` | 7.0, 7.1 | The bundled libzip `mkstemp.c` calls `getpid()` without a declaration, which clang 16+ rejects, so `--enable-zip` does not build. | php-src added the `<unistd.h>` include in 7.2. |
 | `010-curl-openssl3-not-old` | 7.4, 8.0 | The `ext/curl/config.m4` probe for "libcurl linked against an old OpenSSL" only recognizes `OpenSSL/1.1` as new. Trixie's libcurl reports `OpenSSL/3.5.x`, so the probe takes the old-OpenSSL branch, which links OpenSSL into `ext/curl`. On the legacy era that resolves to the vendored static 1.1.1w, while `libcurl.so.4` is bound to the system `libssl.so.3`: two OpenSSLs with incompatible struct layouts in one process. HTTPS `curl_exec()` segfaults; plain HTTP works. The `HAVE_CURL_OLD_OPENSSL` macro defined by the same branch is not the mechanism, since its only consumer is ZTS-guarded and these images are NTS. | Not fixed upstream on these branches (both EOL). The patch adds `OpenSSL/3` alongside `OpenSSL/1.1`. |
-| `010-preserve-none-probe-clobbers` | 8.5 | The `preserve_none` run-probe in `Zend/Zend.m4` writes `x20` in its aarch64 inline asm but does not list it as a clobber, so the compiler may keep an input operand there. Debian's clang 19 with ThinLTO and lld does, the probe fails with `arg2 mismatch`, `HAVE_PRESERVE_NONE` stays undefined, and arm64 silently gets the CALL VM instead of TAILCALL (`php/build.sh` fails the build on that). amd64 is unaffected; its hunk only adds `memory` and `cc`. | php-src commit `a1cb5a37c0` ("fix aarch64 gcc preserve_none detection"), applied verbatim. Remove it once an 8.5 release carries the commit; `patch --forward` fails the build if it is applied twice. |
+| `010-preserve-none-probe-clobbers` | 8.5 | The `preserve_none` run-probe in `Zend/Zend.m4` writes `x20` in its aarch64 inline asm but does not list it as a clobber, so the compiler may keep an input operand there. Clang 19 with ThinLTO and lld does, the probe fails with `arg2 mismatch`, `HAVE_PRESERVE_NONE` stays undefined, and arm64 silently gets the CALL VM instead of TAILCALL (`php/build.sh` fails the build on that). amd64 is unaffected; its hunk only adds `memory` and `cc`. | php-src commit `a1cb5a37c0` ("fix aarch64 gcc preserve_none detection"), applied verbatim. Remove it once an 8.5 release carries the commit; `patch --forward` fails the build if it is applied twice. |
+| `010-openssl-ssl-ctx-options-uint64` (`030-` on 8.5) | 8.1-8.5 | `php_openssl_setup_crypto()` keeps the SSL_CTX options in an `int`. `SSL_OP_ALL` includes bit 31, so the value is negative and `SSL_CTX_set_options()` (a `uint64_t` since OpenSSL 3.0) receives it sign-extended with bits 32-63 set. OpenSSL 4.0 assigns `SSL_OP_ECH_GREASE` to bit 37, so every TLS client stream sends an ECH GREASE extension, and the handshake aborts where X25519 is unavailable (the FIPS provider). 8.1-8.5 build against the system OpenSSL 4. | Wolfi's `openssl-ssl-ctx-options-uint64.patch` (its php-8.2 copy, and its php-8.5 copy for the 8.5 backport), regenerated against each release with exact offsets. Remove it from a version once a release of that version carries the fix. |
 | `020-arm64-interpreter-noinline` | 8.5 | Clang 19 with PGO and ThinLTO can inline `execute_ex()` into `zend_do_link_class()`, whose dynamic stack allocation uses `x19` as its frame base. An opcode handler using `preserve_none` clobbers `x19`, but the inlined caller keeps using it, corrupting execution during interface autoloading. Prevent interpreter inlining on clang ARM64 in both the generated header and its template. PGO, ThinLTO and the TAILCALL VM remain enabled. | Local toolchain workaround. Remove after a compiler upgrade passes the autoload regression without it. |
 
-Patches per version: 7.0: 4, 7.1: 3, 7.2: 2, 7.3: 2, 7.4: 1, 8.0: 1, 8.5: 2. PHP 8.1-8.4 need none.
+Patches per version: 7.0: 4, 7.1: 3, 7.2: 2, 7.3: 2, 7.4: 1, 8.0: 1, 8.1: 1, 8.2: 1, 8.3: 1, 8.4: 1,
+8.5: 3.
 7.0 is at the ceiling of four patches per version, which is the point at which a version should be
 reconsidered for the matrix.
+
+### net-snmp patches
+
+| Patch | Problem | Upstream |
+|---|---|---|
+| `net-snmp-5.9.5.2/010-openssl-4-asn1-accessors` | `snmplib/snmp_openssl.c` reads `ASN1_STRING` fields (`type`, `length`, `data`) directly. OpenSSL 4.0 made the struct opaque, so the file does not compile. The patch uses the public accessors, which every supported OpenSSL version has. | Local compatibility change. Remove it when a net-snmp release builds against OpenSSL 4, or when net-snmp stops being vendored. |
 
 ### Extension patches
 
@@ -65,6 +76,9 @@ together:
   differ from these and from each other only in hunk line numbers.
 - `php-7.0/` and `php-7.1/` `040-zip-mkstemp-include-unistd.patch`.
 - The four `030-snmp-get-gc-handler-signature.patch` copies differ only in hunk line numbers.
+- The five `openssl-ssl-ctx-options-uint64.patch` copies (`010-` in 8.1-8.4, `030-` in 8.5) differ
+  only in the `Source:` line and hunk line numbers; the 8.5 copy also omits the
+  `php_openssl_get_crypto_method_ctx_flags()` hunk, which that branch no longer has.
 
 Diff timestamps are stripped from every patch header so that identical changes are identical bytes.
 Check with `sha256sum deps/patches/*/*.patch`.
@@ -78,6 +92,8 @@ Check with `sha256sum deps/patches/*/*.patch`.
 - **intl msgformat:** if `deps/build-deps.sh` ever builds ICU shared instead of static for 7.0-7.3.
   The collision comes from the static link, not the source. Shared ICU would put an end-of-life
   library and ICU's 30 MB data blob back into every layer, which is what `--disable-shared` avoids.
+- **openssl uint64:** per version, once a release of that version carries the fix, or when it stops
+  being built against OpenSSL 4.
 - **preserve-none:** see the table.
 - **ARM64 interpreter inlining:** after a compiler upgrade passes the autoload regression without
   the patch on both baseline and v3 builds with PGO and ThinLTO.
