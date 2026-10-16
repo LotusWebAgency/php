@@ -77,6 +77,9 @@
 #     (Renovate's dockerfile manager keeps it current). A pinned digest means no
 #     source can change what is pulled.
 #   - The run's only Docker Hub reads are hub-verify's few anonymous ones.
+#   - The base image is not on Docker Hub: cgr.dev/chainguard/wolfi-base, pinned
+#     by digest in matrix.json and the Dockerfiles. Preflight verifies that
+#     digest's Chainguard cosign signature before any job builds on it.
 # Registry calls that can still meet a 429/5xx run under ci/retry.sh; builds also
 # retry transient HTTP and apk failures, never deterministic build errors.
 # Trivy's vulnerability DB is refreshed once per run in parallel with preflight,

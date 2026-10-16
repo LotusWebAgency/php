@@ -105,10 +105,9 @@ if [ "$MAIN" -eq 1 ]; then
   # php/build.sh's assert_php_src_hardening is the attributed one.
   #
   # Deliberately NOT asserted: the .note.gnu.property IBT/SHSTK marking that
-  # makes the loader *enforce* CET. It is absent from these binaries -- and from
-  # Debian trixie's own /bin/ls -- so it is a property of the base
-  # distribution's toolchain defaults, not of this build. Asserting it would
-  # fail on a correctly built image.
+  # makes the loader *enforce* CET. It is absent from these binaries, so it is
+  # a property of the toolchain defaults, not of this build's flags. Asserting
+  # it would fail on a correctly built image.
   #
   # The arch is the binary's own (ELF Machine), not the host's: an arm64 image
   # smoke-tested under emulation on an amd64 host carries aarch64 code, and

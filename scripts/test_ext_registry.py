@@ -401,7 +401,7 @@ class TestConfigureArgs(unittest.TestCase):
 
     def test_icu_dir_is_requested_on_70_only(self):
         # 7.0's PHP_SETUP_ICU has no pkg-config branch (it shells out to
-        # icu-config, which trixie does not ship), so only 7.0 must be told where
+        # icu-config, which the build does not provide), so only 7.0 must be told where
         # the vendored ICU is. 7.1+ use pkg-config only when --with-icu-dir is
         # absent; passing it there would route them into the legacy branch.
         self.assertIn("--with-icu-dir", self.run_args("7.0"))

@@ -21,7 +21,7 @@ ok()      { echo "ok: $*"; }
 fail()    { echo "FAIL: $*" >&2; FAILED+=("$*"); }
 
 # ---------------------------------------------------------- 1. matrix drift
-section "1/9 matrix.gen.hcl drift (scripts/gen_matrix.py --check)"
+section "1/10 matrix.gen.hcl drift (scripts/gen_matrix.py --check)"
 if python3 scripts/gen_matrix.py --check; then
   ok "matrix.gen.hcl matches matrix.json"
 else
@@ -29,7 +29,7 @@ else
 fi
 
 # -------------------------------------------------------------- 2. pgo tiers
-section "2/9 PGO corpus tiers (scripts/pgo_tiers.py check)"
+section "2/10 PGO corpus tiers (scripts/pgo_tiers.py check)"
 if python3 scripts/pgo_tiers.py check; then
   ok "every pgo=true version has a tier, every opt-out has a reason"
 else
@@ -37,7 +37,7 @@ else
 fi
 
 # --------------------------------------------------- 3. bake --print + COMPILER
-section "3/9 bake --print for every target and the pr subset (both platforms), COMPILER cross-check"
+section "3/10 bake --print for every target and the pr subset (both platforms), COMPILER cross-check"
 bake_print() {  # bake_print <group> -> the rendered JSON, or empty + FAIL on error
   local out
   if ! out=$(docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$1" --print 2>&1); then
@@ -132,7 +132,7 @@ print(f"pr legs: {len(legs)}, targets they bake: {len(ci)}, bake pr group: {len(
 fi
 
 # ------------------------------------------------------------- 4. shellcheck
-section "4/9 shellcheck on every shell file"
+section "4/10 shellcheck on every shell file"
 command -v shellcheck >/dev/null || fail "shellcheck not found on this host"
 if command -v shellcheck >/dev/null; then
   # rootfs's runtime scripts have no .sh extension (they ship as bare
@@ -195,7 +195,7 @@ if [ "${#php_files[@]}" -gt 0 ]; then
 fi
 
 # ----------------------------------------------------- 5. fetch-verified.sh
-section "5/9 deps/fetch-verified.sh (tests/test-fetch-verified.sh)"
+section "5/10 deps/fetch-verified.sh (tests/test-fetch-verified.sh)"
 if bash "$HERE/test-fetch-verified.sh"; then
   ok "test-fetch-verified.sh"
 else
@@ -203,7 +203,7 @@ else
 fi
 
 # --------------------------------------------- 6. python unit/lock-format tests
-section "6/9 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex, retry helper; tests/apps/: app cell planner)"
+section "6/10 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex, retry helper; tests/apps/: app cell planner)"
 # Covers, among others, the lock-file format checks:
 # scripts/test_versions_lock.py (deps/versions.lock), scripts/test_release_keys.py
 # (php/release-keys.asc), scripts/test_fetch_verified_sync.py (the two
@@ -238,7 +238,7 @@ else
 fi
 
 # ----------------------------------------------- 7. matrix <-> label consistency
-section "7/9 matrix.json <-> local image com.lotuswebagency.compiler labels (report-only for missing)"
+section "7/10 matrix.json <-> local image com.lotuswebagency.compiler labels (report-only for missing)"
 # Whatever fpm images already exist locally (from an earlier build-all.sh run,
 # or a one-off bake) get cross-checked against matrix.json right now, the same
 # comparison tests/smoke.sh makes per image at test time -- catching a stale
@@ -275,7 +275,7 @@ fi
 rm -f "$label_check_out"
 
 # --------------------------------- 8. build-all.sh vs bake --print target lists
-section "8/9 tests/build-all.sh's target list vs bake --print's target list"
+section "8/10 tests/build-all.sh's target list vs bake --print's target list"
 # tests/build-all.sh enumerates every image it builds from
 # scripts/gen_matrix.py --github targets -- the same source matrix.gen.hcl's
 # TARGETS variable is rendered from -- rather than naming a flavor or a count
@@ -314,7 +314,7 @@ else
 fi
 
 # ------------------------------------------------------------- 9. runners
-section "9/9 no ubuntu-slim runners in .github/workflows"
+section "9/10 no ubuntu-slim runners in .github/workflows"
 # ubuntu-slim runs jobs in a 1-vCPU container: a compile or test job there is
 # several times slower and a 180-minute build leg times out. Every runs-on and
 # matrix runner label must name a full VM image.
@@ -326,6 +326,52 @@ case "$slim_rc" in
   1) ok "no ubuntu-slim runner labels" ;;
   *) fail "could not scan .github/workflows for runner labels (grep exit $slim_rc)" ;;
 esac
+
+# ------------------------------------------------- 10. no Debian leftovers
+section "10/10 no apt-get, apt, dpkg or trixie in the image sources"
+# The base is Wolfi: a Debian package manager command or a trixie reference in a
+# Dockerfile, test, script or CI helper is a leftover from the Debian era or a
+# command that cannot work. Each legitimate mention is allowlisted below by file
+# and by an extended regex the hit's text must match, with its reason. An entry
+# that matches nothing fails too, so the list cannot rot. The runner-side apt in
+# .github/workflows (the runner is Ubuntu) is outside the scanned paths.
+#   "<path>|<regex the hit line must match>|<reason>"
+DEBIAN_ALLOW=(
+  "tests/smoke.sh|for b in apt apt-get dpkg|absence assertion: the image must carry no Debian package manager"
+  "tests/smoke.sh|ok: no apt, dpkg|the pass message of that absence assertion"
+  "scripts/test_versions_lock.py|debian_trixie|asserts deps/versions.lock vendors Debian trixie's libxml2/libxslt sources"
+  "deps/build-deps.sh|trixie|comment citing trixie as the vendored libxml2/libxslt source"
+  "deps/versions.lock|trixie|comment citing trixie as the vendored libxml2/libxslt source"
+)
+debian_hits="$(git grep -n -I -i --untracked -E 'apt-get|\bapt |dpkg|trixie' -- \
+  Dockerfile 'php/pgo/Dockerfile*' 'tests/*.sh' scripts 'php/*.sh' ci \
+  deps/build-deps.sh deps/versions.lock ':!tests/preflight.sh')" || [ "$?" -eq 1 ] \
+  || fail "git grep for Debian leftovers failed"
+declare -A allow_used=()
+bad_hits=""
+while IFS= read -r hit; do
+  [ -n "$hit" ] || continue
+  hit_path="${hit%%:*}"
+  hit_text="${hit#*:*:}"
+  allowed=0
+  for entry in "${DEBIAN_ALLOW[@]}"; do
+    IFS='|' read -r allow_path allow_re _ <<<"$entry"
+    if [ "$allow_path" = "$hit_path" ] && grep -Eiq -- "$allow_re" <<<"$hit_text"; then
+      allowed=1
+      allow_used["$entry"]=1
+    fi
+  done
+  [ "$allowed" -eq 1 ] || bad_hits+="$hit"$'\n'
+done <<<"$debian_hits"
+if [ -n "$bad_hits" ]; then
+  printf '%s' "$bad_hits" >&2
+  fail "apt-get/apt/dpkg/trixie in the image sources (reword it, or allowlist it in tests/preflight.sh with a reason)"
+else
+  ok "no apt-get, apt, dpkg or trixie outside the allowlist"
+fi
+for entry in "${DEBIAN_ALLOW[@]}"; do
+  [ -n "${allow_used[$entry]:-}" ] || fail "stale Debian-leftover allowlist entry (matches nothing): $entry"
+done
 
 # ------------------------------------------------------------------ summary
 echo

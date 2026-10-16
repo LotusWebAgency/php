@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Print the image architecture name (amd64 or arm64) for the machine running the build.
-# The base image has no dpkg, so uname is the authority. An unmapped machine fails loudly.
+# uname is the authority, not a package manager. An unmapped machine fails loudly.
 set -euo pipefail
 
 case "$(uname -m)" in
