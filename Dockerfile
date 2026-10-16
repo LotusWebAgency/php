@@ -816,19 +816,13 @@ FROM cli AS cli-builder
 USER root
 COPY --from=node-tools /out/ /usr/local/
 # runtime-base already has less, nano, procps, zip, unzip, zstd and the mariadb
-# shell. mariadb-13.1-dump installs normally here (it depends on perl for its
-# slow-log scripts, which the fpm/cli copy leaves out) and replaces the copied
-# mariadb-dump with the packaged one, same version; its mysqldump symlink would
-# bring back MariaDB's "Deprecated program name" warning, so the symlink is replaced
-# by the wrapper again (rm first: writing through the symlink clobbers
-# mariadb-dump). mariadb-admin and mariadb-check stay the copied binaries.
+# shell, plus the mariadb-dump/-admin/-check binaries and mysql* wrappers it copies
+# from mariadb-dump-src; every flavor keeps those same copies, so all report one
+# version and apk audit stays clean.
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     set -eux; \
     apk add --cache-dir /var/cache/apk -U \
-      nodejs-24 corepack git rsync patch make brotli sqlite jq mariadb-13.1-dump; \
-    rm -f /usr/bin/mysqldump; \
-    printf '#!/bin/sh\nexec mariadb-dump "$@"\n' > /usr/bin/mysqldump; \
-    chmod 755 /usr/bin/mysqldump; \
+      nodejs-24 corepack git rsync patch make brotli sqlite jq; \
     find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 COPY conf/php-builder.ini /usr/local/etc/php/conf.d/10-php.ini
 # Verify the installer against Composer's published signature rather than piping

@@ -608,7 +608,7 @@ apk_installed=$(drun --rm "$IMAGE" apk info 2>/dev/null || true)
 grep -qE '^glibc-[0-9]' <<<"$apk_installed" \
   || { echo "FAIL: apk info could not see glibc as installed -- the perl/snmp absence checks below would prove nothing"; exit 1; }
 # cli-builder and ext-builder bring perl in on purpose (git's perl scripts,
-# mariadb-13.1-dump, autoconf and automake are perl programs). Every flavor is
+# autoconf and automake are perl programs). Every flavor is
 # still held to the snmp half: no distro net-snmp package, which is what would
 # put a second net-snmp in the image.
 stray_regex='^(libsnmp.*|libnetsnmp.*|net-snmp.*)$'
@@ -1379,7 +1379,7 @@ case "$FLAVOR" in
       drun --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
         || { echo "FAIL: cli-builder is missing $tool (Dockerfile's cli-builder stage should provide it)"; exit 1; }
     done
-    for pkg in nodejs-24 corepack mariadb-13.1-dump git; do
+    for pkg in nodejs-24 corepack git; do
       drun --rm "$IMAGE" apk info -e "$pkg" | grep -qx "$pkg" \
         || { echo "FAIL: cli-builder: the apk package $pkg is not installed"; exit 1; }
     done
@@ -1388,7 +1388,10 @@ case "$FLAVOR" in
     fi
     node_bin=$(drun --rm "$IMAGE" sh -c 'command -v node')
     [ "$node_bin" = /usr/bin/node ] || { echo "FAIL: cli-builder: node is '$node_bin', expected the apk binary /usr/bin/node"; exit 1; }
-    echo "ok: cli-builder's node, corepack, git and mariadb-dump are apk packages (nodejs-24, corepack, git, mariadb-13.1-dump); the apk npm package is absent"
+    if drun --rm "$IMAGE" apk audit --system 2>/dev/null | grep -q .; then
+      echo "FAIL: cli-builder: apk audit --system reports modified package files"; exit 1
+    fi
+    echo "ok: cli-builder's node, corepack and git are apk packages (nodejs-24, corepack, git); the apk npm package is absent; apk audit --system is clean"
     node_major=$(drun --rm "$IMAGE" node -p 'process.versions.node.split(".")[0]')
     [ "$node_major" = "24" ] || { echo "FAIL: cli-builder's node major is '$node_major', expected 24 (apk nodejs-24)"; exit 1; }
     for cmd in "npm --version" "npx --version" "corepack --version" "composer --version" "semantic-release --version"; do
