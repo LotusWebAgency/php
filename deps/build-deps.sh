@@ -106,6 +106,10 @@ while read -r era name version applies sha url; do
           --without-python --without-http --without-ftp --without-icu \
           --without-lzma --with-zlib \
         && make -j"$(nproc)" && make install )
+      # Static only, so a consumer that links through pkg-config without
+      # --static (PHP 7.4+, and the shared xmlrpc.so) needs the private libs
+      # on the plain Libs line.
+      sed -i -E 's/^(Libs:.*)$/\1 -lz -lm/' "$PREFIX/lib/pkgconfig/libxml-2.0.pc"
       ;;
     libxslt)
       # 0005-Drop-libdir-and-static-linking-information-from-xslt-config

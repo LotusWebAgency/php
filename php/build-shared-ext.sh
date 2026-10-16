@@ -121,6 +121,16 @@ fi
 # once, matching the main build, and makes PHP_ADD_LIBRARY_WITH_PATH skip a
 # redundant -L (build/php.m4 suppresses -L for /usr/$PHP_LIBDIR).
 LIBDIR_ARG="--with-libdir=lib"
+
+# xmlrpc (7.x) links libxml2, which the legacy era vendors as a static archive
+# under PHP_DEPS_PREFIX: 7.4 finds it through pkg-config, 7.0-7.3 through
+# xml2-config in $PHP_LIBXML_DIR (phpize builds do not register --with-libxml-dir,
+# so the variable comes from the environment). The modern era has no prefix and
+# uses the system libxml2.
+if [ -n "${PHP_DEPS_PREFIX:-}" ] && [ -x "${PHP_DEPS_PREFIX}/bin/xml2-config" ]; then
+  export PKG_CONFIG_PATH="${PHP_DEPS_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+  export PHP_LIBXML_DIR="$PHP_DEPS_PREFIX"
+fi
 echo "shared extensions: configuring with $LIBDIR_ARG"
 
 # Required, not defaulted: falling back to "modern" on a legacy build would
