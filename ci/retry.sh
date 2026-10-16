@@ -17,20 +17,23 @@
 #   RETRY_KIND      what counts as transient, comma-separated (default "registry"):
 #                   registry  429, 5xx and GHCR's `unknown blob` from docker, buildx, cosign
 #                   http      curl/composer transfer errors, HTTP 408/429/5xx (`composer` is an alias)
-#                   apt       `Failed to fetch` with a 5xx, hash sum mismatches
+#                   apk       `temporary error`, `network error`, `fetch ... failed` from apk
 #                   git       RPC failures, HTTP 429/5xx, TLS handshake failures
 #                   net       DNS, refused/reset/timed-out connections, truncated transfers;
 #                             every kind includes it
 #                   Certificate errors, sha256 mismatches, unresolvable composer
-#                   requirements, missing apt packages or repositories and failed
-#                   authentication are never retried, whatever else matched.
+#                   requirements, apk's `UNTRUSTED signature`, missing repositories and
+#                   failed authentication are never retried, whatever else matched.
+#                   apk's `unable to select packages` alone is not transient either, but
+#                   apk prints it after a failed index fetch too (`temporary error`
+#                   first), so the fetch failure is what decides that one.
 #   RETRY_DELAYS    seconds to wait before retry 1, 2, ... (default "30 60 120 300 600 900"
 #                   when RETRY_KIND includes registry, else "5 15 45 120");
 #                   the last one repeats if RETRY_ATTEMPTS asks for more attempts
 #   RETRY_ATTEMPTS  attempts in total (default: one more than RETRY_DELAYS has entries)
 #
 # Only the command's stderr is matched (that is where docker, buildx, cosign,
-# curl, composer, git and apt print their errors). Its stdout is passed straight
+# curl, composer, git and apk print their errors). Its stdout is passed straight
 # through and never buffered, so a long `docker buildx bake` still streams -- which also means a
 # failed attempt's stdout is not discarded: wrap commands that print their result
 # on success only (`imagetools inspect --raw`, `docker pull`), not ones that
@@ -53,7 +56,7 @@ registry_selected=0
 for kind in "${kinds[@]}"; do
   case "$kind" in
     registry) registry_selected=1 ;;
-    net|http|composer|apt|git) ;;
+    net|http|composer|apk|git) ;;
     *) echo "retry.sh: unknown RETRY_KIND: $kind" >&2; exit 2 ;;
   esac
 done
@@ -88,11 +91,11 @@ net+='|http/2 stream [0-9]+ was not closed cleanly|i/o timeout|client\.timeout e
 http='curl: \((6|7|18|28|35|52|55|56|92)\)|curl error (6|7|18|28|35|52|55|56|92) while downloading'
 http+='|returned error: (408|429|5[0-9][0-9])|\(HTTP/[0-9.]+ (408|429|5[0-9][0-9])'
 http+='|the requested url returned error: (408|429|5[0-9][0-9])'
-apt='failed to fetch .*(5[0-9][0-9]|hash sum mismatch)|hash sum mismatch'
+apk='temporary error|network error|fetch .* failed'
 git='rpc failed; (curl [0-9]+|http (429|5[0-9][0-9]))'
 git+='|the requested url returned error: (429|5[0-9][0-9])|gnutls_handshake\(\) failed'
 deny='ssl certificate problem|certificate verify failed|sha256 mismatch|your requirements could not be resolved'
-deny+='|api rate limit exceeded|unable to locate package|repository not found|authentication failed'
+deny+='|api rate limit exceeded|repository not found|authentication failed|untrusted signature'
 
 errfile="$(mktemp)"
 trap 'rm -f "$errfile"' EXIT
@@ -117,7 +120,7 @@ while :; do
     case "$kind" in
       registry) transient="$registry" ;;
       http) transient="$http" ;;
-      apt) transient="$apt" ;;
+      apk) transient="$apk" ;;
       git) transient="$git" ;;
       net) continue ;;
     esac

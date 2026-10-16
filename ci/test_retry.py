@@ -214,9 +214,12 @@ class RetryTest(unittest.TestCase):
                 "download failed (HTTP/1.1 408)", "download failed (HTTP/2 429)",
                 "download failed (HTTP/1.1 503)", "The requested URL returned error: 503",
             ],
-            "apt": ["E: Failed to fetch https://deb.debian.org/pkg 503 Service Unavailable",
-                    "E: Failed to fetch https://deb.debian.org/pkg Hash Sum mismatch",
-                    "Hash Sum mismatch"],
+            "apk": ["WARNING: fetching https://apk.cgr.dev/chainguard: temporary error (try again later)",
+                    "ERROR: https://packages.wolfi.dev/os/x86_64/curl-8.0-r0.apk: temporary error (try again later)",
+                    "ERROR: failed to download: network error (check Internet connection and firewall)",
+                    "ERROR: fetch https://packages.wolfi.dev/os/x86_64/APKINDEX.tar.gz failed",
+                    "WARNING: updating and opening https://apk.cgr.dev/chainguard: temporary error (try again later); "
+                    "ERROR: unable to select packages: curl (no such package)"],
             "git": ["error: RPC failed; curl 56 receive error", "RPC failed; HTTP 429",
                     "RPC failed; HTTP 503", "The requested URL returned error: 429",
                     "The requested URL returned error: 503", "gnutls_handshake() failed"],
@@ -235,7 +238,7 @@ class RetryTest(unittest.TestCase):
                     self.assertIn(f"transient {expected} error", proc.stderr)
 
     def test_net_is_implied_by_every_kind(self):
-        for kind in (None, "registry", "http", "composer", "apt", "git", "net"):
+        for kind in (None, "registry", "http", "composer", "apk", "git", "net"):
             with self.subTest(kind=kind):
                 self.reset()
                 proc, calls = self.run_retry("lookup ghcr.io on 127.0.0.53:53: no such host|ok", kind=kind)
@@ -247,7 +250,7 @@ class RetryTest(unittest.TestCase):
             ("http", "Error: Failed to get url 'https://develop.svn.wordpress.org/trunk/src/wp-includes/theme-i18n.json': "
              "cURL error 6: Could not resolve host: develop.svn.wordpress.org.", "net"),
             ("http", "curl: (6) Could not resolve host: x", "http"),
-            ("apt", "E: Failed to fetch http://deb.debian.org/debian/pool/x.deb  503  Service Unavailable", "apt"),
+            ("apk", "WARNING: fetching https://apk.cgr.dev/chainguard: temporary error (try again later)", "apk"),
             ("git", "fatal: unable to access 'https://github.com/x/': Could not resolve host: github.com", "net"),
             (None, "dial tcp: lookup ghcr.io on 127.0.0.53:53: no such host", "net"),
         ]
@@ -260,14 +263,15 @@ class RetryTest(unittest.TestCase):
 
     def test_kind_specific_negative_patterns(self):
         negatives = {
-            "registry": ["curl: (6) download failed", "Hash Sum mismatch", "RPC failed; HTTP 503"],
-            "net": ["too many requests", "curl: (6) download failed", "Hash Sum mismatch",
+            "registry": ["curl: (6) download failed", "ERROR: x.apk: temporary error (try again later)", "RPC failed; HTTP 503"],
+            "net": ["too many requests", "curl: (6) download failed", "ERROR: x.apk: temporary error (try again later)",
                     "returned error: 503", "RPC failed; HTTP 503"],
-            "http": ["too many requests", "Hash Sum mismatch", "RPC failed; HTTP 503",
+            "http": ["too many requests", "ERROR: x.apk: temporary error (try again later)", "RPC failed; HTTP 503",
                      "curl error 60 while downloading https://example.org"],
-            "composer": ["too many requests", "Hash Sum mismatch", "RPC failed; HTTP 503"],
-            "apt": ["too many requests", "curl: (6) download failed", "RPC failed; HTTP 503"],
-            "git": ["too many requests", "curl: (6) download failed", "Hash Sum mismatch",
+            "composer": ["too many requests", "ERROR: x.apk: temporary error (try again later)", "RPC failed; HTTP 503"],
+            "apk": ["too many requests", "curl: (6) download failed", "RPC failed; HTTP 503",
+                    "ERROR: unable to select packages: nosuchpkg (no such package)"],
+            "git": ["too many requests", "curl: (6) download failed", "ERROR: x.apk: temporary error (try again later)",
                     "The requested URL returned error: 408"],
         }
         for kind, lines in negatives.items():
@@ -282,11 +286,11 @@ class RetryTest(unittest.TestCase):
     def test_permanent_errors_override_transient_matches(self):
         denied = ["SSL certificate problem", "certificate verify failed", "sha256 mismatch",
                   "Your requirements could not be resolved", "API rate limit exceeded",
-                  "Unable to locate package", "Repository not found", "Authentication failed"]
-        kinds = ("registry", "net", "http", "composer", "apt", "git", "registry,http,apt,git")
+                  "UNTRUSTED signature", "Repository not found", "Authentication failed"]
+        kinds = ("registry", "net", "http", "composer", "apk", "git", "registry,http,apk,git")
         for kind in kinds:
             for line in denied:
-                for suffix in ("", "; connection reset by peer; too many requests; curl: (6); Hash Sum mismatch; RPC failed; HTTP 503"):
+                for suffix in ("", "; connection reset by peer; too many requests; curl: (6); temporary error; RPC failed; HTTP 503"):
                     with self.subTest(kind=kind, line=line, combined=bool(suffix)):
                         self.reset()
                         proc, calls = self.run_retry(f"{line}{suffix}|ok", kind=kind, rc=8)
@@ -295,7 +299,7 @@ class RetryTest(unittest.TestCase):
 
     def test_multiple_kinds_and_composer_alias(self):
         for kind, line, expected in [
-            ("net,apt", "Hash Sum mismatch", "apt"),
+            ("net,apk", "ERROR: x.apk: temporary error (try again later)", "apk"),
             ("git,http", "curl: (6)", "http"),
             ("composer,registry", "curl error 28 while downloading https://example.org", "http"),
             ("http,registry", "unknown blob", "registry"),
@@ -314,17 +318,17 @@ class RetryTest(unittest.TestCase):
                 self.assertEqual((proc.returncode, calls), (2, 0))
 
     def test_transient_stdout_is_not_matched(self):
-        for kind in ("registry", "net", "http", "composer", "apt", "git", "registry,http,apt,git"):
+        for kind in ("registry", "net", "http", "composer", "apk", "git", "registry,http,apk,git"):
             with self.subTest(kind=kind):
                 self.reset()
-                line = "connection reset by peer; too many requests; curl: (6); Hash Sum mismatch; RPC failed; HTTP 503"
+                line = "connection reset by peer; too many requests; curl: (6); temporary error; RPC failed; HTTP 503"
                 proc, calls = self.run_retry(f"{line}|ok", kind=kind, stdout_only=True, rc=4)
                 self.assertEqual((proc.returncode, calls), (4, 1))
                 self.assertEqual(proc.stdout, f"out-1\n{line}\n")
                 self.assertEqual(proc.stderr, "")
 
     def test_default_delays_and_attempt_counts(self):
-        for kind in (None, "registry", "http,registry", "net", "http", "composer", "apt", "git"):
+        for kind in (None, "registry", "http,registry", "net", "http", "composer", "apk", "git"):
             with self.subTest(kind=kind):
                 self.reset()
                 bases = [30, 60, 120, 300, 600, 900] if kind is None or "registry" in kind else [5, 15, 45, 120]
@@ -338,7 +342,7 @@ class RetryTest(unittest.TestCase):
                     self.assertLessEqual(wait, base + base // 2)
 
     def test_delay_and_attempt_overrides_for_every_kind(self):
-        for kind in ("registry", "net", "http", "composer", "apt", "git"):
+        for kind in ("registry", "net", "http", "composer", "apk", "git"):
             with self.subTest(kind=kind):
                 self.reset()
                 proc, calls = self.run_retry("connection refused", kind=kind,

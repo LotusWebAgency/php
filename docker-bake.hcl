@@ -28,8 +28,8 @@ variable "CREATED" { default = "" }
 # replaces the whole ref, so no ref may have two concurrent writers:
 #   - ARCH: the amd64 and arm64 runners build the same php/uarch pair.
 #   - CACHE_WEEK: an ISO week suffix rotates the ref weekly, so the first build
-#     of each week starts cache-empty and re-resolves apt packages; a stale ref
-#     would replay old Debian packages and fail Trivy on fixable HIGHs.
+#     of each week starts cache-empty and re-resolves apk packages; a stale ref
+#     would replay old Wolfi packages and fail Trivy on fixable HIGHs.
 variable "ARCH" { default = "" }
 
 # false makes CACHE_REGISTRY read-only (cache-from stays, cache-to is dropped).
@@ -37,16 +37,16 @@ variable "ARCH" { default = "" }
 # main writes a cache ref.
 variable "CACHE_PUSH" { default = true }
 variable "CACHE_WEEK" { default = "" }
-# Busts only the runtime apt layer when Debian's archive changes (see the
-# Dockerfile's runtime-base stage); ci/debian-archive-state.sh computes it.
-variable "DEBIAN_ARCHIVE_STATE" { default = "" }
+# Busts only the runtime apk layers when Wolfi's package index changes (see the
+# Dockerfile's runtime-base stage); ci/wolfi-index-state.sh computes it.
+variable "WOLFI_INDEX_STATE" { default = "" }
 
 target "_common" {
   dockerfile = "Dockerfile"
   context    = "."
   args = {
-    BASE_IMAGE           = BASE_IMAGE
-    DEBIAN_ARCHIVE_STATE = DEBIAN_ARCHIVE_STATE
+    BASE_IMAGE        = BASE_IMAGE
+    WOLFI_INDEX_STATE = WOLFI_INDEX_STATE
   }
   labels = {
     "org.opencontainers.image.source"        = "https://github.com/LotusWebAgency/php"
@@ -58,6 +58,10 @@ target "_common" {
     "org.opencontainers.image.revision"      = REVISION != "" ? REVISION : "unknown"
     "org.opencontainers.image.created"       = CREATED != "" ? CREATED : timestamp()
     "com.lotuswebagency.inputs-hash"         = INPUTS_HASH
+    # The base's repository and pinned digest, both split from BASE_IMAGE
+    # (repo:tag@sha256:...) so they cannot drift from what the build used.
+    "org.opencontainers.image.base.name"      = split(":", BASE_IMAGE)[0]
+    "org.opencontainers.image.base.digest"    = split("@", BASE_IMAGE)[1]
   }
   # A list, not two --set flags: a second `--set '*.attest=...'` replaces the
   # first and would drop the SBOM. Push only: the docker exporter a local build
@@ -106,9 +110,9 @@ target "php" {
     "com.lotuswebagency.eol-date"    = item.eol_date
     "org.opencontainers.image.title" = "lotuswebagency/php ${item.php}-${item.flavor}"
     "org.opencontainers.image.description" = item.support == "end-of-life" ? format(
-      "PHP %s (%s) compiled from source with profile-guided optimization, hardened, on debian:trixie-slim. PHP %s reached end of life on %s and receives no upstream security fixes -- see the README for supported versions.",
+      "PHP %s (%s) compiled from source with profile-guided optimization, hardened, on Wolfi. PHP %s reached end of life on %s and receives no upstream security fixes -- see the README for supported versions.",
       item.php, item.flavor, item.php, item.eol_date
-    ) : "PHP ${item.php} (${item.flavor}) compiled from source with profile-guided optimization, hardened, on debian:trixie-slim."
+    ) : "PHP ${item.php} (${item.flavor}) compiled from source with profile-guided optimization, hardened, on Wolfi."
   }
   tags       = item.tags
   platforms  = item.platforms

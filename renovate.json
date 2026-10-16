@@ -79,12 +79,12 @@
       "automerge": false
     },
     {
-      "description": "matrix.json is the single source of truth for the debian base: docker-bake.hcl always overrides the ARG BASE_IMAGE default of the Dockerfile and of php/pgo/Dockerfile.bootstrap-corpus (both are built only through bake), so Renovate must not pin or bump that default a second time",
+      "description": "matrix.json is the single source of truth for the wolfi base: docker-bake.hcl always overrides the ARG BASE_IMAGE default of the Dockerfile and of php/pgo/Dockerfile.bootstrap-corpus (both are built only through bake), so Renovate must not pin or bump that default a second time",
       "matchManagers": [
         "dockerfile"
       ],
       "matchPackageNames": [
-        "debian"
+        "cgr.dev/chainguard/wolfi-base"
       ],
       "matchFileNames": [
         "Dockerfile",
@@ -105,6 +105,16 @@
         "digest",
         "pin",
         "patch"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "wolfi-base floats on :latest, so its updates are digest refreshes: auto-merge them once CI is green (CI verifies the new digest's Chainguard signature before building on it)",
+      "matchPackageNames": [
+        "cgr.dev/chainguard/wolfi-base"
+      ],
+      "matchUpdateTypes": [
+        "digest"
       ],
       "automerge": true
     },

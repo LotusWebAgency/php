@@ -78,7 +78,7 @@
 #     source can change what is pulled.
 #   - The run's only Docker Hub reads are hub-verify's few anonymous ones.
 # Registry calls that can still meet a 429/5xx run under ci/retry.sh; builds also
-# retry transient HTTP and apt failures, never deterministic build errors.
+# retry transient HTTP and apk failures, never deterministic build errors.
 # Trivy's vulnerability DB is refreshed once per run in parallel with preflight,
 # then shared as an artifact so matrix scans use the same DB without updating it.
 name: ci
@@ -90,10 +90,10 @@ on:
     branches: [main, develop]
   workflow_dispatch:
   schedule:
-    # Weekly rebuild: fresh base layers and Debian package updates. The bake
+    # Weekly rebuild: fresh base layers and Wolfi package updates. The bake
     # cache ref includes an ISO-week component (docker-bake.hcl's CACHE_WEEK)
     # so this run always starts the runtime-package layer's cache scope
-    # empty instead of replaying last week's apt-get install forever.
+    # empty instead of replaying last week's apk add forever.
     - cron: "10 4 * * 1"
 
 concurrency:
@@ -158,7 +158,7 @@ jobs:
       - name: Ensure shellcheck is present
         run: |
           command -v shellcheck >/dev/null \
-            || RETRY_KIND=apt ./ci/retry.sh sh -c 'sudo apt-get update && sudo apt-get install -y shellcheck'
+            || RETRY_KIND=net ./ci/retry.sh sudo sh -c 'apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y shellcheck'
 
       - name: tests/preflight.sh
         run: ./tests/preflight.sh
@@ -178,6 +178,26 @@ jobs:
 
       - name: Install regctl
         run: ./ci/install-regctl.sh
+
+      # Every digest the tree pins for the base (matrix.json, the Dockerfile's
+      # and the bootstrap Dockerfile's ARG default) must carry Chainguard's
+      # keyless signature before any job builds on it. Identity and issuer are
+      # the ones Chainguard documents for its public images (the "Provenance"
+      # tab of https://images.chainguard.dev/directory/image/wolfi-base: the
+      # chainguard-images/images release workflow on main); the signing
+      # certificate of the pinned digest carries exactly this SAN.
+      - name: Verify the base image signature
+        run: |
+          set -euo pipefail
+          refs="$(grep -ohE 'cgr\.dev/chainguard/wolfi-base:[^@" ]+@sha256:[a-f0-9]{64}' \
+            matrix.json Dockerfile php/pgo/Dockerfile.bootstrap-corpus | sort -u)"
+          [ -n "$refs" ] || { echo "FAIL: no pinned wolfi-base reference found" >&2; exit 1; }
+          while read -r ref; do
+            echo "verifying ${ref%%:*}@${ref##*@}"
+            ./ci/retry.sh cosign verify "${ref%%:*}@${ref##*@}" \
+              --certificate-identity-regexp '^https://github\.com/chainguard-images/images/\.github/workflows/release\.yaml@refs/heads/main$' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
+          done <<<"$refs"
 
       - name: tests/test-attest.sh
         run: ./tests/test-attest.sh
@@ -441,7 +461,7 @@ jobs:
           {
             echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)"
             echo "CACHE_WEEK=$(date -u +%G-W%V)"
-            echo "DEBIAN_ARCHIVE_STATE=$(./ci/debian-archive-state.sh)"
+            echo "WOLFI_INDEX_STATE=$(./ci/wolfi-index-state.sh)"
           } >> "$GITHUB_ENV"
 
       # A pull request that changes any build input (a Renovate base-digest bump,
@@ -484,10 +504,10 @@ jobs:
         run: |
           set -euo pipefail
           read -ra bake_targets <<<"$TARGET_BAKE"
-          # Retry transient registry, HTTP and apt failures from the build,
+          # Retry transient registry, HTTP and apk failures from the build,
           # with mostly layer-cache hits on the next attempt. Five attempts
           # (30s to 5min waits); deterministic build failures are not retried.
-          RETRY_KIND=registry,http,apt RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
+          RETRY_KIND=registry,http,apk RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
             --set "*.platform=$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
             --load
@@ -510,7 +530,7 @@ jobs:
         run: |
           set -euo pipefail
           slug="php-${TARGET_PHP//./_}"
-          RETRY_KIND=registry,http,apt RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm" \
+          RETRY_KIND=registry,http,apk RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm" \
             --set "*.platform=$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
             --load
@@ -1004,7 +1024,7 @@ jobs:
             echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)"
             echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "CACHE_WEEK=$(date -u +%G-W%V)"
-            echo "DEBIAN_ARCHIVE_STATE=$(./ci/debian-archive-state.sh)"
+            echo "WOLFI_INDEX_STATE=$(./ci/wolfi-index-state.sh)"
           } >> "$GITHUB_ENV"
 
       - name: Pull and verify this target's hash-pinned PGO corpus
@@ -1031,14 +1051,14 @@ jobs:
         run: |
           set -euo pipefail
           read -ra bake_targets <<<"$TARGET_BAKE"
-          # Retry transient registry, HTTP and apt failures with a warm layer
+          # Retry transient registry, HTTP and apk failures with a warm layer
           # cache. Safe for a push by digest: every attempt starts by deleting
           # metadata.json, so the digest read below is always the one the attempt
           # that succeeded wrote -- never a leftover of a failed one -- and nothing
           # else carries a digest forward (DIGEST goes to GITHUB_ENV only after
           # this). Whatever a failed attempt pushed stays an untagged, unreferenced
           # orphan in the staging repository.
-          RETRY_KIND=registry,http,apt RETRY_ATTEMPTS=5 ./ci/retry.sh bash -c 'rm -f metadata.json; exec "$@"' retry-bake \
+          RETRY_KIND=registry,http,apk RETRY_ATTEMPTS=5 ./ci/retry.sh bash -c 'rm -f metadata.json; exec "$@"' retry-bake \
             docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
             --set '*.platform='"$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
@@ -1587,5 +1607,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: ${{ env.DOCKERHUB_REPO }}
-          short-description: "PHP 7.0-8.5 built from source with PGO, hardened, on Debian trixie-slim"
+          short-description: "PHP 7.0-8.5 built from source with PGO, hardened, on Wolfi"
           readme-filepath: ./DOCKERHUB.md

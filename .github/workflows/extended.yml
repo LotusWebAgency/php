@@ -297,6 +297,14 @@ jobs:
 
       # The steps below run after a failed one on purpose: each reports on its
       # own, a missing image is a MISSING row rather than a skipped test.
+      # tests/test-uarch.sh runs the -v3 image's binaries on an emulated CPU
+      # without AVX2 and needs a statically linked qemu-x86_64. The runner is
+      # Ubuntu, so apt here is the runner's, not the image's; apt's own retries
+      # cover a flaky mirror, ci/retry.sh a dropped connection.
+      - name: Install qemu-user-static
+        if: ${{ !cancelled() && matrix.arch.name == 'amd64' }}
+        run: RETRY_KIND=net ci/retry.sh sudo sh -c 'apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends qemu-user-static'
+
       - name: uarch
         if: ${{ !cancelled() }}
         run: ci/extended-run.sh uarch uarch
