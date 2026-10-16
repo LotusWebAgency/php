@@ -122,6 +122,16 @@ fi
 # redundant -L (build/php.m4 suppresses -L for /usr/$PHP_LIBDIR).
 LIBDIR_ARG="--with-libdir=lib"
 
+# ext/tidy before 7.3 only knows tidy-html5's old header name, buffio.h; Debian's
+# libtidy-dev shipped a forwarding header, Wolfi's tidy-html5-dev does not. The
+# forwarder lives in a build-only directory so it never reaches the image.
+TIDY_COMPAT_DIR="/tmp/php-docker-tidy-compat"
+if [ -f /usr/include/tidybuffio.h ] && [ ! -f /usr/include/buffio.h ]; then
+  mkdir -p "$TIDY_COMPAT_DIR"
+  printf '#include <tidybuffio.h>\n' > "$TIDY_COMPAT_DIR/buffio.h"
+  export CPPFLAGS="-I${TIDY_COMPAT_DIR} ${CPPFLAGS:-}"
+fi
+
 # xmlrpc (7.x) links libxml2, which the legacy era vendors as a static archive
 # under PHP_DEPS_PREFIX: 7.4 finds it through pkg-config, 7.0-7.3 through
 # xml2-config in $PHP_LIBXML_DIR (phpize builds do not register --with-libxml-dir,
