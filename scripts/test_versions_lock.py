@@ -55,7 +55,11 @@ class TestLock(unittest.TestCase):
             self.assertIn(name, by_name)
             era, got, applies, url = by_name[name]
             self.assertEqual((era, got, applies), ("legacy", version, "7.0-8.0"), name)
-            self.assertIn("deb.debian.org/debian/pool/main/", url, name)
+            if name.endswith("-debian"):
+                # The pool drops superseded versions; the snapshot keeps them.
+                self.assertRegex(url, r"^https://snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z/pool/main/", name)
+            else:
+                self.assertIn("deb.debian.org/debian/pool/main/", url, name)
 
     def test_libxml2_is_built_before_libxslt(self):
         names = [ROW.match(l).group(2) for l in rows()]
