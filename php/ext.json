@@ -43,7 +43,13 @@
       "php": ">=7.0",
       "configure": null,
       "libs": ["libxml2-dev"],
-      "why": "WordPress KSES sanitization, PrestaShop XML templating; on by default"
+      "why": "WordPress KSES sanitization, PrestaShop XML templating; on by default",
+      "overrides": {
+        "7.0": {"configure": "--with-libxml-dir"},
+        "7.1": {"configure": "--with-libxml-dir"},
+        "7.2": {"configure": "--with-libxml-dir"},
+        "7.3": {"configure": "--with-libxml-dir"}
+      }
     },
     {
       "name": "exif",
