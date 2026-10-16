@@ -29,6 +29,19 @@ for tool in readelf objdump python3 docker; do
   command -v "$tool" >/dev/null || fail "$tool not found on this host; cannot verify uarch"
 done
 
+# The -v3 refusal proof (amd64 images only) runs the shipped binaries under a
+# statically linked qemu-x86_64. Resolve it here so a missing qemu fails before
+# any image work; UARCH_ALLOW_NO_QEMU=1 skips that one proof knowingly.
+qemu_bin=""
+for candidate in qemu-x86_64-static qemu-x86_64; do
+  path="$(command -v "$candidate" || true)"
+  if [ -n "$path" ] && ! readelf -d "$path" 2>/dev/null | grep -q '(NEEDED)'; then qemu_bin="$path"; break; fi
+done
+if [ -z "$qemu_bin" ] && [ "${UARCH_ALLOW_NO_QEMU:-0}" != 1 ] \
+   && [ "$(docker image inspect --format '{{.Architecture}}' "$V3")" = amd64 ]; then
+  fail "no statically linked qemu-x86_64 (qemu-x86_64-static) on this host, so the -v3 refusal cannot be tested. Install qemu-user-static, or set UARCH_ALLOW_NO_QEMU=1 to skip this proof knowingly"
+fi
+
 # readelf/objdump don't exist inside the runtime image -- pull the binary out
 # with docker cp and inspect it on the host, the same idiom tests/smoke.sh and
 # tests/test-pgo.sh use.
@@ -260,14 +273,7 @@ else
   # shows a refusal is about the CPU and not about qemu or the path, and the
   # baseline binary must start on Nehalem. The timeout runs inside the container
   # (PID 1 would ignore a client-side kill).
-  qemu_bin=""
-  for candidate in qemu-x86_64-static qemu-x86_64; do
-    path="$(command -v "$candidate" || true)"
-    if [ -n "$path" ] && ! readelf -d "$path" 2>/dev/null | grep -q '(NEEDED)'; then qemu_bin="$path"; break; fi
-  done
   if [ -z "$qemu_bin" ]; then
-    [ "${UARCH_ALLOW_NO_QEMU:-0}" = 1 ] \
-      || fail "no statically linked qemu-x86_64 on this host (qemu-user-static), so the -v3 refusal cannot be tested. Install it, or set UARCH_ALLOW_NO_QEMU=1 to skip this proof knowingly"
     echo "WARNING: UARCH_ALLOW_NO_QEMU=1 -- the -v3 refusal was NOT tested on an emulated CPU" >&2
   else
     run_on_cpu() {  # run_on_cpu <image> <cpu> <binary-in-image> [args...] -> output, exit status of the binary

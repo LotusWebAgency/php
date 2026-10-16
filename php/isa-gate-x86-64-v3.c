@@ -2,15 +2,17 @@
  *
  * A v3 build is compiled with -march=x86-64-v3 and dies with SIGILL, at some
  * arbitrary point, on a CPU without AVX2/BMI/FMA. This constructor runs before
- * main() and before any other constructor of the executable, checks the CPU,
- * and exits 127 with a message that names the fix instead.
+ * main() and ahead of the executable's other default-priority constructors,
+ * checks the CPU, and exits 127 with a message that names the fix instead.
+ * Load-time library initializers (shared objects initialize before the
+ * executable) and constructors with priority below 101 run earlier.
  *
  * It does not rely on the loader: glibc's ld.so can refuse a binary through a
  * GNU property note, but gold and lld emit no PT_GNU_PROPERTY program header and
  * glibc 2.44 no longer reads the legacy PT_NOTE, so the note enforces nothing.
  *
- * This file is compiled WITHOUT the v3 -march (php/build.sh passes the baseline
- * flags), so the code that runs before the check is itself baseline code.
+ * This file is compiled with the baseline (x86-64-v2) flags (php/build.sh passes
+ * cflags.sh baseline), so the code that runs before the check is itself baseline code.
  * It is a separate native object linked into the program only, so neither PGO
  * nor LTO sees it: it cannot be inlined, specialized or dropped as unused, and
  * `used` keeps the symbol across a section GC. php/build.sh asserts the marker
