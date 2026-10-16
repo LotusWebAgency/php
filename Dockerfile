@@ -307,7 +307,9 @@ RUN set -eux; \
     case "$COMPILER" in \
       clang) ln -sf /usr/bin/ld.lld /usr/local/lib/php-docker-ld/ld ;; \
       gcc)   ln -sf /usr/bin/ld.gold /usr/local/lib/php-docker-ld/ld; \
-             ln -sf /usr/bin/ld.gold "$(gcc -print-prog-name=ld)" ;; \
+             gcc_ld="$(gcc -print-prog-name=ld)"; \
+             case "$gcc_ld" in /*) ;; *) echo "FATAL: gcc -print-prog-name=ld printed '$gcc_ld', not an absolute path; the private ld cannot be replaced" >&2; exit 1 ;; esac; \
+             ln -sf /usr/bin/ld.gold "$gcc_ld" ;; \
     esac; \
     PATH=/usr/local/lib/php-docker-ld:$PATH; \
     if [ "$COMPILER" = gcc ]; then v="$("$(gcc -print-prog-name=ld)" --version | head -1)"; \
@@ -470,9 +472,23 @@ COPY --chmod=0755 rootfs/ /stage/
 # no CA store of its own, so TLS peer verification through PHP's openssl extension
 # (file_get_contents, stream_socket_client, SoapClient, SMTP+TLS) would fail
 # without help; curl resolves its own bundle and hides it. deps/build-deps.sh's
-# `--openssldir=/etc/ssl` sets the compiled-in default to Debian's store; this ini
-# is the explicit half and is harmless on the modern era.
+# `--openssldir=/etc/ssl/openssl-1.1` sets the compiled-in default; this ini is the
+# explicit half and is harmless on the modern era.
 COPY conf/openssl.ini /stage/usr/local/etc/php/conf.d/12-openssl.ini
+
+# The legacy era's openssldir: a 1.1-syntax openssl.cnf (the system's is OpenSSL 4
+# syntax, which 1.1.1w cannot parse) and symlinks to the system CA store, so the
+# compiled-in default_cert_file/default_cert_dir resolve.
+ARG PHP_ERA
+COPY conf/openssl-1.1.cnf /tmp/openssl-1.1.cnf
+RUN set -eux; \
+    if [ "$PHP_ERA" = legacy ]; then \
+      install -d /stage/etc/ssl/openssl-1.1; \
+      install -m 0644 /tmp/openssl-1.1.cnf /stage/etc/ssl/openssl-1.1/openssl.cnf; \
+      ln -s /etc/ssl/certs /stage/etc/ssl/openssl-1.1/certs; \
+      ln -s /etc/ssl/cert.pem /stage/etc/ssl/openssl-1.1/cert.pem; \
+    fi; \
+    rm -f /tmp/openssl-1.1.cnf
 
 # Baseline opcache settings, shared unmodified by every flavor. The numeric prefix
 # sorts before the entrypoint-written 90-opcache-env.ini and 99-env.ini, which
