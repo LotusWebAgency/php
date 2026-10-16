@@ -73,30 +73,25 @@ BASE_CXXFLAGS="$BASE_CFLAGS $CXX_STD"
 BASE_LDFLAGS="$(bash "$HERE/ldflags.sh" "$PHP_DEPS_PREFIX" /opt/imagemagick)"
 export EXTRA_LDFLAGS_PROGRAM="-pie"
 
-# amd64 v3 on the clang era: make ld.so refuse the SAPI executables on a CPU
-# without x86-64-v3 by linking in a hand-made GNU_PROPERTY_X86_ISA_1_NEEDED note
-# (php/isa-note-x86-64-v3.S; the gcc era gets the same from -mneeded in
-# php/cflags.sh). clang has no -mneeded, lld ignores -z x86-64-v3 and drops input
-# .note.gnu.property sections, so the note lives in a differently named section
-# of its own object. It goes through EXTRA_LDFLAGS_PROGRAM, the program-only
-# path, so shared modules are not marked; libtool passes a plain object on the
-# link line through untouched, and assert_isa_note below proves it reached the
-# final executables.
+# amd64 v3: the SAPI executables refuse to start on a CPU without x86-64-v3
+# instead of dying later with SIGILL. php/isa-gate-x86-64-v3.c is a priority-101
+# constructor that checks __builtin_cpu_supports("x86-64-v3") and exits 127. The
+# loader is not involved: glibc 2.44 does not act on a GNU property note and
+# neither gold nor lld emits PT_GNU_PROPERTY, so a note would enforce nothing.
 #
-# Neither lld (for this section) nor gold emits a PT_GNU_PROPERTY program header,
-# so the refusal depends on glibc's ld.so reading the property out of the legacy
-# PT_NOTE segment, which glibc 2.44 (Wolfi's) does not do. The runtime proof in
-# tests/test-uarch.sh guards that, not readelf.
-#
-# Linking this object (it has no GNU_PROPERTY_X86_FEATURE_1_AND) makes lld drop
-# any IBT/SHSTK marking; the shipped binaries carry none
-# (tests/assert-elf-hardening.sh).
-if [ "$UARCH" = v3 ] && [ "$(bash "$HERE/arch.sh")" = amd64 ] && [ "${COMPILER:-clang}" = clang ]; then
-  ISA_NOTE_DIR="$(mktemp -d)"
-  trap 'rm -rf "$ISA_NOTE_DIR"' EXIT
-  ISA_NOTE_OBJ="$ISA_NOTE_DIR/isa-note-x86-64-v3.o"
-  "${CC:-clang}" -c "$HERE/isa-note-x86-64-v3.S" -o "$ISA_NOTE_OBJ"
-  EXTRA_LDFLAGS_PROGRAM="$EXTRA_LDFLAGS_PROGRAM $ISA_NOTE_OBJ"
+# The gate is compiled here, separately, with the baseline (x86-64-v2) flags (no
+# v3 -march, no PGO, no LTO), so the code that runs before the check is baseline
+# code and neither optimizer can inline, specialize or drop it. It joins the link through
+# EXTRA_LDFLAGS_PROGRAM, the program-only path, so shared modules do not carry it;
+# libtool passes a plain object on the link line through untouched, and
+# assert_isa_gate below proves it reached the final executables.
+if [ "$UARCH" = v3 ] && [ "$(bash "$HERE/arch.sh")" = amd64 ]; then
+  ISA_GATE_DIR="$(mktemp -d)"
+  trap 'rm -rf "$ISA_GATE_DIR"' EXIT
+  ISA_GATE_OBJ="$ISA_GATE_DIR/isa-gate-x86-64-v3.o"
+  # shellcheck disable=SC2046  # cflags.sh prints a flag list
+  "${CC:-clang}" $(bash "$HERE/cflags.sh" baseline) -fPIE -c "$HERE/isa-gate-x86-64-v3.c" -o "$ISA_GATE_OBJ"
+  EXTRA_LDFLAGS_PROGRAM="$EXTRA_LDFLAGS_PROGRAM $ISA_GATE_OBJ"
 fi
 
 if [ -n "$PHP_DEPS_PREFIX" ]; then
@@ -538,42 +533,76 @@ assert_profile_reached_the_link() {
   done
 }
 
-# assert_isa_note <v3|baseline> <binary> [<binary>...]
+# assert_isa_gate <v3|baseline> <binary> [<binary>...]
 #
-# On amd64 a v3 image must refuse to start on a CPU without x86-64-v3 (glibc
-# ld.so, exit 127), and a baseline image must not claim to need it. Both come
-# from the GNU_PROPERTY_X86_ISA_1_NEEDED note, which no linker here records
-# from -march alone, so a flag that was silently ignored would ship an image
-# that dies with SIGILL instead -- read the note off the shipped binaries.
-# This proves the note is there, not that ld.so acts on it: gold and lld emit
-# no PT_GNU_PROPERTY here, so the refusal relies on glibc reading the property
-# from PT_NOTE (glibc 2.44 does not). tests/test-uarch.sh proves the
-# enforcement at runtime on the shipped image.
-assert_isa_note() {
+# On amd64 a v3 image must carry php/isa-gate-x86-64-v3.c in every SAPI
+# executable, and a baseline image must not: a baseline build that refused to
+# start would be as wrong as a v3 build that did not. The gate's message is a
+# string in .rodata, which survives `strip`, so this runs on the shipped
+# binaries. It proves the gate is linked in, not that it fires (that its
+# constructor is registered is assert_isa_gate_init_entry, on the unstripped
+# build-tree binaries);
+# tests/test-uarch.sh proves the refusal on an emulated CPU without AVX2.
+ISA_GATE_MARKER='this build requires an x86-64-v3 CPU'
+assert_isa_gate() {
   local want="$1"; shift
-  local bin notes needed
+  local bin
   for bin in "$@"; do
-    notes="$(readelf -n "$bin")" \
-      || { echo "FATAL: readelf could not read the notes of $bin" >&2; exit 1; }
-    # Positive control: --build-id=sha1 is always linked, so an empty or
-    # unparsed listing means the answers below are true for the wrong reason.
-    grep -q 'Build ID' <<<"$notes" \
-      || { echo "FATAL: readelf printed no build-id note for $bin -- the ISA note check measures nothing" >&2; exit 1; }
-    needed="$(grep -i 'x86 ISA needed' <<<"$notes" || true)"
+    [ -s "$bin" ] || { echo "FATAL: $bin is missing or empty -- the ISA gate check measures nothing" >&2; exit 1; }
     if [ "$want" = v3 ]; then
-      grep -qi 'x86-64-v3' <<<"$needed" || {
-        echo "FATAL: $bin does not declare x86-64-v3 in its GNU property note ('${needed:-no ISA note}')." \
-             "Its v3 codegen would die with SIGILL on an older CPU instead of being refused at load time." \
-             "gcc era: -mneeded (php/cflags.sh) did not reach the link; clang era: php/isa-note-x86-64-v3.S did not." >&2
+      grep -aqF "$ISA_GATE_MARKER" "$bin" || {
+        echo "FATAL: $bin does not contain the x86-64-v3 gate. Its v3 codegen would die with SIGILL on an older" \
+             "CPU instead of being refused at startup. php/isa-gate-x86-64-v3.o did not reach the link." >&2
         exit 1; }
-      echo "ok: $(basename "$bin") declares x86-64-v3 ($(tr -s ' ' <<<"$needed" | sed 's/^ *Properties: //'))"
+      echo "ok: $(basename "$bin") carries the x86-64-v3 startup gate"
     else
-      ! grep -qi 'x86-64-v3' <<<"$needed" || {
-        echo "FATAL: baseline $bin declares x86-64-v3 in its GNU property note ('$needed') -- it would be" \
-             "refused on a CPU it is meant to run on." >&2
+      ! grep -aqF "$ISA_GATE_MARKER" "$bin" || {
+        echo "FATAL: baseline $bin contains the x86-64-v3 gate -- it would refuse to start on a CPU it is meant to run on." >&2
         exit 1; }
-      echo "ok: $(basename "$bin") does not claim x86-64-v3, as a baseline build requires"
+      echo "ok: $(basename "$bin") has no x86-64-v3 gate, as a baseline build requires"
     fi
+  done
+}
+
+# assert_isa_gate_init_entry <unstripped-binary> [<binary>...]
+#
+# The marker string proves the gate object is linked in, not that its
+# constructor is registered. On the unstripped build-tree binaries (this runs
+# before php_install strips them, because the symbol is gone afterwards), the
+# address of php_docker_isa_gate must equal an entry of .init_array. The entries
+# are read two ways, since a PIE keeps them either in the section bytes or as
+# R_X86_64_RELATIVE addends: the bytes, and the relocations that target the
+# section.
+assert_isa_gate_init_entry() {
+  local bin addr ia_addr ia_size entries
+  for bin in "$@"; do
+    addr="$(nm "$bin" 2>/dev/null | awk '$3 == "php_docker_isa_gate" { print $1 }')"
+    [ "$(wc -w <<<"$addr")" -eq 1 ] || {
+      echo "FATAL: expected exactly one php_docker_isa_gate symbol in $bin, found: '${addr}'. The binary is" \
+           "stripped or the gate object is not linked." >&2; exit 1; }
+    read -r ia_addr ia_size < <(readelf -SW "$bin" \
+      | sed -n 's/^ *\[ *[0-9]*\] \.init_array  *[A-Z_]*  *\([0-9a-f]*\)  *[0-9a-f]*  *\([0-9a-f]*\).*/\1 \2/p')
+    [ -n "${ia_addr:-}" ] || { echo "FATAL: $bin has no .init_array section" >&2; exit 1; }
+    entries="$({
+      readelf -x .init_array "$bin" 2>/dev/null | awk '
+        /^  0x/ { for (i = 2; i <= 5; i++) hex = hex $i }
+        END {
+          for (i = 1; i + 15 <= length(hex); i += 16) {
+            w = ""
+            for (j = 15; j >= 0; j -= 2) w = w substr(hex, i + j - 1, 2)
+            print w
+          }
+        }'
+      readelf -Wr "$bin" 2>/dev/null | awk -v lo="$((16#$ia_addr))" -v hi="$((16#$ia_addr + 16#$ia_size))" '
+        function hexval(h,   v, i) { v = 0; for (i = 1; i <= length(h); i++) v = v * 16 + index("0123456789abcdef", substr(h, i, 1)) - 1; return v }
+        $3 ~ /RELATIVE/ { off = hexval($1); if (off >= lo && off < hi) print $4 }'
+    } | sed 's/^0*//' | tr 'A-F' 'a-f')"
+    grep -qxF "$(sed 's/^0*//' <<<"$addr" | tr 'A-F' 'a-f')" <<<"$entries" || {
+      echo "FATAL: php_docker_isa_gate ($addr) is not an entry of .init_array in $bin. The gate is linked in" \
+           "but its constructor is never run, so the CPU is not checked at startup." >&2
+      exit 1; }
+    echo "ok: $(basename "$bin") registers php_docker_isa_gate ($addr) in .init_array ($((16#$ia_size / 8)) entries)"
+    ISA_GATE_INIT_ENTRY="${ISA_GATE_INIT_ENTRY:+$ISA_GATE_INIT_ENTRY, }$(basename "$bin") $addr"
   done
 }
 
@@ -754,7 +783,7 @@ assert_neon_base64_present() {
 # --disassemble= invocations each re-parse the whole binary.
 # --disassemble= invocations each re-parse the whole binary.
 assert_php_src_hardening() {
-  local bin out total endbr chk bti pct
+  local bin out total endbr chk bti pct chk_src chk_dyn chk_note
 
   for bin in "$@"; do
     out="$(objdump -d "$bin" 2>/dev/null | awk '
@@ -823,23 +852,34 @@ assert_php_src_hardening() {
       *) pct=-1 ;;
     esac
 
-    [ "$chk" -gt 0 ] || {
-      echo "FATAL: no php-src function in $bin calls a __*_chk entry point. -D_FORTIFY_SOURCE did not" \
-           "reach php-src's own compiles; the undefined __*_chk references in the binary are the" \
-           "vendored dependencies'." >&2
+    # chk_src counts call sites in php-src's own functions. gold emits an IBT PLT
+    # when every input object carries the CET note, as on the modern era where all
+    # linked libraries are system ones; objdump cannot name those stubs, so there
+    # chk_src is 0 and says nothing. The binary's own dynamic relocations do name
+    # them (.rela.plt/.rela.dyn carry the symbol), so chk_dyn -- the __*_chk
+    # entry points the final binary imports from glibc -- is the required check.
+    # It is binary-wide, not php-src-attributed; chk_src stays as the stricter
+    # evidence wherever objdump can see the calls (the legacy era's classic PLT).
+    chk_src="$chk"
+    chk_dyn="$(readelf -Wr "$bin" 2>/dev/null | grep -cE ' __[a-z0-9_]+_chk(@| |$)' || true)"
+    [ "$chk_dyn" -gt 0 ] || {
+      echo "FATAL: $bin imports no __*_chk entry point from glibc (readelf -Wr). -D_FORTIFY_SOURCE did not" \
+           "reach the compiles; a fortified build always leaves undefined __*_chk references." >&2
       exit 1; }
+    chk_note="$chk_dyn __*_chk dynamic imports"
+    [ "$chk_src" -eq 0 ] || chk_note="$chk_note, $chk_src in php-src call sites"
 
     if [ "$(uname -m)" = aarch64 ]; then
-      echo "ok: $(basename "$bin") -- $bti/$total php-src functions start with bti/paciasp (${pct}%), $chk php-src __*_chk call sites"
+      echo "ok: $(basename "$bin") -- $bti/$total php-src functions start with bti/paciasp (${pct}%), $chk_note"
     elif [ "$pct" -ge 0 ]; then
-      echo "ok: $(basename "$bin") -- $endbr/$total php-src functions carry endbr64 (${pct}%), $chk php-src __*_chk call sites"
+      echo "ok: $(basename "$bin") -- $endbr/$total php-src functions carry endbr64 (${pct}%), $chk_note"
     else
-      echo "ok: $(basename "$bin") -- $chk php-src __*_chk call sites (endbr64 is x86_64-only, skipped on $(uname -m))"
+      echo "ok: $(basename "$bin") -- $chk_note (endbr64 is x86_64-only, skipped on $(uname -m))"
     fi
   done
-  HARDENING_PHP_SRC="endbr64 ${endbr}/${total} php-src functions, ${chk} __*_chk call sites"
-  [ "$(uname -m)" != aarch64 ] || HARDENING_PHP_SRC="bti/paciasp ${bti}/${total} php-src functions, ${chk} __*_chk call sites"
-  [ "$pct" -ge 0 ] || HARDENING_PHP_SRC="${chk} __*_chk call sites (endbr64 skipped on $(uname -m))"
+  HARDENING_PHP_SRC="endbr64 ${endbr}/${total} php-src functions, ${chk_note}"
+  [ "$(uname -m)" != aarch64 ] || HARDENING_PHP_SRC="bti/paciasp ${bti}/${total} php-src functions, ${chk_note}"
+  [ "$pct" -ge 0 ] || HARDENING_PHP_SRC="${chk_note} (endbr64 skipped on $(uname -m))"
 }
 
 # assert_no_ifunc_symbols <binary> [<binary>...]
@@ -1083,6 +1123,9 @@ fi
 # and the names this needs are gone afterwards.
 assert_simd_dispatch_present "$PWD" "$PWD/sapi/cli/php" "$PWD/sapi/fpm/php-fpm"
 assert_php_src_hardening "$PWD/sapi/cli/php" "$PWD/sapi/fpm/php-fpm"
+if [ "$UARCH" = v3 ] && [ "$(bash "$HERE/arch.sh")" = amd64 ]; then
+  assert_isa_gate_init_entry "$PWD/sapi/cli/php" "$PWD/sapi/fpm/php-fpm"
+fi
 
 php_install
 # After php_install, so this measures the stripped binaries that actually ship.
@@ -1090,10 +1133,10 @@ php_install
 assert_profile_reached_the_link "$([ "$PGO" = true ] && echo yes || echo no)" \
   /usr/local/bin/php /usr/local/sbin/php-fpm
 assert_no_ifunc_symbols /usr/local/bin/php /usr/local/sbin/php-fpm
-# amd64 only: arm64 has no glibc check of this kind, its v3 (armv9-a) images
-# simply fault on an older core.
+# amd64 only: arm64 has no startup gate, its v3 (armv9-a) images simply fault on
+# an older core.
 if [ "$(bash "$HERE/arch.sh")" = amd64 ]; then
-  assert_isa_note "$([ "$UARCH" = v3 ] && echo v3 || echo baseline)" \
+  assert_isa_gate "$([ "$UARCH" = v3 ] && echo v3 || echo baseline)" \
     /usr/local/bin/php /usr/local/sbin/php-fpm
 fi
 write_build_record "discriminator_control=ok" "ifunc_resolvers=disabled" \
@@ -1101,6 +1144,7 @@ write_build_record "discriminator_control=ok" "ifunc_resolvers=disabled" \
   "simd_php_src=${SIMD_CHECK_RESULT:-unchecked}" \
   "simd_php_src_functions=${SIMD_FOUND:-0}" \
   "hardening_php_src=${HARDENING_PHP_SRC:-unchecked}" \
+  "isa_gate_init_array=${ISA_GATE_INIT_ENTRY:-not applicable}" \
   "vm_kind_config=${ZEND_VM_KIND_CONFIG:?php_configure did not set ZEND_VM_KIND_CONFIG}" \
   "${record[@]+"${record[@]}"}"
 stage_runtime_deps

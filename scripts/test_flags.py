@@ -40,21 +40,13 @@ class TestCflags(unittest.TestCase):
         flags = run("php/cflags.sh", "v3")
         self.assertTrue("-march=x86-64-v3" in flags or "-march=armv9-a" in flags)
 
-    def test_mneeded_only_on_gcc_amd64_v3(self):
-        # -mneeded makes gcc's v3 objects carry GNU_PROPERTY_X86_ISA_1_NEEDED so
-        # glibc refuses the binary on a CPU without x86-64-v3. clang rejects the
-        # flag; baseline and arm64 must not carry it.
-        gcc = dict(os.environ, COMPILER="gcc")
-        clang = dict(os.environ, COMPILER="clang")
-        unset = {k: v for k, v in os.environ.items() if k != "COMPILER"}
-        v3_gcc = run("php/cflags.sh", "v3", env=gcc).split()
-        if "-march=x86-64-v3" in v3_gcc:
-            self.assertIn("-mneeded", v3_gcc)
-        else:
-            self.assertNotIn("-mneeded", v3_gcc)
-        self.assertNotIn("-mneeded", run("php/cflags.sh", "baseline", env=gcc).split())
-        self.assertNotIn("-mneeded", run("php/cflags.sh", "v3", env=clang).split())
-        self.assertNotIn("-mneeded", run("php/cflags.sh", "v3", env=unset).split())
+    def test_no_isa_note_flag(self):
+        # The v3 startup refusal is a linked-in constructor (php/isa-gate-x86-64-v3.c),
+        # not a GNU property note, so no flag asks the compiler for one.
+        for compiler in ("gcc", "clang"):
+            env = dict(os.environ, COMPILER=compiler)
+            for uarch in ("baseline", "v3"):
+                self.assertNotIn("-mneeded", run("php/cflags.sh", uarch, env=env).split())
 
     def test_arch_specific_cfi_flag(self):
         flags = run("php/cflags.sh", "baseline")

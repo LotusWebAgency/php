@@ -47,8 +47,8 @@ interpreter in them gets no upstream fixes. Policy:
 | `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image. |
 | `{release}-{flavor}[-v3]` | `8.5.11-fpm` | Full patch version, read from the built image after tests and the Trivy gate. |
 
-`-v3` needs a newer CPU. On older amd64 the image refuses to start (glibc prints
-`CPU ISA level is lower than required`, exit 127). On arm64 there is no check and an unsupported core
+`-v3` needs a newer CPU. On older amd64 the image refuses to start (a startup
+check prints `this build requires an x86-64-v3 CPU`, exit 127). On arm64 there is no check and an unsupported core
 gets SIGILL: `armv9-a` code needs Neoverse N2/V2-class cores (Graviton4, Axion, Cobalt 100, Grace),
 not Graviton2/3, Ampere Altra or Apple silicon. Use the baseline tag on a Mac.
 
