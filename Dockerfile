@@ -779,33 +779,34 @@ COPY conf/php-cli.ini /usr/local/etc/php/conf.d/10-php.ini
 USER www-data
 CMD ["php", "-a"]
 
-# Node 24 LTS for cli-builder, copied from the official image (trixie ships the
-# unmaintained Node 20). Pinned by multi-arch index digest so amd64 and arm64 both
-# resolve it and a retag cannot change what ships.
-FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315 AS node24
-
-# Node, npm and semantic-release as one tree for cli-builder, finished here so no
-# intermediate npm lands in a shipped layer (upgrading npm in a later RUN left the
-# bundled 11.19 copy, ~20MB, underneath).
+# npm and semantic-release as one tree for cli-builder, installed under /usr/local
+# so the apk-managed Node (nodejs-24, /usr/bin/node) carries no npm of its own and
+# the pinned npm is the only one outside semantic-release's tree.
 #
-# npm moves past the bundled 11.19.1 to 11.21.1, the first release whose bundled
-# brace-expansion, undici and ip-address carry their fixes. /out is built by hand because
-# /usr/local/bin also holds the node image's docker-entrypoint.sh and yarn.
-# semantic-release is not run here (it refuses to start without git);
-# tests/smoke.sh runs `semantic-release --version` in the finished image. The
-# readme/changelog markdown in the packages is 2.5MB nothing reads.
-FROM node24 AS node-tools
-RUN set -eux; \
+# Wolfi's npm package is 12.x; the pin is npm 11.21.1, the first release whose
+# bundled brace-expansion, undici and ip-address carry their fixes. The apk npm is
+# only the bootstrap that installs it and never ships. semantic-release is not run
+# here (it refuses to start without git); tests/smoke.sh runs
+# `semantic-release --version` in the finished image. The readme/changelog markdown
+# in the packages is 2.5MB nothing reads.
+FROM ${BASE_IMAGE} AS node-tools
+ARG WOLFI_INDEX_STATE=""
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    set -eux; \
+    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}"; \
+    echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories; \
+    apk upgrade --cache-dir /var/cache/apk -U; \
+    apk add --cache-dir /var/cache/apk nodejs-24 npm; \
     node -v; \
-    npm install -g npm@11.21.1; \
-    npm -v; \
-    npm install -g semantic-release; \
-    npm cache clean --force; \
+    npm install -g --prefix /usr/local npm@11.21.1; \
+    [ "$(/usr/local/bin/npm -v)" = "11.21.1" ]; \
+    /usr/local/bin/npm install -g --prefix /usr/local semantic-release; \
+    /usr/local/bin/npm cache clean --force; \
     test -x /usr/local/bin/semantic-release; \
     find /usr/local/lib/node_modules -type f \( -iname 'readme*.md' -o -iname 'changelog*.md' -o -iname 'history.md' \) -delete; \
     mkdir -p /out/bin /out/lib; \
     cp -a /usr/local/lib/node_modules /out/lib/node_modules; \
-    for b in node npm npx corepack semantic-release; do \
+    for b in npm npx semantic-release; do \
       cp -a "/usr/local/bin/$b" "/out/bin/$b"; \
     done
 
@@ -814,16 +815,21 @@ RUN set -eux; \
 FROM cli AS cli-builder
 USER root
 COPY --from=node-tools /out/ /usr/local/
-# runtime-base already has less, nano, procps, zip, unzip and zstd.
-# mariadb-client-core has only the mariadb/mysql shell; mariadb-client adds
-# mariadb-dump/mysqldump (and pulls perl back in).
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+# runtime-base already has less, nano, procps, zip, unzip, zstd and the mariadb
+# shell. mariadb-13.1-dump installs normally here (it depends on perl for its
+# slow-log scripts, which the fpm/cli copy leaves out) and replaces the copied
+# mariadb-dump with the packaged one, same version; its mysqldump symlink would
+# bring back MariaDB's "Deprecated program name" warning, so the symlink is replaced
+# by the wrapper again (rm first: writing through the symlink clobbers
+# mariadb-dump). mariadb-admin and mariadb-check stay the copied binaries.
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-      git rsync patch make brotli sqlite3 jq mariadb-client; \
-    rm -rf /var/lib/apt/lists/*; \
-    rm -f /var/cache/debconf/*-old
+    apk add --cache-dir /var/cache/apk -U \
+      nodejs-24 corepack git rsync patch make brotli sqlite jq mariadb-13.1-dump; \
+    rm -f /usr/bin/mysqldump; \
+    printf '#!/bin/sh\nexec mariadb-dump "$@"\n' > /usr/bin/mysqldump; \
+    chmod 755 /usr/bin/mysqldump; \
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 COPY conf/php-builder.ini /usr/local/etc/php/conf.d/10-php.ini
 # Verify the installer against Composer's published signature rather than piping
 # the download into php.
@@ -854,14 +860,15 @@ COPY --from=php-build /usr/local/include/php /usr/local/include/php
 # `make install` writes into the extension dir. No composer, no node.
 FROM cli AS ext-builder
 USER root
-# g++: several extensions are C++. autoconf: phpize regenerates ./configure from
-# config.m4. pkg-config: extension configure scripts locate -dev libraries with it.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+# build-base: gcc, g++, make, binutils, glibc-dev and the openssf compiler wrappers
+# in /usr/local/bin, which stay on so extensions built here are hardened like
+# Wolfi's own. g++: several extensions are C++. autoconf: phpize regenerates
+# ./configure from config.m4. pkgconf: extension configure scripts locate -dev
+# libraries with it. A -dev package an extension needs is an `apk add` away; the
+# runtime libraries' headers (openssl-4.0-dev, ...) come from the same index.
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-      gcc g++ make autoconf pkg-config libc6-dev; \
-    rm -rf /var/lib/apt/lists/*; \
-    rm -f /var/cache/debconf/*-old
+    apk add --cache-dir /var/cache/apk -U build-base autoconf pkgconf linux-headers; \
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 COPY --from=ext-builder-payload / /
 CMD ["bash"]

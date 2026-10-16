@@ -196,7 +196,7 @@ echo "ok: uid $want_uid"
 # largest era built: the measured size plus ~3% headroom. Report-only until
 # every version has a measured size to budget against.
 # tests/image-size.sh --breakdown names where the bytes are.
-declare -A SIZE_BUDGET_MB=( [fpm]=314 [cli]=268 [cli-builder]=679 [ext-builder]=609 )
+declare -A SIZE_BUDGET_MB=( [fpm]=314 [cli]=291 [cli-builder]=595 [ext-builder]=902 )
 budget_mb="${SIZE_BUDGET_MB[$FLAVOR]}"
 actual_bytes=$(bash "$HERE/image-size.sh" --bytes "$IMAGE")
 budget_bytes=$(( budget_mb * 1000 * 1000 ))
@@ -1379,8 +1379,18 @@ case "$FLAVOR" in
       drun --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
         || { echo "FAIL: cli-builder is missing $tool (Dockerfile's cli-builder stage should provide it)"; exit 1; }
     done
+    for pkg in nodejs-24 corepack mariadb-13.1-dump git; do
+      drun --rm "$IMAGE" apk info -e "$pkg" | grep -qx "$pkg" \
+        || { echo "FAIL: cli-builder: the apk package $pkg is not installed"; exit 1; }
+    done
+    if drun --rm "$IMAGE" apk info -e npm | grep -qx npm; then
+      echo "FAIL: cli-builder: the apk npm package is installed beside the pinned npm under /usr/local"; exit 1
+    fi
+    node_bin=$(drun --rm "$IMAGE" sh -c 'command -v node')
+    [ "$node_bin" = /usr/bin/node ] || { echo "FAIL: cli-builder: node is '$node_bin', expected the apk binary /usr/bin/node"; exit 1; }
+    echo "ok: cli-builder's node, corepack, git and mariadb-dump are apk packages (nodejs-24, corepack, git, mariadb-13.1-dump); the apk npm package is absent"
     node_major=$(drun --rm "$IMAGE" node -p 'process.versions.node.split(".")[0]')
-    [ "$node_major" = "24" ] || { echo "FAIL: cli-builder's node major is '$node_major', expected 24 (copied from the node:24 image)"; exit 1; }
+    [ "$node_major" = "24" ] || { echo "FAIL: cli-builder's node major is '$node_major', expected 24 (apk nodejs-24)"; exit 1; }
     for cmd in "npm --version" "npx --version" "corepack --version" "composer --version" "semantic-release --version"; do
       drun --rm "$IMAGE" sh -c "$cmd" >/dev/null 2>&1 \
         || { echo "FAIL: cli-builder: '$cmd' does not run as the image user"; exit 1; }
@@ -1397,8 +1407,9 @@ case "$FLAVOR" in
         || { echo "FAIL: cli-builder: $cache_dir ('$probe') is not writable as the image user (uid $(drun --rm "$IMAGE" id -u))"; exit 1; }
     done
     echo "ok: cli-builder's npm and corepack caches are writable as the image user"
-    # npm is pinned to 11.21.1 in the node-tools stage (the node image bundles an
-    # older one with a vulnerable tar/ip-address). The finished tree must hold
+    # Node is the apk nodejs-24 package; npm is not an apk package here. The
+    # node-tools stage installs npm 11.21.1 under /usr/local (Wolfi's npm package
+    # is 12.x and only bootstraps that install). The finished tree must hold
     # exactly one npm of its own; the copy semantic-release carries for
     # @semantic-release/npm is a dependency of that package and expected. The
     # pattern is the exact node_modules/npm path, so
