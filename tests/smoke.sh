@@ -651,16 +651,36 @@ for pkg in libcrypto3 libssl3 openssl-3; do
 done
 echo "ok: no libssl.so.3/libcrypto.so.3 (or older) and no OpenSSL 3 package in the image"
 
-# The MySQL client names are symlinks to the MariaDB tools; mariadb-dump is the
-# native binary copied out of the package whose perl dependency is not shipped.
-mysql_link=$(drun --rm "$IMAGE" readlink /usr/bin/mysql)
-[ "$mysql_link" = "mariadb" ] || { echo "FAIL: /usr/bin/mysql -> '$mysql_link', expected mariadb"; exit 1; }
-mysqldump_link=$(drun --rm "$IMAGE" readlink /usr/bin/mysqldump)
-[ "$mysqldump_link" = "mariadb-dump" ] || { echo "FAIL: /usr/bin/mysqldump -> '$mysqldump_link', expected mariadb-dump"; exit 1; }
-drun --rm "$IMAGE" test -x /usr/bin/mariadb-dump || { echo "FAIL: /usr/bin/mariadb-dump is missing or not executable"; exit 1; }
-drun --rm "$IMAGE" sh -c 'mysql --version && mysqldump --version' >/dev/null \
-  || { echo "FAIL: mysql or mysqldump does not run"; exit 1; }
-echo "ok: mysql -> mariadb, mysqldump -> mariadb-dump, and both run"
+# The MySQL client names are #!/bin/sh wrappers around the MariaDB tools (symlinks
+# would trip MariaDB's "Deprecated program name" warning on stderr); mariadb-dump,
+# mariadb-admin and mariadb-check are native binaries copied out of packages whose
+# perl dependency is not shipped. Each of the eight names must print a version with
+# an empty stderr (run past the entrypoint, whose sizing notice is on stderr), and the shell and the copied tools must be one server version.
+declare -A mysql_names=([mysql]=mariadb [mysqldump]=mariadb-dump [mysqladmin]=mariadb-admin [mysqlcheck]=mariadb-check)
+for name in mysql mysqldump mysqladmin mysqlcheck; do
+  target="${mysql_names[$name]}"
+  drun --rm "$IMAGE" test -x "/usr/bin/$target" || { echo "FAIL: /usr/bin/$target is missing or not executable"; exit 1; }
+  wrapper=$(drun --rm "$IMAGE" cat "/usr/bin/$name")
+  [ "$wrapper" = "$(printf '#!/bin/sh\nexec %s "$@"' "$target")" ] \
+    || { echo "FAIL: /usr/bin/$name is not the '#!/bin/sh; exec $target \"\$@\"' wrapper: $wrapper"; exit 1; }
+  for tool in "$name" "$target"; do
+    tool_err=$(mktemp)
+    tool_out=$(drun --rm --entrypoint "" "$IMAGE" "$tool" --version 2>"$tool_err") \
+      || { echo "FAIL: $tool --version failed: $(cat "$tool_err")"; rm -f "$tool_err"; exit 1; }
+    [ ! -s "$tool_err" ] || { echo "FAIL: $tool --version wrote to stderr: $(cat "$tool_err")"; rm -f "$tool_err"; exit 1; }
+    rm -f "$tool_err"
+    grep -q ' from [0-9][^ ]*-MariaDB' <<<"$tool_out" || { echo "FAIL: $tool --version printed no server version: $tool_out"; exit 1; }
+  done
+done
+mariadb_server_version() { sed -n 's/.* from \([0-9][^ ,]*\)-MariaDB.*/\1/p' <<<"$1"; }
+shell_version=$(mariadb_server_version "$(drun --rm "$IMAGE" mariadb --version)")
+[ -n "$shell_version" ] || { echo "FAIL: mariadb --version names no server version"; exit 1; }
+for tool in mariadb-dump mariadb-admin mariadb-check; do
+  tool_version=$(mariadb_server_version "$(drun --rm "$IMAGE" "$tool" --version)")
+  [ "$tool_version" = "$shell_version" ] \
+    || { echo "FAIL: $tool reports server version '$tool_version', mariadb reports '$shell_version'"; exit 1; }
+done
+echo "ok: mysql, mysqldump, mysqladmin and mysqlcheck wrap mariadb, mariadb-dump, mariadb-admin and mariadb-check; all eight print a version with empty stderr, one server version ($shell_version)"
 case "$FLAVOR" in
   fpm|cli)
     if drun --rm "$IMAGE" sh -c 'command -v perl' >/dev/null 2>&1; then
@@ -679,7 +699,17 @@ www_group=$(drun --rm "$IMAGE" grep '^www-data:' /etc/group)
 echo "ok: www-data is uid/gid 33 with /sbin/nologin and home /var/www"
 
 drun --rm "$IMAGE" test -x /usr/local/bin/php-fcgi || { echo "FAIL: /usr/local/bin/php-fcgi is missing or not executable"; exit 1; }
-echo "ok: php-fcgi is installed"
+# php-fcgi runs under this image's own `php -n`, so it has to parse on every version
+# the line ships (it is written in PHP 7.0 syntax).
+fcgi_lint=$(drun --rm "$IMAGE" php -l /usr/local/bin/php-fcgi 2>&1) \
+  || { echo "FAIL: php -l /usr/local/bin/php-fcgi: $fcgi_lint"; exit 1; }
+echo "ok: php-fcgi is installed and passes php -l on PHP $EXPECT"
+
+# No setuid or setgid file anywhere in the image (find exits non-zero on an
+# unreadable directory, so only its output counts).
+suid_files=$(drun --rm "$IMAGE" sh -c 'find / -xdev -perm /6000 -type f 2>/dev/null; exit 0')
+[ -z "$suid_files" ] || { echo "FAIL: the image carries setuid/setgid files: $(tr '\n' ' ' <<<"$suid_files")"; exit 1; }
+echo "ok: no setuid or setgid file in the image"
 
 if grep -qw snmp <<<"$SHARED_EXTS"; then
   snmp_ldd=$(image_ldd "$extdir/snmp.so" 2>&1 || true)

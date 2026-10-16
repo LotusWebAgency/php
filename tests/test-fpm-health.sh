@@ -97,4 +97,123 @@ done
 [ "$found" = 1 ] || { docker logs "$name"; fail "application error_log() output never reached docker logs"; }
 echo "ok: application error_log() output reaches docker logs (behavioral)"
 
+# php-fcgi edge cases against the live pool: FastCGI length encoding, parameter
+# records, multi-record responses, a body larger than memory_limit, -f and -t.
+fcgi_script() {
+  docker exec -i "$name" sh -c "cat > /tmp/$1"
+}
+fcgi_run() {
+  local script="$1"
+  shift
+  docker exec -e "SCRIPT_FILENAME=/tmp/$script" -e "SCRIPT_NAME=/$script" -e REQUEST_METHOD=GET "$name" \
+    php-fcgi "$@" 127.0.0.1:9000
+}
+
+# A name and a value over 127 bytes need the four-byte length encoding.
+fcgi_script fcgi-long.php <<'PHP'
+<?php
+echo strlen($_SERVER['X_LONG_VALUE']), ',', isset($_SERVER[str_repeat('N', 130)]) ? 'name' : 'noname';
+PHP
+long_value="$(head -c 300 /dev/zero | tr '\0' a)"
+long_name="$(head -c 130 /dev/zero | tr '\0' N)"
+out="$(fcgi_run fcgi-long.php -p "X_LONG_VALUE=$long_value" -p "$long_name=1" | tr -d '\r')"
+[ "$out" = "300,name" ] || fail "a 300-byte value and a 130-byte name did not survive: got '$out', expected '300,name'"
+echo "ok: php-fcgi sends parameters over 127 bytes"
+
+# 800 pairs of about 110 bytes are 88 KB: two FCGI_PARAMS records, and the cut
+# between them has to fall between pairs.
+fcgi_script fcgi-params.php <<'PHP'
+<?php
+$count = 0;
+$bytes = 0;
+foreach ($_SERVER as $key => $value) {
+    if (strpos($key, 'BULK_PARAM_') === 0) {
+        $count++;
+        $bytes += strlen($value);
+    }
+}
+echo $count, ',', $bytes;
+PHP
+bulk_value="$(head -c 100 /dev/zero | tr '\0' v)"
+bulk_args=()
+for i in $(seq 1 800); do
+  bulk_args+=(-p "$(printf 'BULK_PARAM_%04d' "$i")=$bulk_value")
+done
+out="$(fcgi_run fcgi-params.php "${bulk_args[@]}" | tr -d '\r')"
+[ "$out" = "800,80000" ] || fail "800 parameters over two records did not all arrive: got '$out', expected '800,80000'"
+echo "ok: php-fcgi splits 88 KB of parameters across records between pairs"
+
+# 320,000 bytes of response is five FCGI_STDOUT records at least.
+fcgi_script fcgi-big.php <<'PHP'
+<?php
+for ($i = 0; $i < 40000; $i++) {
+    printf("%07d\n", $i);
+}
+PHP
+want="$(seq -f '%07g' 0 39999 | md5sum | cut -d' ' -f1)"
+got="$(fcgi_run fcgi-big.php | md5sum | cut -d' ' -f1)"
+[ "$got" = "$want" ] || fail "a 320,000-byte multi-record response arrived altered: md5 $got, expected $want"
+echo "ok: php-fcgi reassembles a multi-record response"
+
+# A 50 MB body is past php -n's 128M memory_limit once it is buffered and copied;
+# streamed, it goes through in 64 KB records.
+fcgi_script fcgi-post.php <<'PHP'
+<?php
+$in = fopen('php://input', 'rb');
+$hash = hash_init('md5');
+$size = 0;
+while (!feof($in)) {
+    $data = fread($in, 65536);
+    $size += strlen($data);
+    hash_update($hash, $data);
+}
+echo $size, ' ', hash_final($hash);
+PHP
+post_file="$(mktemp)"
+head -c 52428800 /dev/urandom > "$post_file"
+want="52428800 $(md5sum "$post_file" | cut -d' ' -f1)"
+set +e
+got="$(docker exec -i -e SCRIPT_FILENAME=/tmp/fcgi-post.php -e SCRIPT_NAME=/fcgi-post.php -e REQUEST_METHOD=POST \
+  -e CONTENT_TYPE=application/octet-stream -e CONTENT_LENGTH=52428800 "$name" \
+  php-fcgi -t 60 -p PHP_VALUE=post_max_size=64M 127.0.0.1:9000 < "$post_file" | tr -d '\r')"
+rc=$?
+set -e
+rm -f "$post_file"
+[ "$rc" -eq 0 ] && [ "$got" = "$want" ] || fail "a 50 MB POST body did not arrive intact (rc=$rc): got '$got', expected '$want'"
+echo "ok: php-fcgi streams a 50 MB request body"
+
+# -f: exit 22 on an error status, with the body still printed; 0 otherwise.
+fcgi_script fcgi-status.php <<'PHP'
+<?php
+http_response_code((int) $_SERVER['X_STATUS']);
+echo 'status body';
+PHP
+for code in 404 500 200; do
+  expect_rc=22
+  [ "$code" = 200 ] && expect_rc=0
+  set +e
+  out="$(fcgi_run fcgi-status.php -f -p "X_STATUS=$code" 2>/dev/null | tr -d '\r')"
+  rcs=("${PIPESTATUS[@]}")
+  set -e
+  [ "${rcs[0]}" -eq "$expect_rc" ] || fail "php-fcgi -f on a $code response exited ${rcs[0]}, expected $expect_rc"
+  [ "$out" = "status body" ] || fail "php-fcgi -f on a $code response printed '$out'"
+done
+echo "ok: php-fcgi -f exits 22 on 404 and 500, 0 on 200, and still prints the body"
+
+# -t: a script slower than the deadline is exit 1, not a hang.
+fcgi_script fcgi-slow.php <<'PHP'
+<?php
+sleep(5);
+echo 'late';
+PHP
+start=$SECONDS
+set +e
+err="$(fcgi_run fcgi-slow.php -t 1 2>&1 >/dev/null)"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "php-fcgi -t 1 against a 5 s script exited $rc, expected 1"
+grep -q 'timed out' <<<"$err" || fail "php-fcgi -t 1 timeout message is '$err'"
+[ $((SECONDS - start)) -lt 4 ] || fail "php-fcgi -t 1 took $((SECONDS - start)) s to give up"
+echo "ok: php-fcgi -t exits 1 on a timeout"
+
 echo "FPM HEALTH TESTS PASSED"

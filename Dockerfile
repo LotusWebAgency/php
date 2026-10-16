@@ -254,7 +254,7 @@ ARG ICU_VERSION
 WORKDIR /src
 
 # Wolfi's libargon2.pc and libmemcached.pc name library directories that do not
-# exist (${prefix}/lib/x86_64-linux-gnu, /usr//usr/lib). php's configure turns every
+# exist (${prefix}/lib/<triplet>-linux-gnu, /usr//usr/lib). php's configure turns every
 # non-default -L from pkg-config into an RPATH entry, so php, php-fpm and the
 # shared extensions would carry a search path into directories that the image
 # lacks and a later writer could populate. Pointing both at /usr/lib makes the -L
@@ -262,8 +262,8 @@ WORKDIR /src
 RUN for pc in libargon2 libmemcached; do \
       f="/usr/lib/pkgconfig/$pc.pc"; \
       [ -f "$f" ] || { echo "$f is missing" >&2; exit 1; }; \
-      sed -i -e 's|/usr//usr/lib|/usr/lib|g' -e 's|/lib/x86_64-linux-gnu|/lib|g' "$f"; \
-      ! grep -q 'x86_64-linux-gnu\|//usr' "$f" || { echo "$f still names a bad directory" >&2; exit 1; }; \
+      sed -i -e 's|/usr//usr/lib|/usr/lib|g' -e 's|/lib/[a-z0-9_]*-linux-gnu|/lib|g' "$f"; \
+      ! grep -qE '/lib/[^ /]+-linux-gnu|//usr' "$f" || { echo "$f still names a bad directory" >&2; exit 1; }; \
     done
 
 # The clang profile runtime: Wolfi's `clang-19` does not pull it in, and without it
@@ -531,17 +531,26 @@ COPY --from=php-build /usr/local/etc/php /usr/local/etc/php
 COPY --from=runtime-conf /stage/ /
 
 # --- mariadb-dump ---
-# Build-only: mariadb-13.1-dump depends on perl for its slow-log scripts, but
-# mariadb-dump itself is a native binary, so runtime-base copies only that and
-# perl never ships. WOLFI_INDEX_STATE keeps this layer in step with the runtime
-# apk layer, so the dump and the `mariadb` shell come from the same index.
+# Build-only: mariadb-13.1-dump depends on perl for its slow-log scripts and
+# mariadb-13.1 (the server) on perl and OpenSSL 3, but mariadb-dump, mariadb-admin
+# and mariadb-check are native binaries linking only libssl 4, libcrypto 4, zlib and
+# glibc. runtime-base copies just those three, so neither perl nor the server ships.
+# WOLFI_INDEX_STATE and `apk upgrade` keep this layer in step with the runtime apk
+# layer, so these tools and the `mariadb` shell come from the same index and server
+# version. The copied binaries are not in the runtime image's apk database, so Trivy
+# cannot attribute CVEs to them.
 FROM ${BASE_IMAGE} AS mariadb-dump-src
 ARG WOLFI_INDEX_STATE=""
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}" \
-    && echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
-    && apk add --cache-dir /var/cache/apk -U mariadb-13.1-dump \
-    && test -x /usr/bin/mariadb-dump
+    set -eux; \
+    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}"; \
+    echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories; \
+    apk upgrade --cache-dir /var/cache/apk -U; \
+    apk add --cache-dir /var/cache/apk mariadb-13.1 mariadb-13.1-dump; \
+    for b in mariadb-dump mariadb-admin mariadb-check; do \
+      test -x "/usr/bin/$b"; \
+      [ "$(head -c 4 "/usr/bin/$b" | tail -c 3)" = ELF ] || { echo "$b is not a native binary" >&2; exit 1; }; \
+    done
 
 # --- runtime-base ---
 FROM ${BASE_IMAGE} AS runtime-base
@@ -583,11 +592,16 @@ RUN set -eux; \
       bzip2 zip unzip zstd xz \
       mariadb-13.1-client "postgresql-${PG_MAJOR}-client" libldap-2.7 \
       $(tr '\n' ' ' < /tmp/runtime-packages.txt); \
-    rm -f /tmp/runtime-packages.txt; \
+    rm -f /tmp/runtime-packages.txt
+COPY --from=mariadb-dump-src /usr/bin/mariadb-dump /usr/bin/mariadb-admin /usr/bin/mariadb-check /usr/bin/
 # mariadb-13.1-client ships only `mariadb`; keep the names scripts and people type.
-    ln -s mariadb /usr/bin/mysql; \
-    ln -s mariadb-dump /usr/bin/mysqldump
-COPY --from=mariadb-dump-src /usr/bin/mariadb-dump /usr/bin/mariadb-dump
+# Wrappers rather than symlinks: MariaDB warns "Deprecated program name" on stderr
+# when argv[0] is mysql*.
+RUN set -eux; \
+    for pair in mysql:mariadb mysqldump:mariadb-dump mysqladmin:mariadb-admin mysqlcheck:mariadb-check; do \
+      printf '#!/bin/sh\nexec %s "$@"\n' "${pair#*:}" > "/usr/bin/${pair%%:*}"; \
+      chmod 755 "/usr/bin/${pair%%:*}"; \
+    done
 
 # php-build's output, then the baked config, as two layers (see runtime-payload).
 # The config layer stays last so a config edit never re-ships the binaries.

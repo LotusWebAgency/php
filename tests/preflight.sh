@@ -136,16 +136,22 @@ section "4/9 shellcheck on every shell file"
 command -v shellcheck >/dev/null || fail "shellcheck not found on this host"
 if command -v shellcheck >/dev/null; then
   # rootfs's runtime scripts have no .sh extension (they ship as bare
-  # executables in the image) but are bash, same as everything else here. The one
-  # exception is php-fcgi, a PHP script (`php -n` shebang), which shellcheck
-  # cannot parse; the shebang filter below leaves it out.
+  # executables in the image). A shell shebang sends one to shellcheck, a php
+  # shebang to `php -l` (php-fcgi runs under `php -n` and is written in PHP 7.0
+  # syntax; shellcheck cannot parse it), and anything else fails the gate.
   shell_files=()
-  while IFS= read -r f; do shell_files+=("$f"); done < <(
-    find . -name '*.sh' -not -path './.git/*' -not -path './.claude/*' | sort
-    find rootfs/usr/local/bin -maxdepth 1 -type f 2>/dev/null | sort | while IFS= read -r f; do
-      head -n1 "$f" | grep -q 'sh' && echo "$f"
-    done
-  )
+  php_files=()
+  while IFS= read -r f; do shell_files+=("$f"); done < <(find . -name '*.sh' -not -path './.git/*' -not -path './.claude/*' | sort)
+  while IFS= read -r f; do
+    shebang="$(head -n1 "$f")"
+    if grep -qE '^#!.*[/ ](ba|da|k|z)?sh( |$)' <<<"$shebang"; then
+      shell_files+=("$f")
+    elif grep -qE '^#!.*[/ ]php( |$)' <<<"$shebang"; then
+      php_files+=("$f")
+    else
+      fail "$f has a shebang that is neither a shell nor php: '$shebang'"
+    fi
+  done < <(find rootfs/usr/local/bin -maxdepth 1 -type f 2>/dev/null | sort)
   [ "${#shell_files[@]}" -gt 0 ] || fail "no shell files found to check"
 
   # Accepted findings, per file and code. Anything else, in any file, fails the
@@ -169,6 +175,23 @@ if command -v shellcheck >/dev/null; then
       ok "shellcheck $f (pre-existing, accepted: $codes)"
     fi
   done
+fi
+
+# The PHP scripts in rootfs/usr/local/bin run under the image's own php, any
+# version from 7.0 on; a host php newer than that only catches a syntax error,
+# and the per-version `php -l` in tests/smoke.sh is the proof for 7.0 to 8.5.
+if [ "${#php_files[@]}" -gt 0 ]; then
+  if command -v php >/dev/null; then
+    for f in "${php_files[@]}"; do
+      if lint_out="$(php -n -l "$f" 2>&1)"; then
+        ok "php -l $f (host php $(php -n -r 'echo PHP_VERSION;'))"
+      else
+        fail "php -l $f: $lint_out"
+      fi
+    done
+  else
+    echo "note: no php binary on this host, skipping php -l of ${php_files[*]} (tests/smoke.sh lints it inside every image)"
+  fi
 fi
 
 # ----------------------------------------------------- 5. fetch-verified.sh
