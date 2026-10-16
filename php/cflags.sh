@@ -45,7 +45,7 @@ case "$ARCH" in
       # the shipped image.
       # arm64 has no glibc equivalent of this check, so nothing is added there.
       if [ "${COMPILER:-clang}" = gcc ]; then MARCH="$MARCH -mneeded"; fi
-    else MARCH="-march=x86-64 -mtune=generic"; fi
+    else MARCH="-march=x86-64-v2 -mtune=generic"; fi
     ;;
   arm64)
     SEC="-mbranch-protection=standard"
@@ -55,8 +55,10 @@ case "$ARCH" in
     # -- SVE2, which gcc 16 and clang 19 both auto-vectorize with. It runs on
     # Neoverse N2/V2 and later (Graviton4, Axion, Cobalt 100, Grace), not on
     # Graviton2/3, Ampere or Apple silicon.
+    # Wolfi's aarch64 gcc bakes in -mtune=neoverse-v2 and keeps it when -march is
+    # given, so the baseline names -mtune=generic as amd64's does.
     if [ "$UARCH" = "v3" ]; then MARCH="-march=armv9-a"
-    else MARCH="-march=armv8-a"; fi
+    else MARCH="-march=armv8-a -mtune=generic"; fi
     ;;
   *)
     echo "unsupported architecture: $ARCH" >&2

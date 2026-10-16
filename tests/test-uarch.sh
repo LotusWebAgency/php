@@ -10,7 +10,7 @@
 # build produces a working image, correctly tagged, with byte-identical
 # codegen to baseline. So the primary assertion here is on the compiled
 # instructions themselves: x86-64-v3 (the psABI level -march=x86-64-v3
-# selects) adds AVX2, BMI1/BMI2 and FMA3 over the plain "x86-64" baseline, and
+# selects) adds AVX2, BMI1/BMI2 and FMA3 over the "x86-64-v2" baseline, and
 # -mtune=generic never emits any of them on its own -- their presence is a
 # direct readout of which -march clang actually used, immune to a tag or a
 # build arg lying about it.
@@ -106,7 +106,7 @@ if grep -q -- "-march=${v3_march}" <<<"$b_cflags"; then
   fail "the baseline image's build record carries the v3 -march=$v3_march: $b_cflags"
 fi
 # Not just "doesn't carry v3": assert baseline carries what php/cflags.sh emits
-# for it (-march=x86-64 on amd64, -march=armv8-a on arm64), or a cflags.sh change
+# for it (-march=x86-64-v2 on amd64, -march=armv8-a on arm64), or a cflags.sh change
 # that stopped emitting a baseline -march would silently pass a "does not carry
 # v3" check forever.
 grep -q -- "-march=${base_march}" <<<"$b_cflags" \
@@ -149,7 +149,7 @@ else
   # vpermd/vpbroadcast*/vperm* (AVX2 shuffle/broadcast), vfmadd*/vfmsub*/
   # vfnmadd*/vfnmsub* (FMA3) and shlx/sarx/shrx/mulx/pdep/pext/bzhi/andn/
   # blsr/blsi (BMI1+BMI2) are the mnemonics x86-64-v3 adds over baseline;
-  # none of them can be emitted by a compile that used -march=x86-64 (or no
+  # none of them can be emitted by a compile that used -march=x86-64-v2 (or no
   # -march at all). \b-bounded so a call-target symbol name that happens to
   # contain one of these strings (e.g. some `..._andn...` helper) cannot be
   # mistaken for the instruction itself.

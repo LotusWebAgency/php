@@ -6,7 +6,7 @@
   "baseline_only_flavors": ["ext-builder"],
   "platforms": ["linux/amd64", "linux/arm64"],
   "uarch": {
-    "baseline": {"amd64": "x86-64", "arm64": "armv8-a"},
+    "baseline": {"amd64": "x86-64-v2", "arm64": "armv8-a"},
     "v3": {"amd64": "x86-64-v3", "arm64": "armv9-a"}
   },
   "versions": {
