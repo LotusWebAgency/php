@@ -204,7 +204,7 @@ for app in "${apps[@]}"; do
 done
 
 # PrestaShop's database check needs mariadbd running. The corpus image carries
-# mariadb-server (Dockerfile.corpus installs it to build the datadir), so
+# mariadb-13.1 (Dockerfile.corpus installs it to build the datadir), so
 # db-up.sh starts it inside this --rm container, as root against the datadir
 # (root can read and write it whatever its owner), with no network at all.
 for app in "${mysql_apps[@]:-}"; do
@@ -267,12 +267,12 @@ echo "ok: /corpus/MANIFEST still matches what the corpus serves, every app cover
 
 # --- ownership: uid 33 only, with a control that proves find can see otherwise
 owners="$(docker run --rm "$IMAGE" sh -c '
-  echo "strays: $(find /corpus ! -uid 33 -print -quit)"
-  echo "control: $(find /usr/local/bin/php ! -uid 33 -print -quit)"
+  echo "strays: $(find /corpus ! -user 33 -print -quit)"
+  echo "control: $(find /usr/local/bin/php ! -user 33 -print -quit)"
 ')"
 strays="$(grep '^strays: ' <<<"$owners")"; strays="${strays#strays: }"
 control="$(grep '^control: ' <<<"$owners")"; control="${control#control: }"
-[ -n "$control" ] || fail "'find ! -uid 33' matched nothing on a root-owned file -- it could not have seen a stray either"
+[ -n "$control" ] || fail "'find ! -user 33' matched nothing on a root-owned file -- it could not have seen a stray either"
 [ -z "$strays" ] || fail "$strays under /corpus is not owned by uid 33"
 echo "ok: /corpus is uid 33 only (control saw $control)"
 

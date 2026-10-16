@@ -250,20 +250,29 @@ RUN --network=none set -eux; \
 
 # --- PrestaShop ----------------------------------------------------------------
 # The one app with no sqlite option: PrestaShop's ObjectModel/Db layer is
-# MySQL/MariaDB-only. mariadb-server is installed here as root purely to run the
+# MySQL/MariaDB-only. mariadb-13.1 is installed here as root purely to run the
 # CLI installer and let verify.sh prove the result; nothing it installs reaches a
 # runtime image, because the training run bind-mounts only /corpus and
 # /corpus-src. corpus/prestashop/db-up.sh and db-down.sh (also used by verify.sh
-# and tests/test-corpus-tiers.sh) expect mariadbd on PATH or in /usr/sbin.
+# and tests/test-corpus-tiers.sh) expect mariadbd on PATH.
 #
 # The app tree comes from the official prestashop/prestashop image for the tier
 # (ps-${TIER}, pinned by digest above), not a fetched zip.
+#
+# The builder image is itself a Wolfi image whose /etc/apk/repositories already
+# points at packages.wolfi.dev/os; the line is rewritten here too so this layer
+# does not depend on how the builder was derived. mariadb-13.1 provides mariadbd,
+# mariadb-install-db and the mysqladmin/mariadb-admin the corpus scripts call.
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends mariadb-server mariadb-client \
-    && rm -rf /var/lib/apt/lists/*
-# mariadb-server ships auth_pam_tool setuid root for its PAM plugin. Nothing here
-# authenticates via PAM (db-up.sh runs mariadbd with --skip-grant-tables), so
-# every setuid/setgid bit is stripped, as in angie-docker and nginx-docker.
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
+    && apk add --cache-dir /var/cache/apk -U mariadb-13.1 mariadb-13.1-client \
+    && command -v mariadbd >/dev/null && command -v mariadb-install-db >/dev/null \
+    && command -v mysqladmin >/dev/null && command -v mariadb >/dev/null
+# The mariadb packages' dependencies include a setuid root unix_chkpwd (PAM).
+# Nothing here authenticates via PAM (db-up.sh runs mariadbd with
+# --skip-grant-tables), so every setuid/setgid bit is stripped, as in angie-docker
+# and nginx-docker.
 RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} +
 COPY --from=ps-selected --chown=www-data:www-data /var/www/html /corpus/prestashop
 # db-up.sh and db-down.sh arrive at /corpus-src/prestashop/ via the
@@ -358,13 +367,13 @@ RUN --network=none set -eux; \
 
 # Runtime uid 33 owns everything the training run touches. The second find is
 # the positive control for the first: /usr/local/bin/php is root-owned in every
-# flavor of this image, so if `find ! -uid 33` cannot see it, it could not have
+# flavor of this image, so if `find ! -user 33` cannot see it, it could not have
 # seen a root-owned file under /corpus either and the first check proved nothing.
 RUN --network=none set -eu; \
-    bad="$(find /corpus ! -uid 33 -print -quit)"; \
+    bad="$(find /corpus ! -user 33 -print -quit)"; \
     [ -z "$bad" ] || { echo "FATAL: $bad is not owned by uid 33" >&2; exit 1; }; \
-    control="$(find /usr/local/bin/php ! -uid 33 -print -quit)"; \
-    [ -n "$control" ] || { echo "FATAL: '! -uid 33' matched nothing on a root-owned file -- the check above measures nothing" >&2; exit 1; }; \
+    control="$(find /usr/local/bin/php ! -user 33 -print -quit)"; \
+    [ -n "$control" ] || { echo "FATAL: '! -user 33' matched nothing on a root-owned file -- the check above measures nothing" >&2; exit 1; }; \
     echo "ok: /corpus is uid 33 only (control: $control)"
 
 CMD ["cat", "/corpus/MANIFEST"]

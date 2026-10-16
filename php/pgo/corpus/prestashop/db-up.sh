@@ -22,7 +22,7 @@
 # The corpus ships only the app tree and the populated datadir, not mariadbd: no
 # PrestaShop/MariaDB software may reach the runtime images (see the PrestaShop
 # header of php/pgo/corpus.lock). Whoever mounts the corpus installs
-# mariadb-server first: Dockerfile.corpus to run the CLI installer that produces
+# mariadb-13.1 first: Dockerfile.corpus to run the CLI installer that produces
 # db-data, tests/test-corpus-tiers.sh and tests/test-corpus.sh to replay the proof
 # on every runtime image, and php/build.sh's PGO training stage.
 set -euo pipefail
@@ -35,12 +35,8 @@ LOG=/tmp/ps-corpus-mysql.log
 DATADIR="${APP}/db-data"
 
 MARIADBD="$(command -v mariadbd 2>/dev/null || command -v mysqld 2>/dev/null || true)"
-for candidate in /usr/sbin/mariadbd /usr/sbin/mysqld; do
-  [ -n "$MARIADBD" ] && break
-  [ -x "$candidate" ] && MARIADBD="$candidate"
-done
 [ -n "$MARIADBD" ] && [ -x "$MARIADBD" ] || {
-  echo "FATAL[db-up]: no mariadbd/mysqld on PATH or in /usr/sbin -- install mariadb-server first" >&2
+  echo "FATAL[db-up]: no mariadbd/mysqld on PATH -- apk add mariadb-13.1 first" >&2
   exit 1
 }
 [ -d "$DATADIR" ] || {
