@@ -367,8 +367,8 @@ tag:
   Trivy verdict.
 - **OpenVEX.** Findings accepted instead of fixed, each with a reason and a review date. Source:
   [`vex/php.openvex.json`](vex/php.openvex.json). Only images a statement applies to carry it.
-  Currently that is `cli-builder`, for `brace-expansion` and `undici` inside the npm that Node
-  bundles.
+  Currently that is `cli-builder`, for `braces` in semantic-release's dependency tree, which has
+  no fixed release.
 
 ```sh
 cosign verify-attestation --type openvex \

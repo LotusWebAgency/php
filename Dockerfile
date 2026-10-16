@@ -735,9 +735,8 @@ FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b
 # intermediate npm lands in a shipped layer (upgrading npm in a later RUN left the
 # bundled 11.19 copy, ~20MB, underneath).
 #
-# npm moves past the bundled 11.19.1 to 11.21.0, which ships the fixed tar and
-# ip-address; its bundled brace-expansion and undici are still behind their fixes
-# in every npm release (see .trivyignore). /out is built by hand because
+# npm moves past the bundled 11.19.1 to 11.21.1, the first release whose bundled
+# brace-expansion, undici and ip-address carry their fixes. /out is built by hand because
 # /usr/local/bin also holds the node image's docker-entrypoint.sh and yarn.
 # semantic-release is not run here (it refuses to start without git);
 # tests/smoke.sh runs `semantic-release --version` in the finished image. The
@@ -745,7 +744,7 @@ FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b
 FROM node24 AS node-tools
 RUN set -eux; \
     node -v; \
-    npm install -g npm@11.21.0; \
+    npm install -g npm@11.21.1; \
     npm -v; \
     npm install -g semantic-release; \
     npm cache clean --force; \

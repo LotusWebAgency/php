@@ -85,13 +85,13 @@ class TestValidate(unittest.TestCase):
             d["statements"][0].update(status="not_affected", justification="vulnerable_code_not_in_execute_path")
             d["statements"][0].pop("action_statement")
         self.assertEqual(self.problems_after(edit), [])
-        self.assertIn("CVE-2026-102276 exp:", vex.trivyignore(self.doc))
+        self.assertIn("CVE-2026-93687 exp:", vex.trivyignore(self.doc))
 
     def test_under_investigation_is_never_ignored(self):
         def edit(d):
             d["statements"][0]["status"] = "under_investigation"
         self.assertEqual(self.problems_after(edit), [])
-        self.assertNotIn("CVE-2026-102276", vex.trivyignore(self.doc))
+        self.assertNotIn("CVE-2026-93687", vex.trivyignore(self.doc))
 
     def test_every_statement_needs_a_review_deadline(self):
         p = self.problems_after(lambda d: d["statements"][0].update(status_notes="accepted, no date"))

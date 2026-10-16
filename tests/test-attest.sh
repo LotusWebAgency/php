@@ -343,13 +343,13 @@ jq -e --arg d "$PLAT_amd64" '
   .predicateType | test("^https://openvex.dev/ns")' <<<"$vex" >/dev/null || die "openvex predicateType is $(jq -r .predicateType <<<"$vex")"
 jq -e --arg d "$PLAT_amd64" '
   .predicate["@context"] == "https://openvex.dev/ns/v0.2.0"
-  and (.predicate.statements | length == 3)
+  and (.predicate.statements | length == 1)
   and (.predicate.statements | all(.status == "affected" and (.status_notes | test("review-by: [0-9-]{10}")) and (.action_statement | length > 0)))
   and (.predicate.statements | all(.products | length == 1 and (.[0]["@id"] == "pkg:oci/php@" + $d + "?repository_url=index.docker.io/lotuswebagency/php")))
-  and ([.predicate.statements[].vulnerability.name] | sort == ["CVE-2026-102276","CVE-2026-102278","CVE-2026-19534"])
-  and ([.predicate.statements[].products[0].subcomponents[0]["@id"]] | sort == ["pkg:npm/brace-expansion@5.0.9","pkg:npm/brace-expansion@5.0.9","pkg:npm/undici@6.28.0"])' \
+  and ([.predicate.statements[].vulnerability.name] | sort == ["CVE-2026-93687"])
+  and ([.predicate.statements[].products[0].subcomponents[0]["@id"]] | sort == ["pkg:npm/braces@3.0.3"])' \
   <<<"$vex" >/dev/null || { jq . <<<"$vex"; die "the openvex predicate is not scoped to the platform digest"; }
-pass "openvex predicate: 3 affected statements, product = the platform digest purl, review-by and action present"
+pass "openvex predicate: 1 affected statement, product = the platform digest purl, review-by and action present"
 
 # ------------------------------------------------ 4. a re-run adds duplicates; the documented read takes the first
 ci/attest-image.sh list "$REPO" "$LIST" cli-builder "$WORK/results" >/dev/null 2>&1 || die "re-running attest-image.sh list failed"

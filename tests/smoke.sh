@@ -1212,6 +1212,16 @@ no_toolchain() {  # no_toolchain <flavor> -- no compiler, assembler, linker, aut
   [ -z "$found" ] \
     || { echo "FAIL: $1 carries a compiler, assembler, linker, autoconf, phpize/php-config or the PHP headers (expected only in ext-builder): $(tr '\n' ' ' <<<"$found")"; exit 1; }
 }
+pear_found=$(drun --rm "$IMAGE" sh -c '
+  for t in pear pecl peardev; do command -v "$t"; done
+  for p in /usr/local/lib/php/PEAR.php /usr/local/lib/php/Archive /usr/local/lib/php/.registry /usr/local/etc/pear.conf; do
+    test -e "$p" && echo "$p"
+  done
+  exit 0' 2>/dev/null) || { echo "FAIL: the PEAR probe did not run"; exit 1; }
+[ -z "$pear_found" ] \
+  || { echo "FAIL: $FLAVOR carries PEAR (configure needs --without-pear before 7.4): $(tr '\n' ' ' <<<"$pear_found")"; exit 1; }
+echo "ok: no PEAR, pecl or bundled Archive_Tar"
+
 case "$FLAVOR" in
   ext-builder)
     for tool in gcc g++ make autoconf pkg-config phpize php-config; do
@@ -1278,22 +1288,22 @@ case "$FLAVOR" in
         || { echo "FAIL: cli-builder: $cache_dir ('$probe') is not writable as the image user (uid $(drun --rm "$IMAGE" id -u))"; exit 1; }
     done
     echo "ok: cli-builder's npm and corepack caches are writable as the image user"
-    # npm is pinned to 11.21.0 in the node-tools stage (the node image bundles an
+    # npm is pinned to 11.21.1 in the node-tools stage (the node image bundles an
     # older one with a vulnerable tar/ip-address). The finished tree must hold
     # exactly one npm of its own; the copy semantic-release carries for
     # @semantic-release/npm is a dependency of that package and expected. The
     # pattern is the exact node_modules/npm path, so
     # @semantic-release/npm/package.json is not a match.
     npm_version=$(drun --rm "$IMAGE" npm --version)
-    [ "$npm_version" = "11.21.0" ] || { echo "FAIL: cli-builder: npm --version is '$npm_version', expected 11.21.0"; exit 1; }
+    [ "$npm_version" = "11.21.1" ] || { echo "FAIL: cli-builder: npm --version is '$npm_version', expected 11.21.1"; exit 1; }
     npm_pkgs=$(drun --rm "$IMAGE" find /usr/local/lib/node_modules -path '*/node_modules/npm/package.json' -not -path '/usr/local/lib/node_modules/semantic-release/*')
     [ "$npm_pkgs" = "/usr/local/lib/node_modules/npm/package.json" ] \
       || { echo "FAIL: cli-builder: expected exactly one npm outside semantic-release's own tree, found: $npm_pkgs"; exit 1; }
     npm_pkg_version=$(drun --rm "$IMAGE" node -p 'require("/usr/local/lib/node_modules/npm/package.json").version')
-    [ "$npm_pkg_version" = "11.21.0" ] || { echo "FAIL: cli-builder: the installed npm package.json says $npm_pkg_version, expected 11.21.0"; exit 1; }
+    [ "$npm_pkg_version" = "11.21.1" ] || { echo "FAIL: cli-builder: the installed npm package.json says $npm_pkg_version, expected 11.21.1"; exit 1; }
     sr_npm=$(drun --rm "$IMAGE" find /usr/local/lib/node_modules/semantic-release -path '*/node_modules/npm/package.json')
     [ -n "$sr_npm" ] || { echo "FAIL: cli-builder: the control find saw no npm inside semantic-release's tree -- the exclusion above is untested, so its result proves nothing"; exit 1; }
-    echo "ok: cli-builder's npm is 11.21.0 and the only npm outside semantic-release's tree (control: its own nested copy is found)"
+    echo "ok: cli-builder's npm is 11.21.1 and the only npm outside semantic-release's tree (control: its own nested copy is found)"
     # VEX drift: vex/php.openvex.json names the bundled npm packages we accepted a
     # finding in, by exact version (purl). When an npm or semantic-release bump
     # moves them, the statement describes a package that is gone or a version
