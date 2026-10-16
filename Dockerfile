@@ -142,11 +142,12 @@ ENV PHP_DEPS_PREFIX=""
 # --- deps: legacy ---
 # PHP 7.0-8.0 cannot link against Wolfi's libraries: OpenSSL 3 support only
 # became solid in 8.1, and ICU 74+ needs C++17 that ext/intl below 8.1 does not
-# use. This era vendors pinned copies (deps/versions.lock), except libxml2 and
-# libxslt, which come from apk.
+# use, and libxml2 2.15 is past what php-src below 8.1.27 compiles against. This
+# era vendors pinned copies (deps/versions.lock), libxml2 and libxslt included.
 #
-# OpenSSL and ICU are built static-only by deps/build-deps.sh, so no EOL libssl.so
-# or duplicate ICU data exists in the image and neither needs an rpath. The rpath
+# OpenSSL, ICU, libxml2 and libxslt are built static-only by deps/build-deps.sh, so
+# no EOL libssl.so, duplicate ICU data or second libxml2 exists in the image and
+# none needs an rpath. The rpath
 # (LD_LIBRARY_PATH would break the host curl; see php/ldflags.sh) covers whatever
 # is shared under PHP_DEPS_PREFIX, i.e. the vendored curl of 7.0-7.2.
 #
@@ -164,15 +165,17 @@ ENV PHP_DEPS_PREFIX=""
 #     types) is a compile flag set in php/build.sh's CPPFLAGS/CXXFLAGS.
 FROM imagemagick AS deps-legacy
 ARG PHP_VERSION
-# The image libraries come from the imagemagick stage, as in deps-modern. ICU is
-# vendored, so no icu-dev. openssl-4.0-dev is for ext-snmp only: net-snmp-config
+# The image libraries come from the imagemagick stage, as in deps-modern. ICU,
+# libxml2 and libxslt are vendored, so no icu-dev, libxml2-dev or libxslt-dev
+# (php/build.sh points every PHP version at the vendored copies); pkgconf-dev
+# ships pkg.m4, which their autoreconf needs. openssl-4.0-dev is for ext-snmp only: net-snmp-config
 # adds -lssl -lcrypto, which needs the system libssl.so symlink. PHP itself is
 # pointed at the vendored OpenSSL by --with-openssl=/opt/php-deps (php/build.sh
 # asserts the substitution). No libavif-dev: GD has no AVIF before 8.1.
 # Otherwise the package set mirrors deps-modern and must be kept in sync by hand.
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk add --cache-dir /var/cache/apk -U \
-      openssl-4.0-dev curl-dev libxslt-dev libxml2-dev \
+      openssl-4.0-dev curl-dev pkgconf-dev \
       oniguruma-dev libzip-dev sqlite-dev postgresql-18-dev zlib-dev zstd-dev \
       brotli-dev \
       libsodium-dev argon2-dev gmp-dev readline-dev libmemcached-dev \
@@ -183,7 +186,7 @@ COPY deps/build-deps.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
 COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
 RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
     bash /build/deps/build-deps.sh "$PHP_VERSION" /opt/php-deps
-# After the vendored build (twenty minutes of openssl + ICU + curl) so these
+# After the vendored build (twenty minutes of openssl + ICU + libxml2 + curl) so these
 # five-line steps do not invalidate it; build-deps.sh does not use either shim.
 # Both satisfy an autoconf search on 7.0-7.3 without changing what is linked,
 # and stay in this build-only stage.
@@ -231,13 +234,17 @@ COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 # --with-icu-dir=${PHP_DEPS_PREFIX}, which comes from a php/ext.json override
 # and is spliced in by php/build.sh (derived from ${PHP_DEPS_PREFIX}/bin/icu-config
 # existing, like --with-curl, so the version range lives in one place). Hence this
-# ENV names only --with-openssl.
+# ENV names only --with-openssl and --with-xsl. 7.0-7.3 find libxslt by DIR
+# (xslt-config) and libxml2 by --with-libxml-dir, a php/ext.json override on dom
+# that php/build.sh splices like --with-icu-dir; 7.4+ find both through
+# PKG_CONFIG_LIBDIR and ignore the DIR value, which is why --with-xsl is
+# spliced for every version of this era.
 #
 # ${PHP_DEPS_PREFIX}/bin is deliberately not put on PATH: it holds the vendored
 # curl binary for 7.0-7.2, and shadowing /usr/bin/curl for the whole build is the
 # LD_LIBRARY_PATH failure again.
 ENV PHP_DEPS_PREFIX=/opt/php-deps
-ENV PREFIXED_CONFIGURE_FLAGS="--with-openssl"
+ENV PREFIXED_CONFIGURE_FLAGS="--with-openssl --with-xsl"
 
 # --- deps ---
 FROM deps-${PHP_ERA} AS deps
@@ -295,19 +302,27 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # (binutils 2.47) does not fold them into a .text.hot output section,
 # so assert_profile_reached_the_link would measure nothing. gold does. A
 # -fuse-ld=gold flag fails for the same libtool reason as lld.
+# Wolfi's gcc does not look at PATH for ld: collect2 takes the first ld in
+# COMPILER_PATH, which ends with /usr/x86_64-pc-linux-gnu/bin (binutils' own
+# target directory). The PATH shim alone leaves gcc on bfd, so for gcc that
+# private ld is replaced as well and the check asks gcc which ld it will run.
 RUN set -eux; \
     mkdir -p /usr/local/lib/php-docker-ld; \
     case "$COMPILER" in \
       clang) ln -sf /usr/bin/ld.lld /usr/local/lib/php-docker-ld/ld ;; \
-      gcc)   ln -sf /usr/bin/ld.gold /usr/local/lib/php-docker-ld/ld ;; \
+      gcc)   ln -sf /usr/bin/ld.gold /usr/local/lib/php-docker-ld/ld; \
+             gcc_ld="$(gcc -print-prog-name=ld)"; \
+             case "$gcc_ld" in /*) ;; *) echo "FATAL: gcc -print-prog-name=ld printed '$gcc_ld', not an absolute path; the private ld cannot be replaced" >&2; exit 1 ;; esac; \
+             ln -sf /usr/bin/ld.gold "$gcc_ld" ;; \
     esac; \
     PATH=/usr/local/lib/php-docker-ld:$PATH; \
-    v="$(ld --version | head -1)"; \
+    if [ "$COMPILER" = gcc ]; then v="$("$(gcc -print-prog-name=ld)" --version | head -1)"; \
+    else v="$(ld --version | head -1)"; fi; \
     case "$COMPILER:$v" in \
       clang:*LLD*) echo "ok: ld on PATH is '$v'" ;; \
       clang:*) echo "FATAL: ld on PATH is '$v', not lld; ThinLTO shared-object links will fail" >&2; exit 1 ;; \
-      gcc:*GNU\ gold*) echo "ok: ld on PATH is '$v'" ;; \
-      gcc:*) echo "FATAL: ld on PATH is '$v', not gold; profile-guided .text.hot would not survive the link" >&2; exit 1 ;; \
+      gcc:*GNU\ gold*) echo "ok: ld run by gcc is '$v'" ;; \
+      gcc:*) echo "FATAL: ld run by gcc is '$v', not gold; profile-guided .text.hot would not survive the link" >&2; exit 1 ;; \
     esac
 ENV PATH=/usr/local/lib/php-docker-ld:$PATH
 
@@ -461,9 +476,23 @@ COPY --chmod=0755 rootfs/ /stage/
 # no CA store of its own, so TLS peer verification through PHP's openssl extension
 # (file_get_contents, stream_socket_client, SoapClient, SMTP+TLS) would fail
 # without help; curl resolves its own bundle and hides it. deps/build-deps.sh's
-# `--openssldir=/etc/ssl` sets the compiled-in default to Debian's store; this ini
-# is the explicit half and is harmless on the modern era.
+# `--openssldir=/etc/ssl/openssl-1.1` sets the compiled-in default; this ini is the
+# explicit half and is harmless on the modern era.
 COPY conf/openssl.ini /stage/usr/local/etc/php/conf.d/12-openssl.ini
+
+# The legacy era's openssldir: a 1.1-syntax openssl.cnf (the system's is OpenSSL 4
+# syntax, which 1.1.1w cannot parse) and symlinks to the system CA store, so the
+# compiled-in default_cert_file/default_cert_dir resolve.
+ARG PHP_ERA
+COPY conf/openssl-1.1.cnf /tmp/openssl-1.1.cnf
+RUN set -eux; \
+    if [ "$PHP_ERA" = legacy ]; then \
+      install -d /stage/etc/ssl/openssl-1.1; \
+      install -m 0644 /tmp/openssl-1.1.cnf /stage/etc/ssl/openssl-1.1/openssl.cnf; \
+      ln -s /etc/ssl/certs /stage/etc/ssl/openssl-1.1/certs; \
+      ln -s /etc/ssl/cert.pem /stage/etc/ssl/openssl-1.1/cert.pem; \
+    fi; \
+    rm -f /tmp/openssl-1.1.cnf
 
 # Baseline opcache settings, shared unmodified by every flavor. The numeric prefix
 # sorts before the entrypoint-written 90-opcache-env.ini and 99-env.ini, which

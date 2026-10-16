@@ -176,6 +176,24 @@ case " $(bash "$HERE/configure-args.sh" "$PHP_VERSION" "$EXT_SOURCES" | tr '\n' 
     ;;
 esac
 
+# --with-libxml-dir, for 7.0-7.3. Their PHP_SETUP_LIBXML looks for xml2-config in
+# $PHP_LIBXML_DIR, /usr/local and /usr only, with no pkg-config branch; 7.4+ is
+# pure pkg-config and finds the vendored libxml2 through PKG_CONFIG_LIBDIR, and
+# an unknown --with-libxml-dir there is only a configure warning. php/ext.json
+# carries the flag as a 7.0-7.3 override on dom; the value is derived here, from
+# the artifact deps/build-deps.sh left behind, like --with-icu-dir above.
+case " $(bash "$HERE/configure-args.sh" "$PHP_VERSION" "$EXT_SOURCES" | tr '\n' ' ') " in
+  *" --with-libxml-dir "*)
+    if [ -n "$PHP_DEPS_PREFIX" ] && [ -x "${PHP_DEPS_PREFIX}/bin/xml2-config" ]; then
+      PREFIXED_CONFIGURE_FLAGS="${PREFIXED_CONFIGURE_FLAGS} --with-libxml-dir"
+    else
+      echo "php/ext.json asks for --with-libxml-dir on PHP ${PHP_VERSION} but there is no" \
+           "xml2-config at '${PHP_DEPS_PREFIX:-<unset PHP_DEPS_PREFIX>}/bin' to point it at" >&2
+      exit 1
+    fi
+    ;;
+esac
+
 render_configure_args() {
   local args flag
   args="$(bash "$HERE/configure-args.sh" "$PHP_VERSION" "$EXT_SOURCES")"

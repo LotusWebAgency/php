@@ -3,9 +3,10 @@
 # OpenSSL and ICU are built static-only: an EOL libssl.so (or a duplicate ICU
 # data blob) in the image is a liability for everything else that might dlopen
 # it. curl (7.0-7.2 only, per versions.lock) stays shared, resolved via rpath at
-# the same prefix, like ImageMagick. libxml2 is not vendored: trixie's package
-# is the 2.9.14 series with security backports that upstream's tarball lacks,
-# so deps-legacy installs libxml2-dev from apt instead.
+# the same prefix, like ImageMagick. libxml2 and libxslt are static too, built from
+# Debian trixie's source packages: Wolfi's libxml2 2.15 is too new for php-src
+# below 8.1.27, and trixie's 2.9.14 carries security backports that upstream's
+# tarball lacks.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -51,9 +52,30 @@ fetch() {  # fetch <url> <sha256> <dest>
   bash "${HERE}/fetch-verified.sh" "$1" "$2" "$3"
 }
 
+# Debian's patch series, applied with the same zero-fuzz rule as deps/patches. The
+# series is applied whole except the patches named after the source directory:
+# those change the installed config scripts or pkg-config files in ways that
+# break a static link.
+apply_debian_series() {  # apply_debian_series <srcdir> [skipped-patch ...]
+  local src="$1" patch_name skip applied=0 skipped
+  shift
+  while read -r patch_name _; do
+    case "$patch_name" in ''|\#*) continue ;; esac
+    skipped=0
+    for skip in "$@"; do [ "$patch_name" = "$skip" ] && skipped=1; done
+    [ "$skipped" -eq 0 ] || { echo "skipping debian patch $patch_name"; continue; }
+    patch -d "$src" -p1 --batch --forward --fuzz=0 -i "$src/debian/patches/$patch_name" >/dev/null
+    applied=$((applied + 1))
+  done < "$src/debian/patches/series"
+  echo "applied $applied debian patches in $src"
+}
+
 while read -r era name version applies sha url; do
   case "$era" in ''|\#*) continue ;; esac
   [ "$era" = "legacy" ] || continue
+  # Side inputs of the row above them (the Debian patch tarballs), fetched by that
+  # row's recipe.
+  case "$name" in *-debian) continue ;; esac
   in_range "$applies" "$PHP_VERSION" || continue
 
   echo "=== building $name $version for php $PHP_VERSION"
@@ -64,20 +86,60 @@ while read -r era name version applies sha url; do
   rm -f "/tmp/${name}.tar"
 
   case "$name" in
+    libxml2|libxslt)
+      read -r _ _ _ _ debian_sha debian_url < <(grep -E "^legacy[[:space:]]+${name}-debian[[:space:]]" "${HERE}/versions.lock")
+      fetch "$debian_url" "$debian_sha" "/tmp/${name}-debian.tar"
+      tar xf "/tmp/${name}-debian.tar" -C "$work"
+      rm -f "/tmp/${name}-debian.tar"
+      ;;
+  esac
+
+  case "$name" in
+    libxml2)
+      # xml2-config-fix.patch strips the static link line from `xml2-config
+      # --libs`, which PHP 7.0-7.3's configure reads; static libxml2 needs
+      # -lz and -lm there. python and docs are off, as is lzma (its .so would
+      # become a runtime dependency of php), and the unused network stacks.
+      apply_debian_series "$work" xml2-config-fix.patch
+      ( cd "$work" && autoreconf -fi \
+        && ./configure --prefix="$PREFIX" --enable-static --disable-shared \
+          --without-python --without-http --without-ftp --without-icu \
+          --without-lzma --with-zlib \
+        && make -j"$(nproc)" && make install )
+      # Static only, so a consumer that links through pkg-config without
+      # --static (PHP 7.4+, and the shared xmlrpc.so) needs the private libs
+      # on the plain Libs line.
+      sed -i -E 's/^(Libs:.*)$/\1 -lz -lm/' "$PREFIX/lib/pkgconfig/libxml-2.0.pc"
+      grep -qE '^Libs:.* -lz -lm$' "$PREFIX/lib/pkgconfig/libxml-2.0.pc" \
+        || { echo "FATAL: libxml-2.0.pc did not gain -lz -lm; static consumers would fail to link" >&2; exit 1; }
+      ;;
+    libxslt)
+      # 0005-Drop-libdir-and-static-linking-information-from-xslt-config
+      # is skipped for the same reason as above. --without-crypto drops
+      # libgcrypt (exslt crypto functions); libxml2 is the one built above.
+      apply_debian_series "$work" 0005-Drop-libdir-and-static-linking-information-from-xslt.patch
+      ( cd "$work" && autoreconf -fi \
+        && ./configure --prefix="$PREFIX" --enable-static --disable-shared \
+          --with-libxml-prefix="$PREFIX" --without-python --without-crypto \
+        && make -j"$(nproc)" && make install )
+      ;;
     openssl)
       # no-legacy is a 3.x-only ./config option; 1.1.1w rejects it as
       # "Unsupported options".
       #
       # --openssldir is not a build output location: it is the compiled-in
-      # runtime default for the CA trust store, and "make install_sw" (libs and
-      # headers only) never populates it. Pointing it at the vendored prefix
-      # would leave default_cert_file/default_cert_dir dangling and break peer
-      # verification for every TLS stream PHP's openssl extension opens
-      # (file_get_contents, SoapClient, SMTP+TLS; curl resolves its CA bundle
-      # independently). /etc/ssl is Debian's maintained store. conf/openssl.ini
-      # also sets openssl.cafile explicitly, as an independent second line of
-      # defense.
-      ( cd "$work" && ./config --prefix="$PREFIX" --openssldir=/etc/ssl \
+      # runtime default for the config file and the CA trust store, and
+      # "make install_sw" (libs and headers only) never populates it. It must
+      # not be /etc/ssl: Wolfi's /etc/ssl/openssl.cnf is written for OpenSSL 4
+      # (".pragma includedir", ".include", provider sections), which 1.1.1w
+      # cannot parse, so openssl_pkey_new() and openssl_csr_new() fail with
+      # "def_load_bio:missing equal sign". The Dockerfile's runtime-conf stage
+      # fills /etc/ssl/openssl-1.1 with a 1.1-syntax openssl.cnf and symlinks
+      # to the system CA store, so peer verification (file_get_contents,
+      # SoapClient, SMTP+TLS; curl resolves its CA bundle independently) still
+      # finds it. conf/openssl.ini also sets openssl.cafile explicitly, as an
+      # independent second line of defense.
+      ( cd "$work" && ./config --prefix="$PREFIX" --openssldir=/etc/ssl/openssl-1.1 \
           no-shared no-tests \
         && make -j"$(nproc)" && make install_sw )
       ;;

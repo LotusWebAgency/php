@@ -1,0 +1,31 @@
+# OpenSSL 1.1.1 syntax, for the legacy era's vendored static OpenSSL, whose
+# compiled-in openssldir is /etc/ssl/openssl-1.1 (deps/build-deps.sh). It stays
+# separate from the system's /etc/ssl/openssl.cnf, which is OpenSSL 4 syntax and
+# unparseable by 1.1.1w. Only what ext/openssl's key, CSR and certificate helpers
+# read: no providers, no engines, no TLS policy.
+
+[req]
+default_bits       = 2048
+default_md         = sha256
+distinguished_name = req_distinguished_name
+req_extensions     = v3_req
+x509_extensions    = v3_ca
+string_mask        = utf8only
+
+[req_distinguished_name]
+countryName            = Country Name (2 letter code)
+stateOrProvinceName    = State or Province Name
+localityName           = Locality Name
+organizationName       = Organization Name
+organizationalUnitName = Organizational Unit Name
+commonName             = Common Name
+emailAddress           = Email Address
+
+[v3_req]
+basicConstraints = CA:FALSE
+keyUsage         = nonRepudiation, digitalSignature, keyEncipherment
+
+[v3_ca]
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints       = critical, CA:true

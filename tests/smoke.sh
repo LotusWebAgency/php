@@ -1163,6 +1163,25 @@ fmt=$(drun --rm "$IMAGE" php -r '$f=new NumberFormatter("de_DE",NumberFormatter:
 [ "$fmt" = "1.234,5" ] || { echo "FAIL: intl de_DE formatting wrong: expected '1.234,5', got '$fmt'"; exit 1; }
 echo "ok: intl formats de_DE correctly (1234.5 -> $fmt)"
 
+# ext/openssl must load a config it can parse without being handed one. The legacy
+# era's vendored OpenSSL 1.1.1w reads <openssldir>/openssl.cnf, and Wolfi's own
+# /etc/ssl/openssl.cnf is OpenSSL 4 syntax: with that file in reach, key and CSR
+# generation fail with "def_load_bio:missing equal sign". No config argument is
+# passed, so the compiled-in default is what gets exercised. The same probe
+# checks the compiled-in CA locations resolve, offline.
+ssl_probe=$(drun --rm "$IMAGE" php -r '
+$k = openssl_pkey_new(["private_key_bits" => 2048]);
+if ($k === false) { echo "FAIL:openssl_pkey_new: " . openssl_error_string(); exit; }
+$csr = openssl_csr_new(["commonName" => "smoke.invalid"], $k);
+if ($csr === false) { echo "FAIL:openssl_csr_new: " . openssl_error_string(); exit; }
+if (!openssl_csr_export($csr, $pem) || strpos($pem, "BEGIN CERTIFICATE REQUEST") === false) { echo "FAIL:openssl_csr_export: " . openssl_error_string(); exit; }
+$l = openssl_get_cert_locations();
+if (!is_readable($l["default_cert_file"]) || !is_dir($l["default_cert_dir"])) { echo "FAIL:compiled-in CA locations dangle: " . $l["default_cert_file"] . " " . $l["default_cert_dir"]; exit; }
+echo "OK";
+')
+[ "$ssl_probe" = "OK" ] || { echo "FAIL: ext/openssl without an explicit config: ${ssl_probe#FAIL:}"; exit 1; }
+echo "ok: openssl_pkey_new(2048) and openssl_csr_new() work with no explicit config, and the compiled-in CA locations resolve"
+
 # The endpoint every TLS check below uses. Overridable because these are the
 # only assertions in this script that need outbound HTTPS, and an
 # egress-filtered CI runner would otherwise report every image as broken with a
