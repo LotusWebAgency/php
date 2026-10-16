@@ -298,19 +298,25 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # (binutils 2.47) does not fold them into a .text.hot output section,
 # so assert_profile_reached_the_link would measure nothing. gold does. A
 # -fuse-ld=gold flag fails for the same libtool reason as lld.
+# Wolfi's gcc does not look at PATH for ld: collect2 takes the first ld in
+# COMPILER_PATH, which ends with /usr/x86_64-pc-linux-gnu/bin (binutils' own
+# target directory). The PATH shim alone leaves gcc on bfd, so for gcc that
+# private ld is replaced as well and the check asks gcc which ld it will run.
 RUN set -eux; \
     mkdir -p /usr/local/lib/php-docker-ld; \
     case "$COMPILER" in \
       clang) ln -sf /usr/bin/ld.lld /usr/local/lib/php-docker-ld/ld ;; \
-      gcc)   ln -sf /usr/bin/ld.gold /usr/local/lib/php-docker-ld/ld ;; \
+      gcc)   ln -sf /usr/bin/ld.gold /usr/local/lib/php-docker-ld/ld; \
+             ln -sf /usr/bin/ld.gold "$(gcc -print-prog-name=ld)" ;; \
     esac; \
     PATH=/usr/local/lib/php-docker-ld:$PATH; \
-    v="$(ld --version | head -1)"; \
+    if [ "$COMPILER" = gcc ]; then v="$("$(gcc -print-prog-name=ld)" --version | head -1)"; \
+    else v="$(ld --version | head -1)"; fi; \
     case "$COMPILER:$v" in \
       clang:*LLD*) echo "ok: ld on PATH is '$v'" ;; \
       clang:*) echo "FATAL: ld on PATH is '$v', not lld; ThinLTO shared-object links will fail" >&2; exit 1 ;; \
-      gcc:*GNU\ gold*) echo "ok: ld on PATH is '$v'" ;; \
-      gcc:*) echo "FATAL: ld on PATH is '$v', not gold; profile-guided .text.hot would not survive the link" >&2; exit 1 ;; \
+      gcc:*GNU\ gold*) echo "ok: ld run by gcc is '$v'" ;; \
+      gcc:*) echo "FATAL: ld run by gcc is '$v', not gold; profile-guided .text.hot would not survive the link" >&2; exit 1 ;; \
     esac
 ENV PATH=/usr/local/lib/php-docker-ld:$PATH
 
