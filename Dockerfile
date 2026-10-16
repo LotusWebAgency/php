@@ -121,14 +121,14 @@ FROM imagemagick AS deps-modern
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk add --cache-dir /var/cache/apk -U \
       openssl-4.0-dev curl-dev libxml2-dev libxslt-dev icu-dev \
-      oniguruma-dev libzip-dev sqlite-dev postgresql-17-dev zlib-dev zstd-dev \
+      oniguruma-dev libzip-dev sqlite-dev postgresql-18-dev zlib-dev zstd-dev \
       brotli-dev libavif-dev \
       libsodium-dev argon2-dev gmp-dev readline-dev libmemcached-dev \
 # Shared-extension dependencies: one package per non-empty `libs` entry in
 # php/ext.json for each linkage:"shared" extension. libmcrypt-dev is for mcrypt
 # on PHP < 8.0. imap is absent: Wolfi has no c-client. pcre2-dev is
 # snuffleupagus's build dependency (its config.m4 calls pcre2-config).
-      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.6-dev lz4-dev \
+      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
       libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
       yaml-dev libevent-dev pcre2-dev
 # ext-snmp links this instead of the distro's net-snmp-dev.
@@ -169,10 +169,10 @@ ARG PHP_VERSION
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk add --cache-dir /var/cache/apk -U \
       openssl-4.0-dev curl-dev libxslt-dev libxml2-dev \
-      oniguruma-dev libzip-dev sqlite-dev postgresql-17-dev zlib-dev zstd-dev \
+      oniguruma-dev libzip-dev sqlite-dev postgresql-18-dev zlib-dev zstd-dev \
       brotli-dev \
       libsodium-dev argon2-dev gmp-dev readline-dev libmemcached-dev \
-      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.6-dev lz4-dev \
+      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
       libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
       yaml-dev libevent-dev pcre2-dev
 COPY deps/build-deps.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
@@ -248,6 +248,19 @@ ARG UARCH=baseline
 ARG PGO
 ARG ICU_VERSION
 WORKDIR /src
+
+# Wolfi's libargon2.pc and libmemcached.pc name library directories that do not
+# exist (${prefix}/lib/x86_64-linux-gnu, /usr//usr/lib). php's configure turns every
+# non-default -L from pkg-config into an RPATH entry, so php, php-fpm and the
+# shared extensions would carry a search path into directories that the image
+# lacks and a later writer could populate. Pointing both at /usr/lib makes the -L
+# a default directory, which configure drops.
+RUN for pc in libargon2 libmemcached; do \
+      f="/usr/lib/pkgconfig/$pc.pc"; \
+      [ -f "$f" ] || { echo "$f is missing" >&2; exit 1; }; \
+      sed -i -e 's|/usr//usr/lib|/usr/lib|g' -e 's|/lib/x86_64-linux-gnu|/lib|g' "$f"; \
+      ! grep -q 'x86_64-linux-gnu\|//usr' "$f" || { echo "$f still names a bad directory" >&2; exit 1; }; \
+    done
 
 # The clang profile runtime: Wolfi's `clang-19` does not pull it in, and without it
 # PGO pass 1 fails at the link on a missing libclang_rt.profile.a, twenty minutes
@@ -513,65 +526,64 @@ FROM scratch AS runtime-payload-conf
 COPY --from=php-build /usr/local/etc/php /usr/local/etc/php
 COPY --from=runtime-conf /stage/ /
 
+# --- mariadb-dump ---
+# Build-only: mariadb-13.1-dump depends on perl for its slow-log scripts, but
+# mariadb-dump itself is a native binary, so runtime-base copies only that and
+# perl never ships. WOLFI_INDEX_STATE keeps this layer in step with the runtime
+# apk layer, so the dump and the `mariadb` shell come from the same index.
+FROM ${BASE_IMAGE} AS mariadb-dump-src
+ARG WOLFI_INDEX_STATE=""
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}" \
+    && echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
+    && apk add --cache-dir /var/cache/apk -U mariadb-13.1-dump \
+    && test -x /usr/bin/mariadb-dump
+
 # --- runtime-base ---
 FROM ${BASE_IMAGE} AS runtime-base
 ARG PHP_VERSION
 ARG WWW_UID=33
 ARG WWW_GID=33
-# Core client packages rather than the metapackages (~38MB instead of ~85MB).
-# 17 is trixie's PostgreSQL major.
-ARG PG_MAJOR=17
+# Client packages for the PostgreSQL major whose libpq links OpenSSL 4, like
+# everything else PHP loads; 17's libpq and libldap-2.6 pull OpenSSL 3 in beside it.
+ARG PG_MAJOR=18
 # Without a UTF-8 LC_CTYPE, PHP 7.x's basename()/pathinfo() treat multibyte
 # bytes as invalid and cut them away: basename('/x/файл.txt') is '.txt', and
 # ZipArchive::extractTo() writes '日本語/.txt'. 8.0+ is locale-independent there.
 # C.UTF-8 is built into glibc, no locales package needed.
-ENV DEBIAN_FRONTEND=noninteractive \
-    LANG=C.UTF-8
+ENV LANG=C.UTF-8
 
 COPY --from=php-build /tmp/runtime-packages.txt /tmp/runtime-packages.txt
-# upgrade: BASE_IMAGE is digest-pinned, so without it a Debian security fix to a
-# package the base already ships (e.g. libpcre2-8-0 on the legacy era) waits for
-# the next digest bump instead of landing in the weekly rebuild.
-# DEBIAN_ARCHIVE_STATE (CI: a hash of the trixie, trixie-updates and
-# trixie-security Release dates) re-runs this layer the day Debian publishes a
-# fix, instead of replaying the week-keyed cache until the next ISO week.
-ARG DEBIAN_ARCHIVE_STATE=""
+# The base's repository is apk.cgr.dev/chainguard; the public Wolfi index replaces
+# it (the signing key is already trusted), so a derived image's `apk add` reaches
+# the same packages this one was built from.
+#
+# upgrade: BASE_IMAGE is digest-pinned, so without it a security fix to a package
+# the base already ships waits for the next digest bump instead of landing in the
+# weekly rebuild. WOLFI_INDEX_STATE (CI: a hash of the APKINDEX files) re-runs
+# this layer the day Wolfi publishes a fix, instead of replaying the cached one.
+#
+# The package list is the tools every flavor keeps, the MariaDB shell and the
+# PostgreSQL client tools, and the libraries php and its extensions link
+# (scripts/runtime-libs.sh, resolved in php-build). libldap-2.7 is named so that
+# libpq's `so:libldap.so.2` cannot resolve to libldap-2.6 (OpenSSL 3). tar and
+# gzip are busybox applets, so they are not packages here. No shadow, no perl,
+# no ldd, no getent, no posix-libc-utils.
+ARG WOLFI_INDEX_STATE=""
 RUN set -eux; \
-    echo "debian archive state: ${DEBIAN_ARCHIVE_STATE:-unset}"; \
-    apt-get update; \
-    apt-get upgrade -y; \
-    apt-get install -y --no-install-recommends \
-      ca-certificates curl tzdata tini less nano procps \
-      tar gzip bzip2 zip unzip zstd xz-utils \
-      mariadb-client-core "postgresql-client-${PG_MAJOR}" \
-# libfcgi-bin ships cgi-fcgi, which php-fpm-healthcheck uses to speak FastCGI to
-# the pool's ping.path without a front web server.
-      libfcgi-bin \
+    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}"; \
+    echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories; \
+    apk upgrade --no-cache; \
+    apk add --no-cache \
+      bash ca-certificates curl tzdata tini less nano procps \
+      bzip2 zip unzip zstd xz \
+      mariadb-13.1-client "postgresql-${PG_MAJOR}-client" libldap-2.7 \
       $(tr '\n' ' ' < /tmp/runtime-packages.txt); \
-# /usr/bin/psql is a symlink to pg_wrapper, a perl script that dispatches between
-# installed postgres majors; with one major, it is the only reason ~49MB of perl
-# modules and libperl.so are here. Keep the real client binaries and drop the
-# wrapper. postgresql-client-N depends on postgresql-client-common, so the
-# binaries are copied out before the purge. Naming only `perl` lets apt take
-# libperl/perl-modules with it across perl majors; this works because nothing else
-# depends on libperl (Debian's libsnmp40t64 does, hence the vendored net-snmp,
-# deps/build-netsnmp.sh). tests/smoke.sh asserts libperl is gone. perl-base, with
-# /usr/bin/perl, stays: it is Essential.
-    for b in psql pg_dump pg_dumpall pg_restore pg_isready; do \
-      cp -a "/usr/lib/postgresql/${PG_MAJOR}/bin/$b" "/usr/local/bin/$b"; \
-    done; \
-    apt-get purge -y --auto-remove "postgresql-client-${PG_MAJOR}" perl; \
-# dpkg --audit exits 0 either way; any output means the purge left a
-# half-configured package.
-    audit="$(dpkg --audit 2>&1 || true)"; \
-    [ -z "$audit" ] || { echo "$audit" >&2; echo "FATAL: inconsistent dpkg state after purge" >&2; exit 1; }; \
-    rm -rf /var/lib/apt/lists/* /tmp/runtime-packages.txt; \
-# Housekeeping goes in this RUN because a later one would only whiteout files this
-# layer already stored. debconf keeps a *-old copy of its databases (0.8MB). Files
-# of installed packages stay, however unused: dpkg still lists the package, so apt
-# never restores a deleted file, and a derived image installing mariadb-server
-# fails in mariadb-install-db on the missing my_print_defaults.
-    rm -f /var/cache/debconf/*-old
+    rm -f /tmp/runtime-packages.txt; \
+# mariadb-13.1-client ships only `mariadb`; keep the names scripts and people type.
+    ln -s mariadb /usr/bin/mysql; \
+    ln -s mariadb-dump /usr/bin/mysqldump
+COPY --from=mariadb-dump-src /usr/bin/mariadb-dump /usr/bin/mariadb-dump
 
 # php-build's output, then the baked config, as two layers (see runtime-payload).
 # The config layer stays last so a config edit never re-ships the binaries.
@@ -579,9 +591,10 @@ COPY --from=runtime-payload / /
 COPY --from=runtime-payload-conf / /
 
 RUN set -eux; \
-    getent group www-data >/dev/null || groupadd -g "$WWW_GID" www-data; \
-    id -u www-data >/dev/null 2>&1 || useradd -u "$WWW_UID" -g "$WWW_GID" -s /usr/sbin/nologin -M www-data; \
+    grep -q '^www-data:' /etc/group || addgroup -S -g "$WWW_GID" www-data; \
+    grep -q '^www-data:' /etc/passwd || adduser -S -D -H -u "$WWW_UID" -G www-data -h /var/www -s /sbin/nologin www-data; \
     mkdir -p /app /usr/local/etc/php/conf.d; \
+    install -d -o www-data -g www-data /var/www; \
     chown -R www-data:www-data /app; \
 # php-ext-enable writes here as whatever user runs the container (the flavors set
 # USER www-data, and the entrypoint's PHP_EXT_ENABLE runs after the drop). Root
@@ -707,7 +720,7 @@ RUN set -eux; \
 EXPOSE 9000
 STOPSIGNAL SIGQUIT
 # php-fpm-healthcheck (vendored) speaks FastCGI to the pool's ping.path
-# (conf/www.conf) via cgi-fcgi, so no front web server or extra HTTP port is
+# (conf/www.conf) via php-fcgi, so no front web server or extra HTTP port is
 # needed. It runs as www-data, like the main command.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
   CMD php-fpm-healthcheck || exit 1

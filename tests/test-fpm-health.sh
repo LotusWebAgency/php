@@ -27,7 +27,7 @@ echo "ok: clean startup log"
 # override the entrypoint so php-fpm never starts. HEALTHCHECK is baked into
 # the image and keeps running inside the container regardless of what its
 # own command is, so this still exercises the real vendored
-# php-fpm-healthcheck against a pool that is genuinely down (cgi-fcgi
+# php-fpm-healthcheck against a pool that is genuinely down (php-fcgi
 # refusing to connect), not a mock.
 drun -d --name "$downname" --entrypoint sleep "$IMAGE" 300 >/dev/null
 status=none
@@ -43,7 +43,7 @@ echo "ok: healthcheck reports unhealthy when the pool is down (after ${i}s)"
 # -e PHP_CHMOD_SHIM=1 "$IMAGE" php -r '...'` overrides CMD and execs the php binary
 # directly (the "docker exec php -r runs a separate CLI process" trap the error_log
 # assertion below also routes around), which would prove the shim in a process
-# PrestaShop never runs in. Route through cgi-fcgi against a live pool instead.
+# PrestaShop never runs in. Route through php-fcgi against a live pool instead.
 #
 # `shimname` is a second container: LD_PRELOAD is exported once by the entrypoint at
 # container start, so PHP_CHMOD_SHIM must be set before that container's php-fpm
@@ -63,7 +63,7 @@ run_chmod_probe() {
   local cname="$1"
   docker exec -i "$cname" sh -c "cat > /tmp/chmod-probe.php" <<<"$chmod_probe"
   docker exec -e SCRIPT_FILENAME=/tmp/chmod-probe.php -e SCRIPT_NAME=/chmod-probe.php -e REQUEST_METHOD=GET "$cname" \
-    cgi-fcgi -bind -connect 127.0.0.1:9000 | tr -d '\r' | sed '/^$/d' | tail -1
+    php-fcgi 127.0.0.1:9000 | tr -d '\r' | sed '/^$/d' | tail -1
 }
 
 set +e
@@ -81,14 +81,14 @@ set -e
 echo "ok: chmod shim inert in a live FPM worker by default"
 
 # error_log() from a live worker: a config assertion (smoke.sh checks the ini/global
-# error_log directive strings) never drives a real request. libfcgi-bin makes it
+# error_log directive strings) never drives a real request. php-fcgi makes it
 # possible to drive one through the live worker and prove the application's own
 # error_log() output reaches `docker logs`, the only thing that proves errors escape
 # the container (catch_workers_output otherwise swallows it into a private pipe).
 marker="behavioral-errlog-$$"
 docker exec "$name" sh -c "printf '<?php error_log(\"${marker}\");' > /tmp/errlog-test.php"
 docker exec -e SCRIPT_FILENAME=/tmp/errlog-test.php -e SCRIPT_NAME=/errlog-test.php -e REQUEST_METHOD=GET "$name" \
-  cgi-fcgi -bind -connect 127.0.0.1:9000 >/dev/null
+  php-fcgi 127.0.0.1:9000 >/dev/null
 found=0
 for i in $(seq 1 10); do
   docker logs "$name" 2>&1 | grep -q "$marker" && { found=1; break; }

@@ -234,7 +234,7 @@
       "linkage": "static",
       "php": ">=7.0",
       "configure": "--with-pdo-pgsql",
-      "libs": ["postgresql-17-dev"],
+      "libs": ["postgresql-18-dev"],
       "why": "Laravel Postgres-backed applications"
     },
     {
@@ -258,7 +258,7 @@
       "linkage": "static",
       "php": ">=7.0",
       "configure": "--with-pgsql",
-      "libs": ["postgresql-17-dev"],
+      "libs": ["postgresql-18-dev"],
       "why": "Laravel raw Postgres connections outside PDO"
     },
     {
@@ -561,7 +561,7 @@
       "linkage": "shared",
       "php": ">=7.0",
       "configure": "--with-ldap",
-      "libs": ["openldap-2.6-dev"],
+      "libs": ["openldap-2.7-dev", "libldap-2.7"],
       "why": "WordPress/Laravel enterprise SSO via LDAP directory auth"
     },
     {

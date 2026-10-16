@@ -1,0 +1,275 @@
+#!/usr/local/bin/php -n
+<?php
+// Minimal FastCGI client: sends one request to a php-fpm pool and prints the
+// response body. Runs under `php -n`, so it needs no ini file and no extension
+// beyond the core streams.
+//
+//   php-fcgi [-t SECONDS] [-f] [-i] [-p NAME=VALUE]... ADDRESS
+//
+// ADDRESS is host:port, [v6addr]:port, /path/to/pool.sock or unix:/path.
+// Request parameters come from the environment (SCRIPT_FILENAME, SCRIPT_NAME,
+// REQUEST_METHOD, QUERY_STRING, CONTENT_TYPE, CONTENT_LENGTH, PATH_INFO,
+// REQUEST_URI, DOCUMENT_ROOT, REMOTE_*, SERVER_*, HTTP_*) and from -p. A
+// request body is read from stdin, exactly CONTENT_LENGTH bytes of it.
+//
+//   -t SECONDS  overall deadline for connect, send and receive (default 5,
+//               PHP_FCGI_TIMEOUT overrides the default)
+//   -f          exit 22 when the response status is 400 or above
+//   -i          print the response headers before the body
+//   -p N=V      add or override one request parameter
+//
+// Exit codes: 0 response received; 1 connection, protocol or timeout failure;
+// 2 usage error; 22 -f and an error status. FCGI_STDERR output goes to stderr.
+
+ini_set('display_errors', 'stderr');
+error_reporting(E_ALL);
+
+const FCGI_VERSION = 1;
+const FCGI_BEGIN_REQUEST = 1;
+const FCGI_END_REQUEST = 3;
+const FCGI_PARAMS = 4;
+const FCGI_STDIN = 5;
+const FCGI_STDOUT = 6;
+const FCGI_STDERR = 7;
+const FCGI_RESPONDER = 1;
+const FCGI_REQUEST_ID = 1;
+const FCGI_MAX_CONTENT = 65535;
+
+function usage(string $why = ''): never
+{
+    if ($why !== '') {
+        fwrite(STDERR, "php-fcgi: $why\n");
+    }
+    fwrite(STDERR, "usage: php-fcgi [-t SECONDS] [-f] [-i] [-p NAME=VALUE]... ADDRESS\n");
+    exit(2);
+}
+
+function fail(string $message): never
+{
+    fwrite(STDERR, "php-fcgi: $message\n");
+    exit(1);
+}
+
+function encode_length(int $n): string
+{
+    return $n < 128 ? chr($n) : pack('N', $n | 0x80000000);
+}
+
+function record(int $type, string $content = ''): string
+{
+    return pack('CCnnCC', FCGI_VERSION, $type, FCGI_REQUEST_ID, strlen($content), 0, 0) . $content;
+}
+
+function write_all($sock, string $data, float $deadline): void
+{
+    $offset = 0;
+    $len = strlen($data);
+    while ($offset < $len) {
+        $remaining = $deadline - microtime(true);
+        if ($remaining <= 0) {
+            fail('timed out sending the request');
+        }
+        stream_set_timeout($sock, (int) $remaining, (int) (fmod($remaining, 1) * 1e6));
+        $written = @fwrite($sock, substr($data, $offset));
+        if ($written === false || $written === 0) {
+            fail('connection closed while sending the request');
+        }
+        $offset += $written;
+    }
+}
+
+function read_exact($sock, int $n, float $deadline): string
+{
+    $buf = '';
+    while (strlen($buf) < $n) {
+        $remaining = $deadline - microtime(true);
+        if ($remaining <= 0) {
+            fail('timed out waiting for the response');
+        }
+        stream_set_timeout($sock, (int) $remaining, (int) (fmod($remaining, 1) * 1e6));
+        $chunk = fread($sock, $n - strlen($buf));
+        if ($chunk === false || $chunk === '') {
+            $meta = stream_get_meta_data($sock);
+            fail(!empty($meta['timed_out']) ? 'timed out waiting for the response' : 'connection closed before the response was complete');
+        }
+        $buf .= $chunk;
+    }
+    return $buf;
+}
+
+$timeout = (float) (getenv('PHP_FCGI_TIMEOUT') !== false && getenv('PHP_FCGI_TIMEOUT') !== '' ? getenv('PHP_FCGI_TIMEOUT') : 5);
+$fail_on_error = false;
+$show_headers = false;
+$extra = [];
+$address = null;
+
+$args = array_slice($argv, 1);
+while ($args) {
+    $arg = array_shift($args);
+    switch ($arg) {
+        case '-t':
+            $value = array_shift($args);
+            if ($value === null || !is_numeric($value) || (float) $value <= 0) {
+                usage('-t needs a positive number of seconds');
+            }
+            $timeout = (float) $value;
+            break;
+        case '-f':
+            $fail_on_error = true;
+            break;
+        case '-i':
+            $show_headers = true;
+            break;
+        case '-p':
+            $value = array_shift($args);
+            if ($value === null || !str_contains($value, '=') || str_starts_with($value, '=')) {
+                usage('-p needs NAME=VALUE');
+            }
+            [$name, $val] = explode('=', $value, 2);
+            $extra[$name] = $val;
+            break;
+        case '-h':
+        case '--help':
+            usage();
+        default:
+            if ($address !== null || ($arg !== '' && $arg[0] === '-' && $arg !== '-')) {
+                usage("unexpected argument '$arg'");
+            }
+            $address = $arg;
+    }
+}
+if ($address === null || $address === '') {
+    usage('missing ADDRESS');
+}
+if ($timeout <= 0) {
+    usage('the timeout must be positive');
+}
+
+if (str_starts_with($address, 'unix:')) {
+    $target = 'unix:///' . ltrim(substr($address, 5), '/');
+} elseif ($address[0] === '/') {
+    $target = 'unix://' . $address;
+} else {
+    $target = 'tcp://' . $address;
+}
+
+$deadline = microtime(true) + $timeout;
+
+$params = [
+    'GATEWAY_INTERFACE' => 'CGI/1.1',
+    'SERVER_PROTOCOL' => 'HTTP/1.1',
+    'REQUEST_METHOD' => 'GET',
+    'SERVER_SOFTWARE' => 'php-fcgi',
+];
+$passed = [
+    'SCRIPT_FILENAME', 'SCRIPT_NAME', 'REQUEST_METHOD', 'QUERY_STRING', 'CONTENT_TYPE', 'CONTENT_LENGTH',
+    'PATH_INFO', 'PATH_TRANSLATED', 'REQUEST_URI', 'DOCUMENT_URI', 'DOCUMENT_ROOT', 'REMOTE_ADDR',
+    'REMOTE_PORT', 'SERVER_NAME', 'SERVER_ADDR', 'SERVER_PORT', 'SERVER_PROTOCOL', 'GATEWAY_INTERFACE',
+    'SERVER_SOFTWARE', 'REDIRECT_STATUS', 'HTTPS',
+];
+foreach (getenv() as $name => $value) {
+    if (in_array($name, $passed, true) || str_starts_with($name, 'HTTP_')) {
+        $params[$name] = $value;
+    }
+}
+foreach ($extra as $name => $value) {
+    $params[$name] = $value;
+}
+
+$body = '';
+$content_length = (int) ($params['CONTENT_LENGTH'] ?? 0);
+if ($content_length > 0) {
+    $remaining = $content_length;
+    while ($remaining > 0) {
+        $chunk = fread(STDIN, min($remaining, 65536));
+        if ($chunk === false || $chunk === '') {
+            fail("stdin ended after " . strlen($body) . " of $content_length body bytes");
+        }
+        $body .= $chunk;
+        $remaining -= strlen($chunk);
+    }
+}
+
+$sock = @stream_socket_client($target, $errno, $errstr, max(0.001, $deadline - microtime(true)));
+if ($sock === false) {
+    fail("cannot connect to $address: " . ($errstr !== '' ? $errstr : "error $errno"));
+}
+
+$encoded = '';
+foreach ($params as $name => $value) {
+    $name = (string) $name;
+    $value = (string) $value;
+    $encoded .= encode_length(strlen($name)) . encode_length(strlen($value)) . $name . $value;
+}
+
+$request = record(FCGI_BEGIN_REQUEST, pack('nCx5', FCGI_RESPONDER, 0));
+foreach (str_split($encoded, FCGI_MAX_CONTENT) as $piece) {
+    $request .= record(FCGI_PARAMS, $piece);
+}
+$request .= record(FCGI_PARAMS);
+if ($body !== '') {
+    foreach (str_split($body, FCGI_MAX_CONTENT) as $piece) {
+        $request .= record(FCGI_STDIN, $piece);
+    }
+}
+$request .= record(FCGI_STDIN);
+write_all($sock, $request, $deadline);
+
+$stdout = '';
+$ended = false;
+while (!$ended) {
+    $header = unpack('Cversion/Ctype/nid/nlength/Cpadding', read_exact($sock, 8, $deadline));
+    $content = $header['length'] > 0 ? read_exact($sock, $header['length'], $deadline) : '';
+    if ($header['padding'] > 0) {
+        read_exact($sock, $header['padding'], $deadline);
+    }
+    if ($header['version'] !== FCGI_VERSION) {
+        fail('unexpected FastCGI protocol version ' . $header['version']);
+    }
+    switch ($header['type']) {
+        case FCGI_STDOUT:
+            $stdout .= $content;
+            break;
+        case FCGI_STDERR:
+            fwrite(STDERR, $content);
+            break;
+        case FCGI_END_REQUEST:
+            $end = unpack('NappStatus/CprotocolStatus', $content);
+            if ($end['protocolStatus'] !== 0) {
+                fail('the server refused the request (protocol status ' . $end['protocolStatus'] . ')');
+            }
+            $ended = true;
+            break;
+    }
+}
+fclose($sock);
+
+$split = strpos($stdout, "\r\n\r\n");
+$sep = 4;
+if ($split === false) {
+    $split = strpos($stdout, "\n\n");
+    $sep = 2;
+}
+if ($split === false) {
+    $headers = '';
+    $payload = $stdout;
+} else {
+    $headers = substr($stdout, 0, $split);
+    $payload = substr($stdout, $split + $sep);
+}
+
+$status = 200;
+if (preg_match('/^Status:\s*(\d{3})/mi', $headers, $m)) {
+    $status = (int) $m[1];
+}
+
+if ($show_headers && $headers !== '') {
+    fwrite(STDOUT, $headers . "\r\n\r\n");
+}
+fwrite(STDOUT, $payload);
+
+if ($fail_on_error && $status >= 400) {
+    fwrite(STDERR, "php-fcgi: response status $status\n");
+    exit(22);
+}
+exit(0);

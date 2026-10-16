@@ -136,11 +136,15 @@ section "4/9 shellcheck on every shell file"
 command -v shellcheck >/dev/null || fail "shellcheck not found on this host"
 if command -v shellcheck >/dev/null; then
   # rootfs's runtime scripts have no .sh extension (they ship as bare
-  # executables in the image) but are bash, same as everything else here.
+  # executables in the image) but are bash, same as everything else here. The one
+  # exception is php-fcgi, a PHP script (`php -n` shebang), which shellcheck
+  # cannot parse; the shebang filter below leaves it out.
   shell_files=()
   while IFS= read -r f; do shell_files+=("$f"); done < <(
     find . -name '*.sh' -not -path './.git/*' -not -path './.claude/*' | sort
-    find rootfs/usr/local/bin -maxdepth 1 -type f 2>/dev/null | sort
+    find rootfs/usr/local/bin -maxdepth 1 -type f 2>/dev/null | sort | while IFS= read -r f; do
+      head -n1 "$f" | grep -q 'sh' && echo "$f"
+    done
   )
   [ "${#shell_files[@]}" -gt 0 ] || fail "no shell files found to check"
 
