@@ -31,6 +31,11 @@ class TestCflags(unittest.TestCase):
     def test_baseline_and_v3_differ(self):
         self.assertNotEqual(run("php/cflags.sh", "baseline"), run("php/cflags.sh", "v3"))
 
+    def test_baseline_march(self):
+        flags = run("php/cflags.sh", "baseline")
+        self.assertTrue("-march=x86-64-v2 -mtune=generic" in flags or "-march=armv8-a" in flags, flags)
+        self.assertNotIn("-mtune=sapphirerapids", flags)
+
     def test_v3_sets_a_march(self):
         flags = run("php/cflags.sh", "v3")
         self.assertTrue("-march=x86-64-v3" in flags or "-march=armv9-a" in flags)
@@ -129,6 +134,36 @@ class TestRuntimeLibs(unittest.TestCase):
             self.assertFalse([p for p in packages if "unowned" in p], packages)
             self.assertIn("libunowned.so.1", result.stderr)
 
+    @unittest.skipUnless(shutil.which("gcc"), "requires gcc to build the test fixture")
+    def test_unresolvable_library_is_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            vendor = td / "vendor"
+            vendor.mkdir()
+            tree = td / "tree"
+            tree.mkdir()
+            (td / "lib.c").write_text("int gone_fn(void) { return 42; }\n")
+            subprocess.run(
+                ["gcc", "-shared", "-fPIC", "-Wl,-soname,libgone.so.1",
+                 "-o", str(vendor / "libgone.so.1"), str(td / "lib.c")],
+                check=True, capture_output=True,
+            )
+            (td / "prog.c").write_text(
+                "extern int gone_fn(void);\n"
+                "int main(void) { return gone_fn() == 42 ? 0 : 1; }\n"
+            )
+            subprocess.run(
+                ["gcc", "-o", str(tree / "prog"), str(td / "prog.c"),
+                 "-L" + str(vendor), "-l:libgone.so.1"],
+                check=True, capture_output=True,
+            )
+            result = subprocess.run(
+                ["bash", str(ROOT / "scripts/runtime-libs.sh"), str(tree)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("libgone.so.1", result.stderr)
+
     @unittest.skipUnless(shutil.which("gcc") and shutil.which("apk"),
                           "requires gcc to build the test fixture and apk to resolve ownership")
     def test_names_carry_no_version_suffix(self):
@@ -146,6 +181,7 @@ class TestRuntimeLibs(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(result.stdout.strip(), "runtime-libs.sh printed no packages")
             for name in result.stdout.split():
                 self.assertNotRegex(name, r"-[0-9][^-]*-r[0-9]+$")
 

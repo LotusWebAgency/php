@@ -6,8 +6,9 @@
 # /opt and /usr/local are vendored or built here and belong to no package.
 set -euo pipefail
 
-# Wolfi ships no ldd; the dynamic loader lists a binary's libraries itself. The
-# glob covers /lib64/ld-linux-x86-64.so.2 and /lib/ld-linux-aarch64.so.1.
+# Wolfi ships no ldd; the dynamic loader lists a binary's libraries itself in
+# trace mode, which is what ldd does (`--list` prints nothing for a library it
+# cannot find, where trace mode prints "not found"). The glob covers /lib64/ld-linux-x86-64.so.2 and /lib/ld-linux-aarch64.so.1.
 loader=""
 for candidate in /lib64/ld-linux-*.so.* /lib/ld-linux-*.so.*; do
   [ -e "$candidate" ] && { loader="$candidate"; break; }
@@ -19,10 +20,21 @@ libs=$(
     # The loader exits non-zero on static binaries and exec-bit scripts; xargs
     # would turn that into exit 123 and pipefail would abort, so swallow per file.
     find "$dir" -type f \( -perm -u+x -o -name '*.so' -o -name '*.so.*' \) -print0 2>/dev/null \
-      | xargs -0 -r -n1 sh -c '"$0" --list "$1" 2>/dev/null || true' "$loader" \
-      | awk '/=>/ && $3 ~ /^\// && $3 !~ /^\/(opt|usr\/local)\// { print $3 }'
+      | xargs -0 -r -n1 sh -c 'LD_TRACE_LOADED_OBJECTS=1 "$0" "$1" 2>/dev/null || true' "$loader" \
+      | awk '/=> not found/ { print "notfound " $1 }
+             /=>/ && $3 ~ /^\// && $3 !~ /^\/(opt|usr\/local)\// { print $3 }'
   done | sort -u
 )
+
+# A dependency the loader cannot resolve would ship an image that fails at run
+# time, so it is fatal.
+missing=$(grep '^notfound ' <<<"$libs" | cut -d' ' -f2- || true)
+if [ -n "$missing" ]; then
+  echo "error: the loader cannot find these libraries:" >&2
+  printf '  %s\n' $missing >&2
+  exit 1
+fi
+libs=$(grep -v '^notfound ' <<<"$libs" || true)
 
 [ -n "$libs" ] || { echo "no linked libraries found in: $*" >&2; exit 1; }
 
@@ -48,13 +60,26 @@ owner_of() {
   return 1
 }
 
+# A library under the system directories that no package owns would be missing
+# from the runtime image, so it is fatal; anything elsewhere only warns.
+owners=""
+unowned=""
 while IFS= read -r lib; do
   real="$(readlink -f "$lib")" || continue
   if ! owner="$(owner_of "$real")"; then
-    echo "warning: no package owns $real" >&2
+    case "$real" in
+      /usr/*|/lib/*|/lib64/*) unowned+="$real"$'\n' ;;
+      *) echo "warning: no package owns $real" >&2 ;;
+    esac
     continue
   fi
-  echo "$owner"
-done <<<"$libs" \
-  | sed -E 's/-[0-9][^-]*-r[0-9]+$//' \
-  | sort -u
+  owners+="$owner"$'\n'
+done <<<"$libs"
+
+if [ -n "$unowned" ]; then
+  echo "error: no package owns these system libraries:" >&2
+  printf '  %s\n' $unowned >&2
+  exit 1
+fi
+
+printf '%s' "$owners" | sed -E 's/-[0-9][^-]*-r[0-9]+$//' | sort -u
