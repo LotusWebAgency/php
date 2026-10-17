@@ -644,6 +644,15 @@ heif_pkgs=$(grep -E '^(libheif|libde265|libsdl2|gdk-pixbuf|libdav1d|aom-libs|rav
 [ -z "$heif_pkgs" ] || { echo "FAIL: the image carries the distro libheif stack ($heif_pkgs) -- HEIC/AVIF decode is meant to be static in libMagickCore"; exit 1; }
 echo "ok: no libheif, libde265, SDL, gdk-pixbuf or AV1/HEVC codec packages in the image"
 
+# Busybox's network applets (raw-socket and interface tools) are pruned from the
+# image; curl is the one network client that stays. The control proves the query
+# can see busybox applets at all.
+drun --rm "$IMAGE" sh -c 'command -v ls >/dev/null && command -v curl >/dev/null' \
+  || { echo "FAIL: control failed -- ls or curl is missing from the image"; exit 1; }
+net_applets=$(drun --rm "$IMAGE" sh -c 'for a in arping dnsdomainname microcom netstat ping ping6 traceroute traceroute6 tunctl vconfig; do for d in /bin /sbin /usr/bin /usr/sbin; do [ -e "$d/$a" ] || [ -L "$d/$a" ] && echo "$d/$a"; done; done; true' | tr '\n' ' ')
+[ -z "$net_applets" ] || { echo "FAIL: busybox network applets are still present ($net_applets)"; exit 1; }
+echo "ok: busybox network applets (ping, netstat, traceroute, arping, ...) are absent, curl is present"
+
 # The Wolfi base, asserted rather than assumed. The repository file is rewritten to
 # the public mirror, because the base image ships the vendor's authenticated one.
 apk_repos=$(drun --rm "$IMAGE" cat /etc/apk/repositories | tr -d '[:space:]')

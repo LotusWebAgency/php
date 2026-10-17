@@ -7,6 +7,12 @@ ARG PHP_ERA=modern
 ARG COMPILER=clang
 
 # --- toolchain ---
+# Busybox's raw-socket and interface applets have no job in a PHP runtime and only
+# hand an attacker with code execution a ready-made network toolbox. Every image
+# stage that runs `apk add` prunes them again, because busybox's apk trigger
+# recreates the links. curl stays (healthchecks and Composer need it); tests/smoke.sh
+# asserts these are gone.
+ARG BUSYBOX_NET_APPLETS="arping dnsdomainname microcom netstat ping ping6 traceroute traceroute6 tunctl vconfig"
 
 FROM ${BASE_IMAGE} AS toolchain-base
 ARG COMPILER=clang
@@ -628,6 +634,13 @@ RUN set -eux; \
       mariadb-13.1-client "postgresql-${PG_MAJOR}-client" libldap-2.7 \
       $(tr '\n' ' ' < /tmp/runtime-packages.txt); \
     rm -f /tmp/runtime-packages.txt
+ARG BUSYBOX_NET_APPLETS
+RUN set -eux; \
+    for applet in $BUSYBOX_NET_APPLETS; do \
+      for dir in /bin /sbin /usr/bin /usr/sbin; do \
+        case "$(readlink "$dir/$applet" 2>/dev/null)" in */busybox) rm -f "$dir/$applet" ;; esac; \
+      done; \
+    done
 COPY --from=mariadb-dump-src /usr/bin/mariadb-dump /usr/bin/mariadb-admin /usr/bin/mariadb-check /usr/bin/
 # mariadb-13.1-client ships only `mariadb`; keep the names scripts and people type.
 # Wrappers rather than symlinks: MariaDB warns "Deprecated program name" on stderr
@@ -819,6 +832,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # cli-builder: composer, node and the CLI tooling a build or deploy stage needs.
 # No compiler or phpize; compiling extensions is ext-builder's job.
 FROM cli AS cli-builder
+ARG BUSYBOX_NET_APPLETS
 USER root
 COPY --from=node-tools /out/ /usr/local/
 # runtime-base already has less, nano, procps, zip, unzip, zstd and the mariadb
@@ -829,6 +843,11 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     set -eux; \
     apk add --cache-dir /var/cache/apk -U \
       nodejs-24 corepack git rsync patch make brotli sqlite jq; \
+    for applet in $BUSYBOX_NET_APPLETS; do \
+      for dir in /bin /sbin /usr/bin /usr/sbin; do \
+        case "$(readlink "$dir/$applet" 2>/dev/null)" in */busybox) rm -f "$dir/$applet" ;; esac; \
+      done; \
+    done; \
     find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 COPY conf/php-builder.ini /usr/local/etc/php/conf.d/10-php.ini
 # Verify the installer against Composer's published signature rather than piping
@@ -859,6 +878,7 @@ COPY --from=php-build /usr/local/include/php /usr/local/include/php
 # or PGO run), taking only the headers and phpize/php-config. Runs as root because
 # `make install` writes into the extension dir. No composer, no node.
 FROM cli AS ext-builder
+ARG BUSYBOX_NET_APPLETS
 USER root
 # build-base: gcc, g++, make, binutils, glibc-dev and the openssf compiler wrappers
 # in /usr/local/bin, which stay on so extensions built here are hardened like
@@ -869,6 +889,11 @@ USER root
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     set -eux; \
     apk add --cache-dir /var/cache/apk -U build-base autoconf pkgconf linux-headers; \
+    for applet in $BUSYBOX_NET_APPLETS; do \
+      for dir in /bin /sbin /usr/bin /usr/sbin; do \
+        case "$(readlink "$dir/$applet" 2>/dev/null)" in */busybox) rm -f "$dir/$applet" ;; esac; \
+      done; \
+    done; \
     find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 COPY --from=ext-builder-payload / /
 CMD ["bash"]
