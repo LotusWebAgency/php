@@ -266,7 +266,7 @@ foreach (["heic", "avif"] as $ext) {
     && $l["r"] > 200 && $l["g"] < 60 && $l["b"] < 60
     && $r["b"] > 200 && $r["r"] < 60 && $r["g"] < 60;
   echo $ext, ":", $ok ? "ok" : "bad", "\n";
-}')
+}') || { echo "FAIL: the Imagick HEIC/AVIF decode run failed (see the PHP error above)"; exit 1; }
 [ "$heif_out" = $'heic:ok\navif:ok' ] \
   || { echo "FAIL: Imagick did not decode the HEIC/AVIF fixtures correctly (got: $heif_out)"; exit 1; }
 echo "ok: imagick decodes HEIC and AVIF (red|blue fixtures)"
@@ -649,7 +649,10 @@ echo "ok: no libheif, libde265, SDL, gdk-pixbuf or AV1/HEVC codec packages in th
 # can see busybox applets at all.
 drun --rm "$IMAGE" sh -c 'command -v ls >/dev/null && command -v curl >/dev/null' \
   || { echo "FAIL: control failed -- ls or curl is missing from the image"; exit 1; }
-net_applets=$(drun --rm "$IMAGE" sh -c 'for a in arping dnsdomainname microcom netstat ping ping6 traceroute traceroute6 tunctl vconfig; do for d in /bin /sbin /usr/bin /usr/sbin; do [ -e "$d/$a" ] || [ -L "$d/$a" ] && echo "$d/$a"; done; done; true' | tr '\n' ' ')
+# The list is the BUSYBOX_NET_APPLETS ARG at the top of the Dockerfile, the one source.
+busybox_net_applets=$(sed -n 's/^ARG BUSYBOX_NET_APPLETS="\(.*\)"$/\1/p' "$ROOT/Dockerfile")
+[ -n "$busybox_net_applets" ] || { echo "FAIL: BUSYBOX_NET_APPLETS not found in the Dockerfile"; exit 1; }
+net_applets=$(drun --rm "$IMAGE" sh -c 'for a in $1; do for d in /bin /sbin /usr/bin /usr/sbin; do [ -e "$d/$a" ] || [ -L "$d/$a" ] && echo "$d/$a"; done; done; true' sh "$busybox_net_applets" | tr '\n' ' ')
 [ -z "$net_applets" ] || { echo "FAIL: busybox network applets are still present ($net_applets)"; exit 1; }
 echo "ok: busybox network applets (ping, netstat, traceroute, arping, ...) are absent, curl is present"
 
