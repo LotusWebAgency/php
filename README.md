@@ -202,7 +202,8 @@ built: Debian trixie has no `libc-client-dev`). The registry drives configure fl
 the smoke test's assertions, and lists each extension's source, linkage, PHP range and purpose.
 
 - **53 are compiled in** and need nothing to use: the usual core set plus `igbinary`, `redis`,
-  `imagick`, `memcached`, `apcu` and `zstd`.
+  `imagick`, `memcached`, `apcu` and `zstd`. `imagick` reads HEIC and AVIF (static libheif,
+  libde265 and dav1d inside ImageMagick) but does not write them.
 - **21 are shared modules**, built but not loaded. Load them with `PHP_EXT_ENABLE: "ldap,uuid"`:
   `amqp`, `brotli`, `bz2`, `event`, `ffi` (7.4+), `ldap`, `lz4`, `mcrypt` (7.x),
   `mongodb` (8.1+), `msgpack`, `pcov` (7.1+), `protobuf` (8.2+), `snmp`, `snuffleupagus` (7.2+),
@@ -266,8 +267,12 @@ ENV PHP_EXT_ENABLE=myext
 - **Control-flow protection** (`-fcf-protection=full`, amd64): every function entry has an `endbr64`
   landing pad. The loader-enforced IBT/SHSTK property note is not claimed, because Debian trixie's
   own toolchain does not emit it.
-- Every link uses `-z relro -z now -z noexecstack --as-needed --build-id=sha1`.
+- Every link uses `-z relro -z now -z noexecstack --as-needed --build-id=sha1`, plus
+  `-z pack-relative-relocs` (packed `DT_RELR` relocations) where the linker supports it.
 - Every setuid and setgid bit inherited from the base image is stripped.
+- Busybox's network applets (`ping`, `netstat`, `traceroute`, `arping`, `microcom` and the rest of
+  the raw-socket and interface set) are removed; `curl` stays. A derived image that runs
+  `apk add` gets the busybox links back and can prune them again.
 
 **Snuffleupagus.** [Virtual patching](https://github.com/jvoisin/snuffleupagus) is compiled in but
 not loaded by default. Four rulesets are baked into `/usr/local/etc/php/snuffleupagus/`: `default`,
@@ -307,7 +312,8 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
   version, because GCC 15's `gnu23` default breaks K&R-style code in php-src and PECL sources.
 - **Dependencies by era.** PHP 8.1+ uses Debian packages. PHP 7.0-8.0 uses OpenSSL and ICU vendored
   from `deps/versions.lock` and linked statically, so no end-of-life `libssl.so` ships. PHP 7.0-7.2
-  also get a vendored curl. ImageMagick and net-snmp are built from source in every image.
+  also get a vendored curl. ImageMagick and net-snmp are built from source in every image;
+  ImageMagick carries static libheif, libde265 and dav1d, which Trivy cannot see either.
 - **PGO on real applications.** Each tier replays PrestaShop, WordPress, Laravel and Symfony (plus
   Drupal on 8.4 and 8.5) through `php-fpm` under the shipped `conf/opcache.ini`, and the release
   build compiles against that profile. A version belongs to the tier with the greatest floor at or

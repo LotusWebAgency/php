@@ -165,6 +165,9 @@ and `zstd`. **21 are shared modules**, loaded with `PHP_EXT_ENABLE`: `amqp`, `br
 `uuid`, `xdebug`, `xmlrpc` (7.x), `yaml`. An unknown or unavailable name is refused with a list of
 what the image has.
 
+`imagick` reads HEIC and AVIF (static libheif, libde265 and dav1d inside ImageMagick) but does not
+write them.
+
 ### Adding your own extension
 
 The images carry no `pecl`, `pear` or `docker-php-ext-install`. Compile in an `ext-builder` stage and
@@ -206,8 +209,12 @@ ENV PHP_EXT_ENABLE=myext
 
 Measured on the shipped ELF binaries, not assumed from compiler flags: PIE, full RELRO
 (`GNU_RELRO` and `BIND_NOW`), non-executable stack, `-fstack-protector-strong`,
-`_FORTIFY_SOURCE=3`, and `-fcf-protection=full` on amd64. Every setuid and setgid bit inherited from
-the base image is stripped.
+`_FORTIFY_SOURCE=3`, and `-fcf-protection=full` on amd64. Links use packed relative relocations
+(`-z pack-relative-relocs`, `DT_RELR`) where the linker supports it. Every setuid and setgid bit
+inherited from the base image is stripped. Busybox's network applets (`ping`, `netstat`,
+`traceroute`, `arping`, `microcom` and the rest of the raw-socket and interface set) are removed;
+`curl` stays. A derived image that runs `apk add` gets the busybox links back and can prune them
+again.
 
 Snuffleupagus virtual patching is compiled in but not loaded. `PHP_SNUFFLEUPAGUS=prestashop` (or
 `default`, `wordpress`, `laravel`) turns it on. For your own rules, mount
@@ -236,8 +243,9 @@ commands and the details of what each contains are in the
 
 Pull requests and `develop` pushes build and test without publishing to Docker Hub. A Trivy gate
 fails the build on any fixable CRITICAL or HIGH finding. Trivy cannot see libraries built from source
-under `/opt` (ImageMagick and net-snmp everywhere, OpenSSL and ICU in the 7.0-8.0 builds, curl in
-7.0-7.2); those are tracked through `deps/versions.lock`. Reporting channel:
+under `/opt` or static inside libMagickCore (ImageMagick with libheif, libde265 and dav1d, and
+net-snmp, everywhere; OpenSSL and ICU in the 7.0-8.0 builds; curl in 7.0-7.2); those are tracked
+through `deps/versions.lock`. Reporting channel:
 [SECURITY.md](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md).
 
 ## Related images

@@ -29,7 +29,8 @@ Every build (pull request, push to `develop`, merge to `main`, weekly rebuild) r
 fails on any fixable CRITICAL or HIGH finding before an image can be published.
 
 Trivy scans the OS package layer. It cannot see libraries built from source and vendored under `/opt`:
-ImageMagick and net-snmp in every image, and OpenSSL, ICU (and curl on 7.0-7.2) in the 7.0-8.0 images.
+ImageMagick (with the libheif, libde265 and dav1d it links statically) and net-snmp in every image,
+and OpenSSL, ICU (and curl on 7.0-7.2) in the 7.0-8.0 images.
 Those are tracked by hand through the pins in `deps/versions.lock`.
 
 Only `main` publishes. A release is built, tested, signed and attested in a GHCR staging repository,
