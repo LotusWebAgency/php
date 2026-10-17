@@ -254,6 +254,23 @@ for fmt in PNG JPEG WEBP AVIF; do
 done
 echo "ok: imagick delegate formats present"
 
+# HEIC and AVIF decode through the static libheif/libde265/dav1d stack linked into
+# libMagickCore (deps/build-heif.sh); the format list above only proves the coders
+# registered. Each fixture is a lossy 64x64 encode of a red half and a blue half.
+heif_out=$(drun --rm -v "$ROOT/tests/fixtures/imagick:/fixtures:ro" "$IMAGE" php -r '
+foreach (["heic", "avif"] as $ext) {
+  $im = new Imagick("/fixtures/two-bars.$ext");
+  $l = $im->getImagePixelColor(16, 32)->getColor();
+  $r = $im->getImagePixelColor(48, 32)->getColor();
+  $ok = $im->getImageWidth() === 64 && $im->getImageHeight() === 64
+    && $l["r"] > 200 && $l["g"] < 60 && $l["b"] < 60
+    && $r["b"] > 200 && $r["r"] < 60 && $r["g"] < 60;
+  echo $ext, ":", $ok ? "ok" : "bad", "\n";
+}') || { echo "FAIL: the Imagick HEIC/AVIF decode run failed (see the PHP error above)"; exit 1; }
+[ "$heif_out" = $'heic:ok\navif:ok' ] \
+  || { echo "FAIL: Imagick did not decode the HEIC/AVIF fixtures correctly (got: $heif_out)"; exit 1; }
+echo "ok: imagick decodes HEIC and AVIF (red|blue fixtures)"
+
 # ImageMagick is built with --disable-openmp; confirm that holds once imagick
 # links it into the php binary -- OpenMP spawns a thread per core per request if
 # it sneaks back in under FPM.
@@ -620,6 +637,24 @@ esac
 stray_pkgs=$(grep -E "$stray_regex" <<<"$apk_installed" | tr '\n' ' ' || true)
 [ -z "$stray_pkgs" ] || { echo "FAIL: the runtime image carries perl/snmp library packages ($stray_pkgs) -- ext-snmp is meant to link the vendored /opt/net-snmp"; exit 1; }
 echo "ok: no ${perl_note}net-snmp* or libsnmp* package in the image (control: glibc is visible to the same query)"
+
+# HEIC/AVIF are decoded by static libraries inside libMagickCore, so the distro
+# libheif and the SDL/gdk-pixbuf/codec closure it pulls in must not be installed.
+heif_pkgs=$(grep -E '^(libheif|libde265|libsdl2|gdk-pixbuf|libdav1d|aom-libs|rav1e|openh264|libx265.*|libsvtav1enc.*)$' <<<"$apk_installed" | tr '\n' ' ' || true)
+[ -z "$heif_pkgs" ] || { echo "FAIL: the image carries the distro libheif stack ($heif_pkgs) -- HEIC/AVIF decode is meant to be static in libMagickCore"; exit 1; }
+echo "ok: no libheif, libde265, SDL, gdk-pixbuf or AV1/HEVC codec packages in the image"
+
+# Busybox's network applets (raw-socket and interface tools) are pruned from the
+# image; curl is the one network client that stays. The control proves the query
+# can see busybox applets at all.
+drun --rm "$IMAGE" sh -c 'command -v ls >/dev/null && command -v curl >/dev/null' \
+  || { echo "FAIL: control failed -- ls or curl is missing from the image"; exit 1; }
+# The list is the BUSYBOX_NET_APPLETS ARG at the top of the Dockerfile, the one source.
+busybox_net_applets=$(sed -n 's/^ARG BUSYBOX_NET_APPLETS="\(.*\)"$/\1/p' "$ROOT/Dockerfile")
+[ -n "$busybox_net_applets" ] || { echo "FAIL: BUSYBOX_NET_APPLETS not found in the Dockerfile"; exit 1; }
+net_applets=$(drun --rm "$IMAGE" sh -c 'for a in $1; do for d in /bin /sbin /usr/bin /usr/sbin; do [ -e "$d/$a" ] || [ -L "$d/$a" ] && echo "$d/$a"; done; done; true' sh "$busybox_net_applets" | tr '\n' ' ')
+[ -z "$net_applets" ] || { echo "FAIL: busybox network applets are still present ($net_applets)"; exit 1; }
+echo "ok: busybox network applets (ping, netstat, traceroute, arping, ...) are absent, curl is present"
 
 # The Wolfi base, asserted rather than assumed. The repository file is rewritten to
 # the public mirror, because the base image ships the vendor's authenticated one.
@@ -1044,6 +1079,21 @@ module_files=("$hard_dir/php-chmod-sanitize.so")
 # shellcheck disable=SC2206  # both are deliberate globs/word-splits
 module_files+=("$hard_dir"/ext/*.so $im_libs $nsnmp_libs)
 bash "$HERE/assert-elf-hardening.sh" "modules-$EXPECT" "${module_files[@]}" || exit 1
+
+# Packed relative relocations (DT_RELR): php/ldflags.sh passes -z pack-relative-relocs
+# to every linker that accepts it. gold, which links the gcc era's php, rejects the
+# flag, so php itself is only held to it on the clang era; the vendored libraries are
+# linked by lld or GNU ld in every era.
+has_relr() { readelf -dW "$1" | grep -q '(RELRSZ)'; }
+# shellcheck disable=SC2206  # both lists are deliberate word-splits
+relr_files=($im_libs $nsnmp_libs)
+case "$VM_COMPILER" in
+  clang*) relr_files+=("$hard_dir/php" "$hard_dir"/ext/*.so); [ -f "$hard_dir/php-fpm" ] && relr_files+=("$hard_dir/php-fpm") ;;
+esac
+relr_missing=""
+for f in "${relr_files[@]}"; do has_relr "$f" || relr_missing="$relr_missing $(basename "$f")"; done
+[ -z "$relr_missing" ] || { echo "FAIL: no DT_RELR (-z pack-relative-relocs did not take) in:$relr_missing"; exit 1; }
+echo "ok: ${#relr_files[@]} ELF files carry packed relative relocations (DT_RELR)"
 
 # RPATH/RUNPATH hygiene: every directory a shipped ELF names must exist in the
 # image. A leaked build-stage rpath (e.g. libtool hardcoding the GCC 16

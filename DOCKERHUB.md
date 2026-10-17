@@ -183,6 +183,9 @@ and `zstd`. **21 are shared modules**, loaded with `PHP_EXT_ENABLE`: `amqp`, `br
 `uuid`, `xdebug`, `xmlrpc` (7.x), `yaml`. An unknown or unavailable name is refused with a list of
 what the image has.
 
+`imagick` reads HEIC and AVIF (static libheif, libde265 and dav1d inside ImageMagick) but does not
+write them.
+
 ### Adding your own extension
 
 The images carry no `pecl`, `pear` or `docker-php-ext-install`. Compile in an `ext-builder` stage and
@@ -226,8 +229,12 @@ ENV PHP_EXT_ENABLE=myext
 
 Measured on the shipped ELF binaries, not assumed from compiler flags: PIE, full RELRO
 (`GNU_RELRO` and `BIND_NOW`), non-executable stack, `-fstack-protector-strong`,
-`_FORTIFY_SOURCE=3`, and `-fcf-protection=full` on amd64. Every setuid and setgid bit inherited from
-the base image is stripped. PHP 7.0-8.4 build with GCC 16.2 (PGO, no LTO) and 8.5 with clang 19 (PGO
+`_FORTIFY_SOURCE=3`, and `-fcf-protection=full` on amd64. Links use packed relative relocations
+(`-z pack-relative-relocs`, `DT_RELR`) where the linker supports it. Every setuid and setgid bit
+inherited from the base image is stripped. Busybox's network applets (`ping`, `netstat`,
+`traceroute`, `arping`, `microcom` and the rest of the raw-socket and interface set) are removed;
+`curl` stays. A derived image that runs `apk add` gets the busybox links back and can prune them
+again. PHP 7.0-8.4 build with GCC 16.2 (PGO, no LTO) and 8.5 with clang 19 (PGO
 and ThinLTO), both from Wolfi packages.
 
 Snuffleupagus virtual patching is compiled in but not loaded. `PHP_SNUFFLEUPAGUS=prestashop` (or
@@ -264,7 +271,8 @@ accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s semantic-rel
 fix; see [Accepted findings](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md#accepted-findings)).
 It is suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan without
 that file shows it. Trivy reads the apk database, so it cannot see libraries built from source and
-linked statically or kept under `/opt`: ImageMagick and net-snmp in every image, OpenSSL 1.1.1w, ICU,
+linked statically or kept under `/opt`: ImageMagick (with static libheif, libde265 and dav1d) and
+net-snmp in every image, OpenSSL 1.1.1w, ICU,
 libxml2 and libxslt in the 7.0-8.0 builds (the last two are Debian trixie's 2.9.14 and 1.1.35 with
 Debian's security patches), curl in 7.0-7.2. Those are tracked by hand through `deps/versions.lock`, as are the
 `mariadb-dump`, `mariadb-admin` and `mariadb-check` binaries copied into the image. Reporting

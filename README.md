@@ -227,7 +227,8 @@ built: Wolfi has no c-client library). The registry drives configure flags, the 
 the smoke test's assertions, and lists each extension's source, linkage, PHP range and purpose.
 
 - **53 are compiled in** and need nothing to use: the usual core set plus `igbinary`, `redis`,
-  `imagick`, `memcached`, `apcu` and `zstd`.
+  `imagick`, `memcached`, `apcu` and `zstd`. `imagick` reads HEIC and AVIF (static libheif,
+  libde265 and dav1d inside ImageMagick) but does not write them.
 - **21 are shared modules**, built but not loaded. Load them with `PHP_EXT_ENABLE: "ldap,uuid"`:
   `amqp`, `brotli`, `bz2`, `event`, `ffi` (7.4+), `ldap`, `lz4`, `mcrypt` (7.x),
   `mongodb` (8.1+), `msgpack`, `pcov` (7.1+), `protobuf` (8.2+), `snmp`, `snuffleupagus` (7.2+),
@@ -295,12 +296,16 @@ ENV PHP_EXT_ENABLE=myext
 - **Control-flow protection** (`-fcf-protection=full`, amd64): every function entry has an `endbr64`
   landing pad. The loader-enforced IBT/SHSTK property note is not claimed, because it is absent
   from these binaries.
-- Every link uses `-z relro -z now -z noexecstack --as-needed --build-id=sha1`.
+- Every link uses `-z relro -z now -z noexecstack --as-needed --build-id=sha1`, plus
+  `-z pack-relative-relocs` (packed `DT_RELR` relocations) where the linker supports it.
 - Wolfi's compiler wrappers add their own hardening spec and bake in `-mtune=sapphirerapids` (arm64:
   `neoverse-v2`). The PHP build turns the hardening spec and clang's default config off, and
   `php/cflags.sh` passes every hardening and `-march`/`-mtune` flag explicitly, vendored libraries
   included.
 - Every setuid and setgid bit inherited from the base image is stripped.
+- Busybox's network applets (`ping`, `netstat`, `traceroute`, `arping`, `microcom` and the rest of
+  the raw-socket and interface set) are removed; `curl` stays. A derived image that runs
+  `apk add` gets the busybox links back and can prune them again.
 
 **Snuffleupagus.** [Virtual patching](https://github.com/jvoisin/snuffleupagus) is compiled in but
 not loaded by default. Four rulesets are baked into `/usr/local/etc/php/snuffleupagus/`: `default`,
@@ -355,7 +360,8 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
   `/etc/ssl/openssl-1.1`), ICU (67.1 on 7.0-7.3, 70.1 on 7.4-8.0), and libxml2 2.9.14 and libxslt
   1.1.35 from Debian trixie's source
   packages with Debian's security patches. No end-of-life `libssl.so` ships. PHP 7.0-7.2 also get a
-  vendored curl. ImageMagick and net-snmp are built from source in every image.
+  vendored curl. ImageMagick and net-snmp are built from source in every image; ImageMagick carries
+  static libheif, libde265 and dav1d, which Trivy cannot see either.
 - **PGO on real applications.** Each tier replays PrestaShop, WordPress, Laravel and Symfony (plus
   Drupal on 8.4 and 8.5) through `php-fpm` under the shipped `conf/opcache.ini`, and the release
   build compiles against that profile. A version belongs to the tier with the greatest floor at or
@@ -445,8 +451,8 @@ semantic-release, HIGH, no upstream fix; see [Accepted findings](SECURITY.md#acc
 suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan without that
 file shows it. Trivy reads the apk database, so it does not see what is outside it:
 
-- libraries built from source and linked statically or kept under `/opt`: ImageMagick and net-snmp
-  in every image; OpenSSL 1.1.1w, ICU, libxml2 and libxslt in the 7.0-8.0 images; curl in 7.0-7.2.
+- libraries built from source and linked statically or kept under `/opt`: ImageMagick (with static
+  libheif, libde265 and dav1d) and net-snmp in every image; OpenSSL 1.1.1w, ICU, libxml2 and libxslt in the 7.0-8.0 images; curl in 7.0-7.2.
   libxml2 and libxslt are Debian trixie's 2.9.14 and 1.1.35 with Debian's security patches. These are
   tracked by hand through the pins in `deps/versions.lock`.
 - `mariadb-dump`, `mariadb-admin` and `mariadb-check`, which are copied into the image.

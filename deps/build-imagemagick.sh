@@ -7,8 +7,9 @@
 # No XML either: imagick is compiled statically into the PHP binary, which
 # already links its own libxml2, and a second libxml2 build in one process is a
 # conflict; none of the kept delegates need it. Delegates kept: PNG/JPEG/WEBP/
-# TIFF/HEIC (HEIC covers AVIF via libheif), from whatever -dev packages the
-# calling deps stage installed.
+# TIFF from whatever -dev packages the calling deps stage installed, and HEIC/AVIF
+# (decode only) from the static libheif stack deps/build-heif.sh builds first and
+# links into libMagickCore.so, so the runtime needs no libheif, SDL or codec packages.
 #
 # The GitHub release tarball ships a pre-generated `configure` (autoconf 2.72),
 # so no autogen.sh/autoreconf step is needed.
@@ -28,6 +29,13 @@ url=$(echo "$row" | awk '{print $6}')
 bash "$HERE/fetch-verified.sh" "$url" "$sha" /tmp/im.tar.gz
 mkdir -p /tmp/im && tar xf /tmp/im.tar.gz -C /tmp/im --strip-components=1
 cd /tmp/im
+
+HEIF_PREFIX=/opt/heif-static
+bash "$HERE/build-heif.sh" "$HEIF_PREFIX"
+# configure resets HEIF_CFLAGS/HEIF_LIBS and asks pkg-config, which for a static
+# libheif must also list the private link line; build-heif.sh folds it into Libs.
+export PKG_CONFIG_PATH="$HEIF_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+echo "libheif for imagemagick: $(pkg-config --cflags --libs libheif)"
 
 # ImageMagick is not part of the microarchitecture-variant matrix (one build is
 # shared by every uarch variant), so it always uses baseline flags: PHP's
