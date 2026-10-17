@@ -4,13 +4,24 @@
 #
 # Zero or more deps-prefixes bind vendored lib dirs to the binary via rpath
 # instead of a global LD_LIBRARY_PATH: a global env var made a vendored
-# libcurl.so.4 shadow debian's for every process in the image, which broke
+# libcurl.so.4 shadow the system's for every process in the image, which broke
 # the host curl binary. rpath is scoped to the linked binary, so it doesn't.
 # Three prefixes are in use: /opt/imagemagick (all eras), /opt/net-snmp (all eras;
 # its own build and, via ext-snmp's configure, snmp.so) and /opt/php-deps (legacy
 # only) -- each gets its own rpath pair.
 set -euo pipefail
 FLAGS="-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,--as-needed -Wl,--build-id=sha1"
+
+# Packed relative relocations (DT_RELR, glibc 2.36+; the base ships 2.44) shrink every
+# PIE and shared object's relocation table and speed up its load. GNU ld and lld take
+# -z pack-relative-relocs; gold rejects it as an unknown -z option, and the gcc era's
+# php-build links with gold (the Dockerfile's ld shim), so the flag follows the linker
+# `ld` resolves to rather than the compiler.
+LD_BANNER="$(ld --version 2>/dev/null || true)"
+case "$LD_BANNER" in
+  *'GNU gold'*) ;;
+  *) FLAGS="$FLAGS -Wl,-z,pack-relative-relocs" ;;
+esac
 
 HAS_PREFIX=0
 for PREFIX in "$@"; do
@@ -24,11 +35,11 @@ done
 # win over same-named symbols in shared libraries loaded later (standard ELF
 # interposition), and the linked php binary exports 1736 openssl symbols
 # (SSL_new, SSL_CTX_new, EVP_EncryptInit, ...) as GLOBAL DEFAULT. PHP 8.0's
-# ext/curl links dynamically against trixie's libcurl.so.4 (deps/versions.lock
-# vendors curl only for 7.0-7.2), which needs libssl.so.3; libcurl's internal
+# ext/curl links dynamically against the system libcurl.so.4 (deps/versions.lock
+# vendors curl only for 7.0-7.2), which needs libssl.so.4; libcurl's internal
 # calls to SSL_new/SSL_CTX_new then resolve to php's 1.1.1w symbols instead of
-# libssl.so.3's. The SSL/SSL_CTX struct layouts of 1.1.1w and 3.x are
-# incompatible (3.x made almost everything opaque), so every HTTPS curl_exec()
+# libssl.so.4's. The SSL/SSL_CTX struct layouts of 1.1.1w and 4.x are
+# incompatible (3.x on made almost everything opaque), so every HTTPS curl_exec()
 # segfaults while plain HTTP survives. This applies to ImageMagick's and the
 # vendored libs' own builds too, not just php's final link. --exclude-libs=ALL
 # only affects symbols originating in *static* archives, so it is a no-op

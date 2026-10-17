@@ -196,7 +196,7 @@ echo "ok: uid $want_uid"
 # largest era built: the measured size plus ~3% headroom. Report-only until
 # every version has a measured size to budget against.
 # tests/image-size.sh --breakdown names where the bytes are.
-declare -A SIZE_BUDGET_MB=( [fpm]=290 [cli]=268 [cli-builder]=679 [ext-builder]=609 )
+declare -A SIZE_BUDGET_MB=( [fpm]=314 [cli]=291 [cli-builder]=595 [ext-builder]=902 )
 budget_mb="${SIZE_BUDGET_MB[$FLAVOR]}"
 actual_bytes=$(bash "$HERE/image-size.sh" --bytes "$IMAGE")
 budget_bytes=$(( budget_mb * 1000 * 1000 ))
@@ -254,10 +254,33 @@ for fmt in PNG JPEG WEBP AVIF; do
 done
 echo "ok: imagick delegate formats present"
 
+# HEIC and AVIF decode through the static libheif/libde265/dav1d stack linked into
+# libMagickCore (deps/build-heif.sh); the format list above only proves the coders
+# registered. Each fixture is a lossy 64x64 encode of a red half and a blue half.
+heif_out=$(drun --rm -v "$ROOT/tests/fixtures/imagick:/fixtures:ro" "$IMAGE" php -r '
+foreach (["heic", "avif"] as $ext) {
+  $im = new Imagick("/fixtures/two-bars.$ext");
+  $l = $im->getImagePixelColor(16, 32)->getColor();
+  $r = $im->getImagePixelColor(48, 32)->getColor();
+  $ok = $im->getImageWidth() === 64 && $im->getImageHeight() === 64
+    && $l["r"] > 200 && $l["g"] < 60 && $l["b"] < 60
+    && $r["b"] > 200 && $r["r"] < 60 && $r["g"] < 60;
+  echo $ext, ":", $ok ? "ok" : "bad", "\n";
+}') || { echo "FAIL: the Imagick HEIC/AVIF decode run failed (see the PHP error above)"; exit 1; }
+[ "$heif_out" = $'heic:ok\navif:ok' ] \
+  || { echo "FAIL: Imagick did not decode the HEIC/AVIF fixtures correctly (got: $heif_out)"; exit 1; }
+echo "ok: imagick decodes HEIC and AVIF (red|blue fixtures)"
+
 # ImageMagick is built with --disable-openmp; confirm that holds once imagick
 # links it into the php binary -- OpenMP spawns a thread per core per request if
 # it sneaks back in under FPM.
-linkage=$(drun --rm "$IMAGE" ldd /usr/local/bin/php)
+# Wolfi ships no ldd; the dynamic loader lists a binary's libraries itself, in
+# ldd's format. The glob covers /lib64/ld-linux-x86-64.so.2 and
+# /lib/ld-linux-aarch64.so.1.
+image_ldd() {  # image_ldd <path in image> -> ldd-format listing of its libraries
+  drun --rm "$IMAGE" sh -c 'for l in /lib64/ld-linux-*.so.* /lib/ld-linux-*.so.*; do [ -e "$l" ] && exec "$l" --list "$1"; done; echo "no dynamic loader" >&2; exit 1' sh "$1"
+}
+linkage=$(image_ldd /usr/local/bin/php)
 grep -qi libgomp <<<"$linkage" && { echo "FAIL: php binary links libgomp (openmp leaked in)"; exit 1; }
 echo "ok: no libgomp in php binary linkage"
 
@@ -265,11 +288,11 @@ echo "ok: no libgomp in php binary linkage"
 # libssl/libcrypto may appear as a *direct* NEEDED entry in the php binary's own
 # ELF dynamic section. This keeps an EOL OpenSSL from escaping into the image.
 #
-# `ldd` (used above for libgomp) resolves the full transitive closure, which
-# would wrongly flag 8.0: it links trixie's system libcurl.so.4 (not vendored
-# there -- deps/versions.lock caps the vendored copy at 7.0-7.2), and that needs
-# libssl.so.3. readelf -d reads only the binary's own recorded NEEDED list,
-# which isolates the property that matters. Neither readelf nor nm exist inside
+# The loader listing (used above for libgomp) resolves the full transitive
+# closure, which would wrongly flag 8.0: it links the system libcurl.so.4 (not
+# vendored there -- deps/versions.lock caps the vendored copy at 7.0-7.2), and
+# that needs the system libssl. readelf -d reads only the binary's own recorded
+# NEEDED list, which isolates the property that matters. Neither readelf nor nm exist inside
 # the runtime image, so extract the binary via docker cp and inspect it on the
 # host.
 command -v readelf >/dev/null || { echo "FAIL: readelf not found on this host, cannot verify the static OpenSSL property"; exit 1; }
@@ -291,28 +314,27 @@ direct_needed=$(grep -i NEEDED <<<"$dyn" | grep -iE 'libssl|libcrypto' || true)
 rm -f "$tmp_php"
 
 # A shared *extension* is held to a narrower bar than php itself. On 7.4-8.0,
-# event.so NEEDs libssl.so.3/libcrypto.so.3 directly, and snmp.so reaches them
+# event.so NEEDs libssl.so.4/libcrypto.so.4 directly, and snmp.so reaches them
 # too (directly on clang builds, transitively through the vendored libnetsnmp on
-# gcc builds): Debian's supported OpenSSL 3, which libevent and libnetsnmp link
-# and bind to cleanly (LD_DEBUG=bindings shows SSL_CTX_new et al. resolving to
-# /lib/.../libssl.so.3, never to php's static 1.1). That is two independent
-# OpenSSL stacks in one process, not the EOL vendored one escaping. What must
-# never happen is the vendored 1.1.1 (built --no-shared) becoming loadable,
-# which shows up in exactly two ways: (a) a NEEDED entry resolving under the
-# vendored prefix (/opt/php-deps, or anywhere under /opt) instead of Debian's
-# system copy, or (b) a NEEDED soname below .so.3 -- 1.1.x is the only ABI the
-# vendored build produces and Debian ships nothing else.
+# gcc builds): the system OpenSSL 4, which libevent and libnetsnmp link and bind
+# to cleanly (LD_DEBUG=bindings shows SSL_CTX_new et al. resolving to the system
+# libssl.so.4, never to php's static 1.1). That is two independent OpenSSL
+# stacks in one process, not the EOL vendored one escaping. What must never
+# happen is the vendored 1.1.1 (built --no-shared) becoming loadable, which
+# shows up in exactly two ways: (a) a NEEDED entry resolving under the vendored
+# prefix (/opt/php-deps, or anywhere under /opt) instead of the system copy, or
+# (b) a NEEDED soname below .so.4 -- 1.1.x is the only ABI the vendored build
+# produces, and an OpenSSL 3 soname would be a second system copy next to the
+# one php links (one OpenSSL per process, every era).
 #
-# `ldd` resolves each NEEDED entry the way the dynamic linker would at load
-# time, RPATH/RUNPATH included, which a bare `readelf -d` soname list would
-# miss. It exists in the runtime image (scripts/runtime-libs.sh relies on it too,
-# for bare .so files as well as executables), so run it in a container per
-# object.
+# The loader listing resolves each NEEDED entry the way the dynamic linker would
+# at load time, RPATH/RUNPATH included, which a bare `readelf -d` soname list
+# would miss. Run it in a container per object.
 #
-# Fail closed: a NEEDED entry `ldd` cannot resolve ("not found") is unproven,
-# not innocent, and counts as a hit.
+# Fail closed: a NEEDED entry the loader cannot resolve ("not found") is
+# unproven, not innocent, and counts as a hit.
 ssl_load_violations=""
-scan_ssl_resolution() {  # scan_ssl_resolution <label for messages> <ldd output> -- appends any vendored/EOL hit to $ssl_load_violations
+scan_ssl_resolution() {  # scan_ssl_resolution <label for messages> <loader listing> -- appends any vendored/EOL hit to $ssl_load_violations
   while IFS= read -r ldd_line; do
     case "$ldd_line" in
       *libssl.so*|*libcrypto.so*) ;;
@@ -324,14 +346,14 @@ scan_ssl_resolution() {  # scan_ssl_resolution <label for messages> <ldd output>
     major=$(sed -n 's/^lib\(ssl\|crypto\)\.so\.\([0-9][0-9]*\).*/\2/p' <<<"$soname")
     reason=""
     if [ "$arrow" != "=>" ] || [ -z "$resolved" ] || [ "$resolved" = "not" ]; then
-      reason="ldd could not resolve it"
+      reason="the loader could not resolve it"
     else
       case "$resolved" in
         /opt/*) reason="resolves under the vendored prefix" ;;
       esac
     fi
-    if [ -z "$reason" ] && [ -n "$major" ] && [ "$major" -lt 3 ]; then
-      reason="soname below .so.3"
+    if [ -z "$reason" ] && [ -n "$major" ] && [ "$major" -lt 4 ]; then
+      reason="soname below .so.4"
     fi
     [ -z "$reason" ] || ssl_load_violations="${ssl_load_violations}${1}: ${ldd_line} (${reason})
 "
@@ -344,21 +366,22 @@ n_ext_files=0
 # shellcheck disable=SC2086  # ext_files is a newline/space-separated list of paths, meant to word-split
 for sofile in $ext_files; do
   n_ext_files=$((n_ext_files + 1))
-  so_ldd=$(drun --rm "$IMAGE" ldd "$sofile" 2>&1 || true)
-  [ -n "$so_ldd" ] || { echo "FAIL: ldd produced no output for $sofile -- the OpenSSL scan could not be measured (corrupt image?)"; exit 1; }
+  so_ldd=$(image_ldd "$sofile" 2>&1 || true)
+  [ -n "$so_ldd" ] || { echo "FAIL: the loader listed nothing for $sofile -- the OpenSSL scan could not be measured (corrupt image?)"; exit 1; }
   scan_ssl_resolution "$sofile" "$so_ldd"
 done
-echo "ok: inspected the php binary and $n_ext_files shared extension .so file(s) in $extdir for a libssl/libcrypto NEEDED entry resolving to a vendored path or a pre-.so.3 soname"
+echo "ok: inspected the php binary and $n_ext_files shared extension .so file(s) in $extdir for a libssl/libcrypto NEEDED entry resolving to a vendored path or a pre-.so.4 soname"
 
 # The other half: a stray libssl/libcrypto file can sit in the image without
 # being a NEEDED entry of anything php loads (a leftover from a build stage, a
-# vendored copy nothing links against yet). Debian's libssl.so.3/libcrypto.so.3
-# is allowed anywhere in a legacy image (curl, psql, the mariadb client and the
-# vendored libnetsnmp pull it in); what must never exist is a file that could
-# only be the vendored, EOL build: a libssl.so.1*/libcrypto.so.1* file anywhere,
-# or a libssl.so*/libcrypto.so* file under a vendored prefix (/opt/php-deps, or
-# anywhere under /opt). Scoped to shared-object naming: .pc/.a/.h files under
-# the prefix carry no loadability risk.
+# vendored copy nothing links against yet). The system OpenSSL 4 is the only one
+# the image carries (curl, psql, the mariadb client, libpq, libldap and the
+# vendored libnetsnmp all link it), so what must never exist is a file that
+# could be another build: a libssl.so.1*/libcrypto.so.1* or
+# libssl.so.3*/libcrypto.so.3* file anywhere, or a libssl.so*/libcrypto.so* file
+# under a vendored prefix (/opt/php-deps, or anywhere under /opt). Scoped to
+# shared-object naming: .pc/.a/.h files under the prefix carry no loadability
+# risk.
 # An absence assertion needs a positive control first: prove `find` can find
 # something known to exist, or an empty result and "the scan is broken" are
 # indistinguishable.
@@ -368,23 +391,25 @@ echo "ok: inspected the php binary and $n_ext_files shared extension .so file(s)
 # "found nothing".
 find_control=$(drun --rm "$IMAGE" sh -c "find / -xdev -name 'libc.so*' 2>/dev/null" || true)
 [ -n "$find_control" ] || { echo "FAIL: image-wide find could not even locate libc.so -- the file-existence scan below would prove nothing"; exit 1; }
-stray_ssl=$(drun --rm "$IMAGE" sh -c "find / -xdev \\( \\( -name 'libssl.so.1*' -o -name 'libcrypto.so.1*' \\) -o \\( -path '/opt/*' -a \\( -name 'libssl.so*' -o -name 'libcrypto.so*' \\) \\) \\) 2>/dev/null" || true)
+stray_ssl=$(drun --rm "$IMAGE" sh -c "find / -xdev \\( \\( -name 'libssl.so.[13]*' -o -name 'libcrypto.so.[13]*' \\) -o \\( -path '/opt/*' -a \\( -name 'libssl.so*' -o -name 'libcrypto.so*' \\) \\) \\) 2>/dev/null" || true)
 
-# 7.0-8.0 vendor OpenSSL statically (no-shared); 8.1+ link Debian's OpenSSL 3
+# 7.0-8.0 vendor OpenSSL statically (no-shared); 8.1+ link the system OpenSSL 4
 # dynamically by design (system packages). The boundary comes from matrix.json's
-# era field, not a hand-derived version cutover.
+# era field, not a hand-derived version cutover. Both eras share one rule for the
+# rest of the image: nothing php loads resolves to a vendored or pre-4 OpenSSL,
+# and no libssl.so.3/libcrypto.so.3 (or .1) file exists, so a process never maps
+# two system OpenSSL majors.
 if [ "$ERA" = legacy ]; then
   [ -z "$direct_needed" ] || { echo "FAIL: legacy php binary directly links libssl/libcrypto, but its OpenSSL must be static: $direct_needed"; exit 1; }
   echo "ok: legacy php binary has no direct libssl/libcrypto NEEDED entry (OpenSSL fully static)"
-  [ -z "$ssl_load_violations" ] || { printf 'FAIL: the vendored/EOL OpenSSL is loadable in this image:\n%s\n' "$ssl_load_violations"; exit 1; }
-  echo "ok: nothing php or its shared extensions load resolves libssl/libcrypto to a vendored path or a pre-.so.3 soname (Debian's libssl.so.3/libcrypto.so.3 is allowed)"
-  [ -z "$stray_ssl" ] || { echo "FAIL: a vendored/EOL libssl or libcrypto file exists in the image: $stray_ssl"; exit 1; }
-  echo "ok: no libssl.so.1*/libcrypto.so.1* file, and no libssl.so*/libcrypto.so* file under a vendored prefix, exists anywhere in the image"
 else
   [ -n "$direct_needed" ] || { echo "FAIL: modern php binary has no libssl/libcrypto NEEDED entry -- expected dynamic system OpenSSL"; exit 1; }
   echo "ok: modern php binary links system libssl/libcrypto dynamically, as expected"
-  echo "ok: file/NEEDED OpenSSL scan not restricted on the modern era (dynamic system OpenSSL is expected everywhere): ext=${ssl_load_violations:-none} files=${stray_ssl:-none}"
 fi
+[ -z "$ssl_load_violations" ] || { printf 'FAIL: a vendored or pre-4 OpenSSL is loadable in this image:\n%s\n' "$ssl_load_violations"; exit 1; }
+echo "ok: nothing php or its shared extensions load resolves libssl/libcrypto to a vendored path or a pre-.so.4 soname"
+[ -z "$stray_ssl" ] || { echo "FAIL: a vendored, EOL or OpenSSL 3 libssl/libcrypto file exists in the image: $stray_ssl"; exit 1; }
+echo "ok: no libssl.so.1*/.so.3* or libcrypto.so.1*/.so.3* file, and no libssl.so*/libcrypto.so* file under a vendored prefix, exists anywhere in the image"
 
 # Every library php-src can build from a bundled copy has to come from the
 # system, and the ones that don't yet have to be known. Rows come from
@@ -396,11 +421,11 @@ fi
 # 3.14.2 (August 2016), which nobody would notice from reading the arguments.
 #
 # Exact strength: a NEEDED entry proves the library is linked dynamically rather
-# than compiled in, which decides whether `apt upgrade` can reach it. It does not
-# prove the .so is *Debian's* copy -- a self-built one at the same soname would
-# satisfy it. Closing that would mean comparing against dpkg's shipped sonames,
+# than compiled in, which decides whether `apk upgrade` can reach it. It does not
+# prove the .so is the distro's copy -- a self-built one at the same soname would
+# satisfy it. Closing that would mean comparing against the apk database's sonames,
 # more machinery than the risk warrants while nothing here installs libraries
-# outside apt.
+# outside apk.
 sonames=$(grep -i NEEDED <<<"$dyn" | grep -oE 'lib[A-Za-z0-9._+-]+\.so[.0-9]*')
 # Positive control for every "bundled" row below. Those rows assert an
 # *absence*, which is satisfied just as well by a matcher that finds nothing at
@@ -419,7 +444,7 @@ while read -r lib expect owner _why; do
   case "$expect" in
     system)
       [ "$linked" = yes ] || {
-        echo "FAIL: $lib is not a direct NEEDED entry -- this image compiled in php's bundled copy, which no apt upgrade can ever reach"
+        echo "FAIL: $lib is not a direct NEEDED entry -- this image compiled in php's bundled copy, which no apk upgrade can ever reach"
         exit 1
       }
       echo "ok: $lib comes from the system, not php's bundled copy"
@@ -588,54 +613,153 @@ root_err=$(drun --rm -u 0 "$IMAGE" php -r 'echo 1;' 2>&1 >/dev/null | grep -v '^
 [ -z "$root_err" ] || { echo "FAIL: php -r as root wrote to stderr: $root_err"; exit 1; }
 echo "ok: php starts silent as root"
 
-# net-snmp (deps/build-netsnmp.sh): Debian's libsnmp40t64 hard-depends on
-# libperl5.40, and a package another package Depends on cannot be purged, so
-# the only way to ship no libperl/perl-modules (~49 MB) is to link ext-snmp
-# against a vendored client-only build. These assertions are what keeps that
-# true: a regression to libsnmp-dev brings libperl back silently, with every
-# functional check still green.
+# net-snmp (deps/build-netsnmp.sh): ext-snmp links a vendored client-only build
+# under /opt/net-snmp, so no distro net-snmp package and no perl ship. These
+# assertions keep that true: a regression to net-snmp-dev would bring a second
+# libnetsnmp back silently, with every functional check still green.
 #
-# dpkg-query takes package names and globs, which `dpkg -s` does not. It exits
-# non-zero when nothing matches, which for an absence assertion is the answer
-# rather than an error, so the exit status is deliberately ignored and the
-# Status column is what is read. The control proves the query can see an
-# installed package at all -- an empty result is otherwise indistinguishable
-# from a dpkg-query that cannot run.
-dpkg_installed() {  # dpkg_installed <name-or-glob>... -> the installed packages matching, one per line
-  drun --rm "$IMAGE" dpkg-query -W -f='${Package} ${Status}\n' "$@" 2>/dev/null \
-    | sed -n 's/ install ok installed$//p' || true
-}
-[ "$(dpkg_installed libc6)" = "libc6" ] \
-  || { echo "FAIL: dpkg-query could not see libc6 as installed -- the libperl/libsnmp absence check below would prove nothing"; exit 1; }
-# The builders bring perl in on purpose: cli-builder's git and full
-# mariadb-client Depend on it (git's perl scripts, mariadb-hotcopy), and
-# ext-builder's autoconf/automake are perl programs, so libperl5.40 and
-# perl-modules are there whatever ext-snmp links. Both are still held to the
-# snmp half: no Debian libsnmp*/libnetsnmp* package, which is what would put a
-# second net-snmp in the image.
-stray_globs=('libsnmp*' 'libnetsnmp*')
-perl_note="libperl*, perl-modules*, "
+# `apk info` lists every installed package name (glibc is versioned, glibc-2.44). The control proves the query can
+# see an installed package at all -- an empty result is otherwise
+# indistinguishable from an apk database that cannot be read.
+apk_installed=$(drun --rm "$IMAGE" apk info 2>/dev/null || true)
+grep -qE '^glibc-[0-9]' <<<"$apk_installed" \
+  || { echo "FAIL: apk info could not see glibc as installed -- the perl/snmp absence checks below would prove nothing"; exit 1; }
+# cli-builder and ext-builder bring perl in on purpose (git's perl scripts,
+# autoconf and automake are perl programs). Every flavor is
+# still held to the snmp half: no distro net-snmp package, which is what would
+# put a second net-snmp in the image.
+stray_regex='^(libsnmp.*|libnetsnmp.*|net-snmp.*)$'
+perl_note="perl*, "
 case "$FLAVOR" in
   cli-builder|ext-builder) perl_note="" ;;
-  *) stray_globs+=('libperl*' 'perl-modules*') ;;
+  *) stray_regex='^(libsnmp.*|libnetsnmp.*|net-snmp.*|perl|perl-.*|libperl.*)$' ;;
 esac
-stray_pkgs=$(dpkg_installed "${stray_globs[@]}" | tr '\n' ' ')
-[ -z "$stray_pkgs" ] || { echo "FAIL: the runtime image carries Debian perl/snmp library packages ($stray_pkgs) -- ext-snmp is meant to link the vendored /opt/net-snmp, and libsnmp40t64 pulls in libperl5.40"; exit 1; }
-echo "ok: no ${perl_note}libsnmp* or libnetsnmp* Debian package in the image (control: libc6 is visible to the same query)"
+stray_pkgs=$(grep -E "$stray_regex" <<<"$apk_installed" | tr '\n' ' ' || true)
+[ -z "$stray_pkgs" ] || { echo "FAIL: the runtime image carries perl/snmp library packages ($stray_pkgs) -- ext-snmp is meant to link the vendored /opt/net-snmp"; exit 1; }
+echo "ok: no ${perl_note}net-snmp* or libsnmp* package in the image (control: glibc is visible to the same query)"
+
+# HEIC/AVIF are decoded by static libraries inside libMagickCore, so the distro
+# libheif and the SDL/gdk-pixbuf/codec closure it pulls in must not be installed.
+heif_pkgs=$(grep -E '^(libheif|libde265|libsdl2|gdk-pixbuf|libdav1d|aom-libs|rav1e|openh264|libx265.*|libsvtav1enc.*)$' <<<"$apk_installed" | tr '\n' ' ' || true)
+[ -z "$heif_pkgs" ] || { echo "FAIL: the image carries the distro libheif stack ($heif_pkgs) -- HEIC/AVIF decode is meant to be static in libMagickCore"; exit 1; }
+echo "ok: no libheif, libde265, SDL, gdk-pixbuf or AV1/HEVC codec packages in the image"
+
+# Busybox's network applets (raw-socket and interface tools) are pruned from the
+# image; curl is the one network client that stays. The control proves the query
+# can see busybox applets at all.
+drun --rm "$IMAGE" sh -c 'command -v ls >/dev/null && command -v curl >/dev/null' \
+  || { echo "FAIL: control failed -- ls or curl is missing from the image"; exit 1; }
+# The list is the BUSYBOX_NET_APPLETS ARG at the top of the Dockerfile, the one source.
+busybox_net_applets=$(sed -n 's/^ARG BUSYBOX_NET_APPLETS="\(.*\)"$/\1/p' "$ROOT/Dockerfile")
+[ -n "$busybox_net_applets" ] || { echo "FAIL: BUSYBOX_NET_APPLETS not found in the Dockerfile"; exit 1; }
+net_applets=$(drun --rm "$IMAGE" sh -c 'for a in $1; do for d in /bin /sbin /usr/bin /usr/sbin; do [ -e "$d/$a" ] || [ -L "$d/$a" ] && echo "$d/$a"; done; done; true' sh "$busybox_net_applets" | tr '\n' ' ')
+[ -z "$net_applets" ] || { echo "FAIL: busybox network applets are still present ($net_applets)"; exit 1; }
+echo "ok: busybox network applets (ping, netstat, traceroute, arping, ...) are absent, curl is present"
+
+# The Wolfi base, asserted rather than assumed. The repository file is rewritten to
+# the public mirror, because the base image ships the vendor's authenticated one.
+apk_repos=$(drun --rm "$IMAGE" cat /etc/apk/repositories | tr -d '[:space:]')
+[ "$apk_repos" = "https://packages.wolfi.dev/os" ] \
+  || { echo "FAIL: /etc/apk/repositories is '$apk_repos', expected exactly https://packages.wolfi.dev/os"; exit 1; }
+echo "ok: /etc/apk/repositories is https://packages.wolfi.dev/os"
+
+# No Debian package manager, no apk cache, none of the glibc helper binaries that
+# Wolfi's base leaves out (they are packages of their own, and an absence here
+# is what keeps the image small), no shadow-utils.
+for b in apt apt-get dpkg ldd getent useradd usermod; do
+  if drun --rm "$IMAGE" sh -c "command -v $b" >/dev/null 2>&1; then
+    echo "FAIL: $b is present in the image"; exit 1
+  fi
+done
+echo "ok: no apt, dpkg, ldd, getent or shadow tools in the image"
+apk_cache=$(drun --rm "$IMAGE" sh -c 'ls -A /var/cache/apk 2>/dev/null | head -1')
+[ -z "$apk_cache" ] || { echo "FAIL: /var/cache/apk is not empty (found $apk_cache)"; exit 1; }
+echo "ok: the apk cache is empty"
+
+# One OpenSSL per process: every libssl/libcrypto the image carries is major 4.
+# (The loader scan above checks what each ELF resolves; this checks no 1.x or 3.x
+# copy sits in the image waiting for a future dlopen.)
+old_ssl=$(drun --rm "$IMAGE" sh -c 'find / -xdev \( -name "libssl.so.1*" -o -name "libssl.so.3*" -o -name "libcrypto.so.1*" -o -name "libcrypto.so.3*" \) 2>/dev/null; exit 0')
+[ -z "$old_ssl" ] || { echo "FAIL: the image carries a pre-4 OpenSSL library: $(tr '\n' ' ' <<<"$old_ssl")"; exit 1; }
+for pkg in libcrypto3 libssl3 openssl-3; do
+  ! grep -qx "$pkg" <<<"$apk_installed" || { echo "FAIL: the apk package $pkg is installed"; exit 1; }
+done
+echo "ok: no libssl.so.3/libcrypto.so.3 (or older) and no OpenSSL 3 package in the image"
+
+# The MySQL client names are #!/bin/sh wrappers around the MariaDB tools (symlinks
+# would trip MariaDB's "Deprecated program name" warning on stderr); mariadb-dump,
+# mariadb-admin and mariadb-check are native binaries copied out of packages whose
+# perl dependency is not shipped. Each of the eight names must print a version with
+# an empty stderr (run past the entrypoint, whose sizing notice is on stderr), and the shell and the copied tools must be one server version.
+declare -A mysql_names=([mysql]=mariadb [mysqldump]=mariadb-dump [mysqladmin]=mariadb-admin [mysqlcheck]=mariadb-check)
+for name in mysql mysqldump mysqladmin mysqlcheck; do
+  target="${mysql_names[$name]}"
+  drun --rm "$IMAGE" test -x "/usr/bin/$target" || { echo "FAIL: /usr/bin/$target is missing or not executable"; exit 1; }
+  wrapper=$(drun --rm "$IMAGE" cat "/usr/bin/$name")
+  [ "$wrapper" = "$(printf '#!/bin/sh\nexec %s "$@"' "$target")" ] \
+    || { echo "FAIL: /usr/bin/$name is not the '#!/bin/sh; exec $target \"\$@\"' wrapper: $wrapper"; exit 1; }
+  for tool in "$name" "$target"; do
+    tool_err=$(mktemp)
+    tool_out=$(drun --rm --entrypoint "" "$IMAGE" "$tool" --version 2>"$tool_err") \
+      || { echo "FAIL: $tool --version failed: $(cat "$tool_err")"; rm -f "$tool_err"; exit 1; }
+    [ ! -s "$tool_err" ] || { echo "FAIL: $tool --version wrote to stderr: $(cat "$tool_err")"; rm -f "$tool_err"; exit 1; }
+    rm -f "$tool_err"
+    grep -q ' from [0-9][^ ]*-MariaDB' <<<"$tool_out" || { echo "FAIL: $tool --version printed no server version: $tool_out"; exit 1; }
+  done
+done
+mariadb_server_version() { sed -n 's/.* from \([0-9][^ ,]*\)-MariaDB.*/\1/p' <<<"$1"; }
+shell_version=$(mariadb_server_version "$(drun --rm "$IMAGE" mariadb --version)")
+[ -n "$shell_version" ] || { echo "FAIL: mariadb --version names no server version"; exit 1; }
+for tool in mariadb-dump mariadb-admin mariadb-check; do
+  tool_version=$(mariadb_server_version "$(drun --rm "$IMAGE" "$tool" --version)")
+  [ "$tool_version" = "$shell_version" ] \
+    || { echo "FAIL: $tool reports server version '$tool_version', mariadb reports '$shell_version'"; exit 1; }
+done
+echo "ok: mysql, mysqldump, mysqladmin and mysqlcheck wrap mariadb, mariadb-dump, mariadb-admin and mariadb-check; all eight print a version with empty stderr, one server version ($shell_version)"
+case "$FLAVOR" in
+  fpm|cli)
+    if drun --rm "$IMAGE" sh -c 'command -v perl' >/dev/null 2>&1; then
+      echo "FAIL: a perl binary is present in the $FLAVOR image"; exit 1
+    fi
+    echo "ok: no perl binary in the $FLAVOR image" ;;
+esac
+
+# www-data is uid/gid 33 with no login shell, as the busybox adduser in
+# runtime-base creates it.
+www_entry=$(drun --rm "$IMAGE" grep '^www-data:' /etc/passwd)
+[[ "$www_entry" == www-data:x:33:33:*:/var/www:/sbin/nologin ]] \
+  || { echo "FAIL: www-data passwd entry is '$www_entry', expected uid 33, gid 33, home /var/www, shell /sbin/nologin"; exit 1; }
+www_group=$(drun --rm "$IMAGE" grep '^www-data:' /etc/group)
+[[ "$www_group" == www-data:x:33:* ]] || { echo "FAIL: www-data group entry is '$www_group', expected gid 33"; exit 1; }
+echo "ok: www-data is uid/gid 33 with /sbin/nologin and home /var/www"
+
+drun --rm "$IMAGE" test -x /usr/local/bin/php-fcgi || { echo "FAIL: /usr/local/bin/php-fcgi is missing or not executable"; exit 1; }
+# php-fcgi runs under this image's own `php -n`, so it has to parse on every version
+# the line ships (it is written in PHP 7.0 syntax).
+fcgi_lint=$(drun --rm "$IMAGE" php -l /usr/local/bin/php-fcgi 2>&1) \
+  || { echo "FAIL: php -l /usr/local/bin/php-fcgi: $fcgi_lint"; exit 1; }
+echo "ok: php-fcgi is installed and passes php -l on PHP $EXPECT"
+
+# No setuid or setgid file anywhere in the image (find exits non-zero on an
+# unreadable directory, so only its output counts).
+suid_files=$(drun --rm "$IMAGE" sh -c 'find / -xdev -perm /6000 -type f 2>/dev/null; exit 0')
+[ -z "$suid_files" ] || { echo "FAIL: the image carries setuid/setgid files: $(tr '\n' ' ' <<<"$suid_files")"; exit 1; }
+echo "ok: no setuid or setgid file in the image"
 
 if grep -qw snmp <<<"$SHARED_EXTS"; then
-  snmp_ldd=$(drun --rm "$IMAGE" ldd "$extdir/snmp.so" 2>&1 || true)
+  snmp_ldd=$(image_ldd "$extdir/snmp.so" 2>&1 || true)
   grep -qE '^[[:space:]]*libnetsnmp\.so\.[0-9]+ => /opt/net-snmp/lib/libnetsnmp\.so\.[0-9]+' <<<"$snmp_ldd" \
     || { echo "FAIL: snmp.so does not resolve libnetsnmp from /opt/net-snmp/lib: $snmp_ldd"; exit 1; }
   ! grep -q 'not found' <<<"$snmp_ldd" || { echo "FAIL: snmp.so has an unresolved NEEDED entry: $snmp_ldd"; exit 1; }
-  nsnmp_ldd=$(drun --rm "$IMAGE" sh -c 'ldd /opt/net-snmp/lib/libnetsnmp.so.*[0-9]' 2>&1 || true)
-  # USM auth/priv crypto goes through Debian's supported libssl3, from the system
+  nsnmp_lib=$(drun --rm "$IMAGE" sh -c 'ls /opt/net-snmp/lib/libnetsnmp.so.*[0-9] | head -1')
+  nsnmp_ldd=$(image_ldd "$nsnmp_lib" 2>&1 || true)
+  # USM auth/priv crypto goes through the system OpenSSL 4, from the system
   # path -- not a vendored copy, never an EOL one.
-  grep -qE 'libcrypto\.so\.3 => /(usr/)?lib/' <<<"$nsnmp_ldd" \
-    || { echo "FAIL: libnetsnmp does not link the system libcrypto.so.3: $nsnmp_ldd"; exit 1; }
+  grep -qE 'libcrypto\.so\.4 => /(usr/)?lib/' <<<"$nsnmp_ldd" \
+    || { echo "FAIL: libnetsnmp does not link the system libcrypto.so.4: $nsnmp_ldd"; exit 1; }
   ! grep -qE 'libperl|libwrap|libsensors|libpci|not found' <<<"$nsnmp_ldd" \
     || { echo "FAIL: libnetsnmp links something it is built without, or has an unresolved entry: $nsnmp_ldd"; exit 1; }
-  echo "ok: snmp.so resolves libnetsnmp from /opt/net-snmp/lib, which links only the system libssl3 (no perl/wrap/sensors/pci)"
+  echo "ok: snmp.so resolves libnetsnmp from /opt/net-snmp/lib, which links only the system libssl 4 (no perl/wrap/sensors/pci)"
 
   # Only the library and the MIB files ship; the prefix's bin/include/pkgconfig
   # were build-time inputs for ext-snmp. Control: the same find sees the library.
@@ -695,8 +819,8 @@ PHP
     || { echo "FAIL: control: with /var/lib/snmp removed, loading snmp.so as root did not log its directory creation ($snmp_ctl), so the clean-stderr check above proves nothing"; exit 1; }
   echo "ok: loading snmp.so is silent as root and as uid 33 (control: without /var/lib/snmp net-snmp logs 'Created directory')"
 
-  # MIBs mounted where a Debian host keeps them are found without MIBDIRS: the
-  # compiled-in search path is Debian's plus /opt/net-snmp's. A renamed copy of
+  # MIBs mounted where a distro host keeps them are found without MIBDIRS: the
+  # compiled-in search path is the conventional one plus /opt/net-snmp's. A renamed copy of
   # IF-MIB in /usr/share/snmp/mibs/ietf (a directory net-snmp does not search
   # recursively, so it has to be named in the path) resolves a qualified name;
   # the same name before the copy exists must fail on the name (control).
@@ -716,7 +840,7 @@ PHP
     after=$(php -d extension=snmp.so /tmp/probe.php)
     echo "$before $after"' 2>&1 || true)
   [ "$snmp_mibdir" = "unresolved resolved" ] \
-    || { echo "FAIL: MIB lookup in the Debian directories: expected 'unresolved resolved' (before/after a MIB appears in /usr/share/snmp/mibs/ietf), got: $snmp_mibdir"; exit 1; }
+    || { echo "FAIL: MIB lookup in the conventional directories: expected 'unresolved resolved' (before/after a MIB appears in /usr/share/snmp/mibs/ietf), got: $snmp_mibdir"; exit 1; }
   echo "ok: a MIB placed in /usr/share/snmp/mibs/ietf is found without MIBDIRS (control: unknown before it exists)"
 fi
 
@@ -893,10 +1017,10 @@ case "$FLAVOR" in
 esac
 # The image's own C++ runtime, for the symbol-version check below: the GCC 16
 # built objects are linked against GCC 16's libstdc++ headers but run against
-# Debian's libstdc++6/libgcc-s1, resolved the way ldd resolved them for php.
+# the distro's libstdc++/libgcc_s, resolved the way the loader resolved them for php.
 for rt_lib in libstdc++.so.6 libgcc_s.so.1; do
   rt_path=$(awk -v l="$rt_lib" '$1 == l { print $3; exit }' <<<"$linkage")
-  [ -n "$rt_path" ] || { echo "FAIL: ldd of /usr/local/bin/php lists no $rt_lib -- cannot check the GLIBCXX/GCC symbol versions against the image's own copy"; exit 1; }
+  [ -n "$rt_path" ] || { echo "FAIL: the loader listing of /usr/local/bin/php has no $rt_lib -- cannot check the GLIBCXX/GCC symbol versions against the image's own copy"; exit 1; }
   docker cp -L "$hcid:$rt_path" "$hard_dir/$rt_lib" >/dev/null
 done
 docker rm -f "$hcid" >/dev/null
@@ -926,13 +1050,13 @@ bash "$HERE/assert-elf-hardening.sh" --main "php-$EXPECT" "$hard_dir/php" || exi
 # Prove VM_COMPILER is not just a label someone typed: read the binary's own
 # .comment section, which records the compiler that actually produced the object
 # code. It survives `strip --strip-unneeded` and carries one entry per distinct
-# compiler in the link, so a gcc build shows both the pinned "GCC: (GNU) 16.2.0"
-# (php-src) and Debian's own gcc (crt startup objects, always present). Checked
+# compiler in the link, so a gcc build shows both the pinned "GCC: (...) 16.2.0"
+# (php-src) and the distro's own gcc (crt startup objects, always present). Checked
 # as presence of the expected compiler's line, not equality. The runtime image
 # has no strings/readelf, so this reads the binary extracted to the host above.
 case "$VM_COMPILER" in
-  gcc)   comment_pattern='GCC: \(GNU\) 16\.2' ;;
-  clang) comment_pattern='Debian clang version 19\.' ;;
+  gcc)   comment_pattern='GCC: \([^)]*\) 16\.2' ;;
+  clang) comment_pattern='clang version 19\.' ;;
 esac
 assert_compiler_comment() {  # assert_compiler_comment <label> <file>
   local out
@@ -956,11 +1080,26 @@ module_files=("$hard_dir/php-chmod-sanitize.so")
 module_files+=("$hard_dir"/ext/*.so $im_libs $nsnmp_libs)
 bash "$HERE/assert-elf-hardening.sh" "modules-$EXPECT" "${module_files[@]}" || exit 1
 
+# Packed relative relocations (DT_RELR): php/ldflags.sh passes -z pack-relative-relocs
+# to every linker that accepts it. gold, which links the gcc era's php, rejects the
+# flag, so php itself is only held to it on the clang era; the vendored libraries are
+# linked by lld or GNU ld in every era.
+has_relr() { readelf -dW "$1" | grep -q '(RELRSZ)'; }
+# shellcheck disable=SC2206  # both lists are deliberate word-splits
+relr_files=($im_libs $nsnmp_libs)
+case "$VM_COMPILER" in
+  clang*) relr_files+=("$hard_dir/php" "$hard_dir"/ext/*.so); [ -f "$hard_dir/php-fpm" ] && relr_files+=("$hard_dir/php-fpm") ;;
+esac
+relr_missing=""
+for f in "${relr_files[@]}"; do has_relr "$f" || relr_missing="$relr_missing $(basename "$f")"; done
+[ -z "$relr_missing" ] || { echo "FAIL: no DT_RELR (-z pack-relative-relocs did not take) in:$relr_missing"; exit 1; }
+echo "ok: ${#relr_files[@]} ELF files carry packed relative relocations (DT_RELR)"
+
 # RPATH/RUNPATH hygiene: every directory a shipped ELF names must exist in the
 # image. A leaked build-stage rpath (e.g. libtool hardcoding the GCC 16
 # toolchain's lib dir, /opt/gcc16/lib64, via the stale libstdc++.la) names a
 # directory only the build stage has; whoever creates it gets their libstdc++
-# ahead of Debian's. One container checks the whole set; the scratch files live
+# ahead of the distro's. One container checks the whole set; the scratch files live
 # inside $hard_dir so the EXIT trap removes them however this script ends.
 rpath_hits="$hard_dir/rpath_hits"
 : > "$rpath_hits"
@@ -1012,7 +1151,7 @@ if [ -n "$rpath_missing" ]; then
 fi
 echo "ok: every RPATH/RUNPATH entry of php, php-fpm, the shared extensions and the $opt_elf ELF files under /opt names a directory present in the image ($(wc -l < "$rpath_hits") entries, $(wc -l <<<"$rpath_dirs") distinct dirs)"
 
-# The objects are built with GCC 16 (7.0-8.4) or clang 19 but run on Debian's
+# The objects are built with GCC 16 (7.0-8.4) or clang 19 but run on the distro's
 # libstdc++/libgcc_s, so a GLIBCXX_/CXXABI_/GCC_ version they need that the
 # image's own copies do not define is a dlopen failure at the first request
 # that reaches it -- swoole.so, the one big C++ object, is the likeliest.
@@ -1054,8 +1193,8 @@ if [ -n "$icu_pinned" ]; then
 else
   # No vendored ICU: the image must be using the system one, and INTL_ICU_VERSION
   # must match the libicuuc it actually ships. Reading the soname rather than a
-  # package name keeps this working across Debian's libicuNN renames.
-  icu_soname=$(drun --rm "$IMAGE" sh -c 'ls /usr/lib/*/libicuuc.so.* 2>/dev/null | head -1')
+  # package name keeps this working across the distro's libicuNN renames.
+  icu_soname=$(drun --rm "$IMAGE" sh -c 'ls /usr/lib/libicuuc.so.* /usr/lib64/libicuuc.so.* 2>/dev/null | head -1')
   [ -n "$icu_soname" ] || { echo "FAIL: no libicuuc.so in the image, but PHP $EXPECT is supposed to link the system ICU"; exit 1; }
   icu_major="${icu_soname##*.so.}"
   case "$icu_reported" in
@@ -1073,6 +1212,25 @@ fi
 fmt=$(drun --rm "$IMAGE" php -r '$f=new NumberFormatter("de_DE",NumberFormatter::DECIMAL); echo $f->format(1234.5);')
 [ "$fmt" = "1.234,5" ] || { echo "FAIL: intl de_DE formatting wrong: expected '1.234,5', got '$fmt'"; exit 1; }
 echo "ok: intl formats de_DE correctly (1234.5 -> $fmt)"
+
+# ext/openssl must load a config it can parse without being handed one. The legacy
+# era's vendored OpenSSL 1.1.1w reads <openssldir>/openssl.cnf, and Wolfi's own
+# /etc/ssl/openssl.cnf is OpenSSL 4 syntax: with that file in reach, key and CSR
+# generation fail with "def_load_bio:missing equal sign". No config argument is
+# passed, so the compiled-in default is what gets exercised. The same probe
+# checks the compiled-in CA locations resolve, offline.
+ssl_probe=$(drun --rm "$IMAGE" php -r '
+$k = openssl_pkey_new(["private_key_bits" => 2048]);
+if ($k === false) { echo "FAIL:openssl_pkey_new: " . openssl_error_string(); exit; }
+$csr = openssl_csr_new(["commonName" => "smoke.invalid"], $k);
+if ($csr === false) { echo "FAIL:openssl_csr_new: " . openssl_error_string(); exit; }
+if (!openssl_csr_export($csr, $pem) || strpos($pem, "BEGIN CERTIFICATE REQUEST") === false) { echo "FAIL:openssl_csr_export: " . openssl_error_string(); exit; }
+$l = openssl_get_cert_locations();
+if (!is_readable($l["default_cert_file"]) || !is_dir($l["default_cert_dir"])) { echo "FAIL:compiled-in CA locations dangle: " . $l["default_cert_file"] . " " . $l["default_cert_dir"]; exit; }
+echo "OK";
+')
+[ "$ssl_probe" = "OK" ] || { echo "FAIL: ext/openssl without an explicit config: ${ssl_probe#FAIL:}"; exit 1; }
+echo "ok: openssl_pkey_new(2048) and openssl_csr_new() work with no explicit config, and the compiled-in CA locations resolve"
 
 # The endpoint every TLS check below uses. Overridable because these are the
 # only assertions in this script that need outbound HTTPS, and an
@@ -1164,7 +1322,7 @@ else
 
   # The same handshake through ext/curl, a different code path and the one
   # deps/patches/php-7.4 and php-8.0 exist for. Their curl-openssl3-not-old patch
-  # stops ext/curl/config.m4's probe from concluding that trixie's libcurl is
+  # stops ext/curl/config.m4's probe from concluding that the system libcurl is
   # linked against a pre-1.1 OpenSSL; without it HAVE_CURL_OLD_OPENSSL is defined,
   # ext/curl reaches into OpenSSL 3's opaque structs and every HTTPS curl_exec()
   # segfaults while plain HTTP keeps working. A segfault kills the child, so it
@@ -1193,9 +1351,8 @@ fi
 # and attack surface bought for nothing (an attacker who can write a .c file
 # and already has a shell has one less step to a native payload).
 no_toolchain() {  # no_toolchain <flavor> -- no compiler, assembler, linker, autoconf, phpize, PHP headers
-  # Explicit names, not a `ld*` glob: that would also match ldd and ldconfig,
-  # which every image has. The triplet forms are what a cross/multiarch
-  # binutils installs. Fail-closed control first: if the probe shell cannot
+  # Explicit names, not a `ld*` glob. The triplet forms are what a cross
+  # binutils installs (Wolfi names them x86_64-pc-linux-gnu-*). Fail-closed control first: if the probe shell cannot
   # run at all, "found nothing" below would be a pass on a dead container.
   drun --rm "$IMAGE" sh -c 'command -v sh' >/dev/null 2>&1 \
     || { echo "FAIL: $1: the toolchain probe cannot run a shell in the image, so its absence checks would prove nothing"; exit 1; }
@@ -1203,7 +1360,9 @@ no_toolchain() {  # no_toolchain <flavor> -- no compiler, assembler, linker, aut
   found=$(drun --rm "$IMAGE" sh -c '
     for t in gcc g++ cc c++ cpp clang clang++ as ld ld.bfd ld.gold ld.lld lld gold \
              x86_64-linux-gnu-gcc x86_64-linux-gnu-g++ x86_64-linux-gnu-as x86_64-linux-gnu-ld \
+             x86_64-pc-linux-gnu-gcc x86_64-pc-linux-gnu-g++ x86_64-pc-linux-gnu-as x86_64-pc-linux-gnu-ld \
              aarch64-linux-gnu-gcc aarch64-linux-gnu-g++ aarch64-linux-gnu-as aarch64-linux-gnu-ld \
+             aarch64-unknown-linux-gnu-gcc aarch64-unknown-linux-gnu-g++ aarch64-unknown-linux-gnu-as aarch64-unknown-linux-gnu-ld \
              autoconf phpize php-config; do
       command -v "$t"
     done
@@ -1270,8 +1429,21 @@ case "$FLAVOR" in
       drun --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
         || { echo "FAIL: cli-builder is missing $tool (Dockerfile's cli-builder stage should provide it)"; exit 1; }
     done
+    for pkg in nodejs-24 corepack git; do
+      drun --rm "$IMAGE" apk info -e "$pkg" | grep -qx "$pkg" \
+        || { echo "FAIL: cli-builder: the apk package $pkg is not installed"; exit 1; }
+    done
+    if drun --rm "$IMAGE" apk info -e npm | grep -qx npm; then
+      echo "FAIL: cli-builder: the apk npm package is installed beside the pinned npm under /usr/local"; exit 1
+    fi
+    node_bin=$(drun --rm "$IMAGE" sh -c 'command -v node')
+    [ "$node_bin" = /usr/bin/node ] || { echo "FAIL: cli-builder: node is '$node_bin', expected the apk binary /usr/bin/node"; exit 1; }
+    if drun --rm "$IMAGE" apk audit --system 2>/dev/null | grep -q .; then
+      echo "FAIL: cli-builder: apk audit --system reports modified package files"; exit 1
+    fi
+    echo "ok: cli-builder's node, corepack and git are apk packages (nodejs-24, corepack, git); the apk npm package is absent; apk audit --system is clean"
     node_major=$(drun --rm "$IMAGE" node -p 'process.versions.node.split(".")[0]')
-    [ "$node_major" = "24" ] || { echo "FAIL: cli-builder's node major is '$node_major', expected 24 (copied from the node:24 image)"; exit 1; }
+    [ "$node_major" = "24" ] || { echo "FAIL: cli-builder's node major is '$node_major', expected 24 (apk nodejs-24)"; exit 1; }
     for cmd in "npm --version" "npx --version" "corepack --version" "composer --version" "semantic-release --version"; do
       drun --rm "$IMAGE" sh -c "$cmd" >/dev/null 2>&1 \
         || { echo "FAIL: cli-builder: '$cmd' does not run as the image user"; exit 1; }
@@ -1288,8 +1460,9 @@ case "$FLAVOR" in
         || { echo "FAIL: cli-builder: $cache_dir ('$probe') is not writable as the image user (uid $(drun --rm "$IMAGE" id -u))"; exit 1; }
     done
     echo "ok: cli-builder's npm and corepack caches are writable as the image user"
-    # npm is pinned to 11.21.1 in the node-tools stage (the node image bundles an
-    # older one with a vulnerable tar/ip-address). The finished tree must hold
+    # Node is the apk nodejs-24 package; npm is not an apk package here. The
+    # node-tools stage installs npm 11.21.1 under /usr/local (Wolfi's npm package
+    # is 12.x and only bootstraps that install). The finished tree must hold
     # exactly one npm of its own; the copy semantic-release carries for
     # @semantic-release/npm is a dependency of that package and expected. The
     # pattern is the exact node_modules/npm path, so
@@ -1351,7 +1524,7 @@ if [ "$FLAVOR" = fpm ]; then
   # php-fpm has to actually start and serve under its default entrypoint/CMD,
   # not merely parse its config. test-fpm-health.sh starts the image unmodified,
   # waits for its baked HEALTHCHECK to report healthy, drives a real FastCGI
-  # request through cgi-fcgi that executes a PHP script, and carries its own
+  # request through php-fcgi that executes a PHP script, and carries its own
   # negative control (pool down -> unhealthy).
   bash "$HERE/test-fpm-health.sh" "$IMAGE"
 fi
@@ -1370,7 +1543,7 @@ else
   echo "ok: PGO check skipped -- matrix.json says php $EXPECT is pgo=false"
 fi
 
-# mariadb-server is apt-installed inside the php-build stage only, to run PGO
+# mariadb-server is apk-installed inside the php-build stage only, to run PGO
 # training's prestashop corpus app; the corpus ships only the app tree and a
 # populated datadir, and runtime-base copies specific /usr/local/... paths out of
 # php-build, none of which that install touches. Neither the server nor the

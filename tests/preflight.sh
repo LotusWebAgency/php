@@ -21,7 +21,7 @@ ok()      { echo "ok: $*"; }
 fail()    { echo "FAIL: $*" >&2; FAILED+=("$*"); }
 
 # ---------------------------------------------------------- 1. matrix drift
-section "1/9 matrix.gen.hcl drift (scripts/gen_matrix.py --check)"
+section "1/11 matrix.gen.hcl drift (scripts/gen_matrix.py --check)"
 if python3 scripts/gen_matrix.py --check; then
   ok "matrix.gen.hcl matches matrix.json"
 else
@@ -29,7 +29,7 @@ else
 fi
 
 # -------------------------------------------------------------- 2. pgo tiers
-section "2/9 PGO corpus tiers (scripts/pgo_tiers.py check)"
+section "2/11 PGO corpus tiers (scripts/pgo_tiers.py check)"
 if python3 scripts/pgo_tiers.py check; then
   ok "every pgo=true version has a tier, every opt-out has a reason"
 else
@@ -37,7 +37,7 @@ else
 fi
 
 # --------------------------------------------------- 3. bake --print + COMPILER
-section "3/9 bake --print for every target and the pr subset (both platforms), COMPILER cross-check"
+section "3/11 bake --print for every target and the pr subset (both platforms), COMPILER cross-check"
 bake_print() {  # bake_print <group> -> the rendered JSON, or empty + FAIL on error
   local out
   if ! out=$(docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$1" --print 2>&1); then
@@ -132,16 +132,26 @@ print(f"pr legs: {len(legs)}, targets they bake: {len(ci)}, bake pr group: {len(
 fi
 
 # ------------------------------------------------------------- 4. shellcheck
-section "4/9 shellcheck on every shell file"
+section "4/11 shellcheck on every shell file"
 command -v shellcheck >/dev/null || fail "shellcheck not found on this host"
 if command -v shellcheck >/dev/null; then
   # rootfs's runtime scripts have no .sh extension (they ship as bare
-  # executables in the image) but are bash, same as everything else here.
+  # executables in the image). A shell shebang sends one to shellcheck, a php
+  # shebang to `php -l` (php-fcgi runs under `php -n` and is written in PHP 7.0
+  # syntax; shellcheck cannot parse it), and anything else fails the gate.
   shell_files=()
-  while IFS= read -r f; do shell_files+=("$f"); done < <(
-    find . -name '*.sh' -not -path './.git/*' -not -path './.claude/*' | sort
-    find rootfs/usr/local/bin -maxdepth 1 -type f 2>/dev/null | sort
-  )
+  php_files=()
+  while IFS= read -r f; do shell_files+=("$f"); done < <(find . -name '*.sh' -not -path './.git/*' -not -path './.claude/*' | sort)
+  while IFS= read -r f; do
+    shebang="$(head -n1 "$f")"
+    if grep -qE '^#!.*[/ ](ba|da|k|z)?sh( |$)' <<<"$shebang"; then
+      shell_files+=("$f")
+    elif grep -qE '^#!.*[/ ]php( |$)' <<<"$shebang"; then
+      php_files+=("$f")
+    else
+      fail "$f has a shebang that is neither a shell nor php: '$shebang'"
+    fi
+  done < <(find rootfs/usr/local/bin -maxdepth 1 -type f 2>/dev/null | sort)
   [ "${#shell_files[@]}" -gt 0 ] || fail "no shell files found to check"
 
   # Accepted findings, per file and code. Anything else, in any file, fails the
@@ -167,8 +177,25 @@ if command -v shellcheck >/dev/null; then
   done
 fi
 
+# The PHP scripts in rootfs/usr/local/bin run under the image's own php, any
+# version from 7.0 on; a host php newer than that only catches a syntax error,
+# and the per-version `php -l` in tests/smoke.sh is the proof for 7.0 to 8.5.
+if [ "${#php_files[@]}" -gt 0 ]; then
+  if command -v php >/dev/null; then
+    for f in "${php_files[@]}"; do
+      if lint_out="$(php -n -l "$f" 2>&1)"; then
+        ok "php -l $f (host php $(php -n -r 'echo PHP_VERSION;'))"
+      else
+        fail "php -l $f: $lint_out"
+      fi
+    done
+  else
+    echo "note: no php binary on this host, skipping php -l of ${php_files[*]} (tests/smoke.sh lints it inside every image)"
+  fi
+fi
+
 # ----------------------------------------------------- 5. fetch-verified.sh
-section "5/9 deps/fetch-verified.sh (tests/test-fetch-verified.sh)"
+section "5/11 deps/fetch-verified.sh (tests/test-fetch-verified.sh)"
 if bash "$HERE/test-fetch-verified.sh"; then
   ok "test-fetch-verified.sh"
 else
@@ -176,7 +203,7 @@ else
 fi
 
 # --------------------------------------------- 6. python unit/lock-format tests
-section "6/9 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex, retry helper; tests/apps/: app cell planner)"
+section "6/11 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex, retry helper; tests/apps/: app cell planner)"
 # Covers, among others, the lock-file format checks:
 # scripts/test_versions_lock.py (deps/versions.lock), scripts/test_release_keys.py
 # (php/release-keys.asc), scripts/test_fetch_verified_sync.py (the two
@@ -211,7 +238,7 @@ else
 fi
 
 # ----------------------------------------------- 7. matrix <-> label consistency
-section "7/9 matrix.json <-> local image com.lotuswebagency.compiler labels (report-only for missing)"
+section "7/11 matrix.json <-> local image com.lotuswebagency.compiler labels (report-only for missing)"
 # Whatever fpm images already exist locally (from an earlier build-all.sh run,
 # or a one-off bake) get cross-checked against matrix.json right now, the same
 # comparison tests/smoke.sh makes per image at test time -- catching a stale
@@ -248,7 +275,7 @@ fi
 rm -f "$label_check_out"
 
 # --------------------------------- 8. build-all.sh vs bake --print target lists
-section "8/9 tests/build-all.sh's target list vs bake --print's target list"
+section "8/11 tests/build-all.sh's target list vs bake --print's target list"
 # tests/build-all.sh enumerates every image it builds from
 # scripts/gen_matrix.py --github targets -- the same source matrix.gen.hcl's
 # TARGETS variable is rendered from -- rather than naming a flavor or a count
@@ -287,7 +314,7 @@ else
 fi
 
 # ------------------------------------------------------------- 9. runners
-section "9/9 no ubuntu-slim runners in .github/workflows"
+section "9/11 no ubuntu-slim runners in .github/workflows"
 # ubuntu-slim runs jobs in a 1-vCPU container: a compile or test job there is
 # several times slower and a 180-minute build leg times out. Every runs-on and
 # matrix runner label must name a full VM image.
@@ -299,6 +326,73 @@ case "$slim_rc" in
   1) ok "no ubuntu-slim runner labels" ;;
   *) fail "could not scan .github/workflows for runner labels (grep exit $slim_rc)" ;;
 esac
+
+# ------------------------------------------------- 10. no Debian leftovers
+section "10/11 no apt, dpkg or Debian leftovers in the image sources"
+# The base is Wolfi: a Debian package manager command or a trixie reference in a
+# Dockerfile, test, script or CI helper is a leftover from the Debian era or a
+# command that cannot work. Each legitimate mention is allowlisted below by file
+# and by an extended regex the hit's text must match, with its reason. An entry
+# that matches nothing fails too, so the list cannot rot. The runner-side apt in
+# .github/workflows (the runner is Ubuntu) is outside the scanned paths.
+#   <path> <regex the hit line must match> <reason>      (three array elements per entry)
+# Flat array, not a delimited string: a regex may contain any character, `|` included.
+DEBIAN_ALLOW=(
+  tests/smoke.sh 'for b in apt apt-get dpkg' "absence assertion: the image must carry no Debian package manager"
+  tests/smoke.sh 'ok: no apt, dpkg' "the pass message of that absence assertion"
+  scripts/test_versions_lock.py 'debian_trixie' "asserts deps/versions.lock vendors Debian trixie's libxml2/libxslt sources"
+  deps/build-deps.sh 'trixie' "comment citing trixie as the vendored libxml2/libxslt source"
+  deps/versions.lock 'trixie' "comment citing trixie as the vendored libxml2/libxslt source"
+)
+if [ $((${#DEBIAN_ALLOW[@]} % 3)) -ne 0 ]; then
+  fail "DEBIAN_ALLOW must hold <path> <regex> <reason> triples"
+  DEBIAN_ALLOW=()
+fi
+debian_hits="$(git grep -n -I -i --untracked -E 'apt-get|apt-cache|apt-key|\bapt\b|/apt/|DEBIAN_FRONTEND|dpkg|trixie' -- \
+  Dockerfile 'php/pgo/Dockerfile*' 'tests/*.sh' 'tests/*.py' scripts 'php/*.sh' ci rootfs \
+  'deps/*.sh' deps/versions.lock ':!tests/preflight.sh')" || [ "$?" -eq 1 ] \
+  || fail "git grep for Debian leftovers failed"
+declare -A allow_used=()
+bad_hits=""
+while IFS= read -r hit; do
+  [ -n "$hit" ] || continue
+  hit_path="${hit%%:*}"
+  hit_text="${hit#*:*:}"
+  allowed=0
+  for ((i = 0; i < ${#DEBIAN_ALLOW[@]}; i += 3)); do
+    allow_path="${DEBIAN_ALLOW[i]}"
+    allow_re="${DEBIAN_ALLOW[i + 1]}"
+    if [ "$allow_path" = "$hit_path" ] && grep -Eiq -- "$allow_re" <<<"$hit_text"; then
+      allowed=1
+      allow_used["$i"]=1
+    fi
+  done
+  [ "$allowed" -eq 1 ] || bad_hits+="$hit"$'\n'
+done <<<"$debian_hits"
+if [ -n "$bad_hits" ]; then
+  printf '%s' "$bad_hits" >&2
+  fail "apt, apt-get, apt-cache, apt-key, /apt/, DEBIAN_FRONTEND, dpkg or trixie in the image sources (reword it, or allowlist it in tests/preflight.sh with a reason)"
+else
+  ok "no apt, dpkg or trixie outside the allowlist"
+fi
+for ((i = 0; i < ${#DEBIAN_ALLOW[@]}; i += 3)); do
+  [ -n "${allow_used[$i]:-}" ] || fail "stale Debian-leftover allowlist entry (matches nothing): ${DEBIAN_ALLOW[i]} ${DEBIAN_ALLOW[i + 1]}"
+done
+
+# ------------------------------------------------- 11. one wolfi-base digest
+section "11/11 every wolfi-base digest pin is identical"
+# Renovate bumps all of them in one PR; a hand edit that misses one leaves
+# ci/sources.sh (it pulls the Dockerfile's default) on another base than bake.
+wolfi_pins="$(git grep -n -I --untracked -oE 'cgr\.dev/chainguard/wolfi-base(:[^@" ]+)?@sha256:[a-f0-9]{64}' \
+  -- . ':!tests/preflight.sh')" || [ "$?" -eq 1 ] || fail "git grep for wolfi-base pins failed"
+if [ -z "$wolfi_pins" ]; then
+  fail "no wolfi-base digest pin found"
+elif [ "$(sed -E 's/^.*@(sha256:[a-f0-9]{64})$/\1/' <<<"$wolfi_pins" | sort -u | wc -l)" -ne 1 ]; then
+  printf '%s\n' "$wolfi_pins" >&2
+  fail "wolfi-base digest pins differ between files (listed above); make them identical"
+else
+  ok "all $(wc -l <<<"$wolfi_pins") wolfi-base pins carry $(sed -E 's/^.*@(sha256:[a-f0-9]{12}).*$/\1/' <<<"$wolfi_pins" | head -1)..."
+fi
 
 # ------------------------------------------------------------------ summary
 echo

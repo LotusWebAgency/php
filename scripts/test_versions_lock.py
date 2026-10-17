@@ -40,6 +40,31 @@ class TestLock(unittest.TestCase):
         for line in rows():
             self.assertTrue(ROW.match(line).group(6).startswith("https://"), line)
 
+    def test_xml_stack_is_vendored_from_debian_trixie(self):
+        by_name = {}
+        for line in rows():
+            era, name, version, applies, _sha, url = ROW.match(line).groups()
+            by_name[name] = (era, version, applies, url)
+        expected = {
+            "libxml2": "2.9.14",
+            "libxml2-debian": "2.12.7+dfsg+really2.9.14-2.1+deb13u3",
+            "libxslt": "1.1.35",
+            "libxslt-debian": "1.1.35-1.2+deb13u3",
+        }
+        for name, version in expected.items():
+            self.assertIn(name, by_name)
+            era, got, applies, url = by_name[name]
+            self.assertEqual((era, got, applies), ("legacy", version, "7.0-8.0"), name)
+            if name.endswith("-debian"):
+                # The pool drops superseded versions; the snapshot keeps them.
+                self.assertRegex(url, r"^https://snapshot\.debian\.org/archive/debian/\d{8}T\d{6}Z/pool/main/", name)
+            else:
+                self.assertIn("deb.debian.org/debian/pool/main/", url, name)
+
+    def test_libxml2_is_built_before_libxslt(self):
+        names = [ROW.match(l).group(2) for l in rows()]
+        self.assertLess(names.index("libxml2"), names.index("libxslt"))
+
 
 if __name__ == "__main__":
     unittest.main()

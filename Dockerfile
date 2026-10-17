@@ -1,48 +1,76 @@
 # syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 # One Dockerfile for every published tag; docker-bake.hcl feeds it the matrix.
-ARG BASE_IMAGE=debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:256c88bb066424045021090932d50be93c8e3f2ce3586707702a401b146f3e43
 ARG PHP_ERA=modern
 # Declared before any FROM so `FROM toolchain-select-${COMPILER}` can resolve it.
 # The toolchain-base stage redeclares it for use inside the stage.
 ARG COMPILER=clang
 
-# --- gcc16-toolchain ---
-# GCC 16.2 is not packaged for trixie, so COMPILER=gcc takes it from the official
-# image, pinned by multi-arch index digest (an arm64 build resolves it too). That
-# image is debian:13-slim plus a from-source GCC under /usr/local, copied out by
-# toolchain-select-gcc. buildkit builds this stage only when COMPILER=gcc.
-FROM gcc:16.2-trixie@sha256:17043c23ec2ad97fc3beca18da77275d26be5db5cd70ea0a5d73200e21a8e999 AS gcc16-toolchain
-
 # --- toolchain ---
+# Busybox's raw-socket and interface applets have no job in a PHP runtime and only
+# hand an attacker with code execution a ready-made network toolbox. Every image
+# stage that runs `apk add` prunes them again, because busybox's apk trigger
+# recreates the links. curl stays (healthchecks and Composer need it); tests/smoke.sh
+# asserts these are gone.
+ARG BUSYBOX_NET_APPLETS="arping dnsdomainname microcom netstat ping ping6 traceroute traceroute6 tunctl vconfig"
+
 FROM ${BASE_IMAGE} AS toolchain-base
 ARG COMPILER=clang
 # The compiler binary names COMPILER implies, supplied by docker-bake.hcl (clang
 # -> clang++ is not a string transform). Defaults are the clang set so a bare
 # `docker build` works. Bare names, not paths: ccache's masquerade symlinks in
-# /usr/lib/ccache dispatch on the argv[0] basename.
+# /usr/lib/ccache/bin dispatch on the argv[0] basename.
 ARG CXX_COMPILER=clang++
 ARG AR_COMPILER=llvm-ar
 ARG RANLIB_COMPILER=llvm-ranlib
 ARG NM_COMPILER=llvm-nm
-ENV DEBIAN_FRONTEND=noninteractive
-# gcc/g++ are installed only as a build-essential dependency and for the
-# binutils tools both toolchains share (build-only stage). Nothing compiles with
-# this gcc: toolchain-select-gcc puts GCC 16.2 ahead of it on PATH. PHP's HYBRID
-# VM pins execute_data/opline into registers via GCC global register variables
-# (HAVE_GCC_GLOBAL_REGS, Zend/zend_execute.c), a GNU-C extension clang lacks, so
-# COMPILER=gcc is the path that keeps that dispatch.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      build-essential clang lld llvm gcc g++ binutils-gold ccache pkg-config ca-certificates curl \
-      autoconf automake libtool bison re2c make patch xz-utils file \
-      gnupg dirmngr python3 dpkg-dev \
+# The base's repository is apk.cgr.dev/chainguard; every package here comes from
+# the public Wolfi index instead. The Wolfi signing key is already trusted by the
+# base, so only the URL changes.
+#
+# The build scripts are bash and use GNU grep/sed/find/coreutils options that the
+# base's busybox applets lack.
+#
+# build-base brings the native GCC 16.2 (toolchain-select-gcc asserts it) and the
+# binutils tools both toolchains share. PHP's HYBRID VM pins execute_data/opline
+# into registers via GCC global register variables (HAVE_GCC_GLOBAL_REGS,
+# Zend/zend_execute.c), a GNU-C extension clang lacks, so COMPILER=gcc is the
+# path that keeps that dispatch.
+# upgrade: the digest-pinned base can hold a library older than the -dev package the
+# deps stages install next (sqlite-libs 3.54.0 beside sqlite-dev 3.54.1, whose
+# libsqlite3.so names a file only 3.54.1 ships), and gold, unlike GNU ld, fails the
+# link on that dangling symlink. WOLFI_INDEX_STATE re-runs this layer whenever the
+# index stamp changes instead of replaying a cached upgrade.
+ARG WOLFI_INDEX_STATE=""
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}" \
+    && echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
+    && apk upgrade --cache-dir /var/cache/apk -U \
+    && apk add --cache-dir /var/cache/apk \
+      build-base clang-19 lld-19 llvm-19 binutils-gold ccache pkgconf ca-certificates curl \
+      bash coreutils findutils grep sed gawk diffutils \
+      autoconf automake libtool bison re2c patch xz file \
+      gpg gpg-agent python3 linux-headers \
+    && apk list -I gcc binutils clang-19 lld-19 llvm-19 | sort > /etc/compiler-revisions \
     && case "$COMPILER" in clang|gcc) ;; *) echo "COMPILER must be clang or gcc, got COMPILER=$COMPILER" >&2; exit 1 ;; esac
+# Wolfi's compilers harden by default (gcc through /usr/local/bin wrappers that add
+# -specs openssf.spec, clang through /etc/clang/*.cfg) and bake in -march=x86-64-v2
+# -mtune=sapphirerapids (arm64: armv8-a+crc+crypto -mtune=neoverse-v2). Both switches
+# turn those defaults off so php/cflags.sh decides every flag. GCC_SPEC_FILE drops
+# only the hardening: gcc keeps its compiled-in -march/-mtune, so every compile,
+# vendored libraries included, must take its arch flags from php/cflags.sh.
+ENV GCC_SPEC_FILE=no-hardening.spec CLANG_NO_DEFAULT_CONFIG=1
+# ccache's default compiler check hashes the mtime of the compiler binary. For gcc
+# that is the openssf wrapper script, which a gcc upgrade does not touch, and
+# `--version` does not change between apk revisions of one version. The check
+# hashes the installed package revisions instead (a file, so each compile pays one
+# cat rather than an apk run).
+ENV CCACHE_COMPILERCHECK="cat /etc/compiler-revisions"
 ENV CC=$COMPILER CXX=$CXX_COMPILER AR=$AR_COMPILER RANLIB=$RANLIB_COMPILER NM=$NM_COMPILER
 # Plain ENV rather than the ARG, which does not survive into child stages:
 # php/build.sh, php/pgo/train.sh and php/pgo/discriminator-control.sh branch on it.
 ENV COMPILER=$COMPILER
-ENV PATH=/usr/lib/ccache:$PATH
+ENV PATH=/usr/lib/ccache/bin:$PATH
 # gcc ships its own omp.h, found without -fopenmp. PECL imagick's config.m4 uses
 # that header plus a -lgomp link as its "GCC with OpenMP" probe and then adds
 # -lgomp to the static imagick, giving gcc builds a libgomp NEEDED entry that
@@ -50,32 +78,20 @@ ENV PATH=/usr/lib/ccache:$PATH
 # gcc answer "no OpenMP" like clang, matching deps/build-imagemagick.sh's
 # --disable-openmp. Nothing else includes <omp.h>.
 RUN if [ "$COMPILER" = "gcc" ]; then \
-      rm -f "$(dirname "$(gcc -print-libgcc-file-name)")/include/omp.h"; \
+      find /usr/lib /usr/lib64 -path '*/gcc/*/include/omp.h' -delete; \
     fi
 
-# The shipped compilers: COMPILER=clang (Debian trixie's clang 19, a plain
-# passthrough) and COMPILER=gcc (GCC 16.2 overlaid by toolchain-select-gcc).
-# `toolchain` resolves to the one COMPILER names.
+# The shipped compilers: COMPILER=clang (Wolfi's clang 19, a plain passthrough)
+# and COMPILER=gcc (Wolfi's GCC 16.2). `toolchain` resolves to the one COMPILER
+# names.
 FROM toolchain-base AS toolchain-select-clang
 
 FROM toolchain-base AS toolchain-select-gcc
-COPY --from=gcc16-toolchain /usr/local /opt/gcc16
-# GCC installs .la files whose libdir names the original /usr/local prefix. Once
-# the tree sits at /opt/gcc16, libtool resolves -lstdc++ (ext/intl, C++ PECL
-# modules) to that .la, warns "library ... was moved" and bakes /opt/gcc16/lib64
-# into the RUNPATH of php, php-fpm and swoole.so, a directory the runtime image
-# lacks. Without the .la files libtool treats -lstdc++ as a system library.
-RUN find /opt/gcc16 -name '*.la' -delete
-# Ahead of ccache's masquerade dir's target search, not of the dir itself: ccache
-# still intercepts every gcc/g++ call and its compiler_check=mtime hashes the real
-# binary, so gcc16 objects never collide with apt-gcc ones in the shared cache.
-ENV PATH=/usr/lib/ccache:/opt/gcc16/bin:$PATH
-# Same omp.h removal as above, for GCC 16's own copy.
-RUN rm -f "$(dirname "$(gcc -print-libgcc-file-name)")/include/omp.h"
-# Fail if gcc/cc do not resolve to GCC 16.2 (a stale PATH or masquerade
-# regression would otherwise build with the wrong compiler and still pass).
+# Fail if gcc/cc do not resolve to GCC 16.2 (a stale PATH, a masquerade
+# regression or a Wolfi bump past 16.2 would otherwise build with the wrong
+# compiler and still pass).
 RUN v="$(gcc -dumpfullversion)"; case "$v" in \
-      16.2*) echo "ok: COMPILER=gcc resolves to GCC $v (/opt/gcc16)" ;; \
+      16.2*) echo "ok: COMPILER=gcc resolves to GCC $v" ;; \
       *) echo "FATAL: COMPILER=gcc must resolve to GCC 16.2.x, got $v" >&2; exit 1 ;; \
     esac
 
@@ -86,13 +102,12 @@ FROM toolchain-select-${COMPILER} AS toolchain
 # default OpenMP support causes thread explosions in FPM workers. One stage that
 # both deps eras derive from, so it builds once per (arch, uarch, COMPILER).
 FROM toolchain AS imagemagick
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      libpng-dev libjpeg-dev libwebp-dev libtiff-dev libfreetype-dev \
-      libheif-dev libde265-dev
-COPY deps/build-imagemagick.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
-COPY php/cflags.sh php/ldflags.sh /build/php/
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add --cache-dir /var/cache/apk -U \
+      libpng-dev libjpeg-turbo-dev libwebp-dev tiff-dev freetype-dev \
+      openjpeg-dev cmake samurai meson nasm
+COPY deps/build-imagemagick.sh deps/build-heif.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
+COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
 RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
     bash /build/deps/build-imagemagick.sh /opt/imagemagick
 # Nothing upstream sets PKG_CONFIG_PATH; a flat assignment avoids buildkit's
@@ -100,90 +115,93 @@ RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
 ENV PKG_CONFIG_PATH=/opt/imagemagick/lib/pkgconfig
 
 # --- net-snmp ---
-# net-snmp's client library, vendored because the distro libsnmp40t64 depends on
-# libperl5.40 (~49 MB of perl in every runtime image, unpurgeable). Its own stage
-# so it neither invalidates nor waits for ImageMagick; both eras share the result.
-# It links Debian's libssl3 (libssl-dev below), never the legacy vendored OpenSSL.
+# net-snmp's client library, vendored so the runtime needs neither the distro's
+# net-snmp packages nor perl. Its own stage so it neither invalidates nor waits for
+# ImageMagick; both eras share the result. It links the system OpenSSL
+# (openssl-4.0-dev below), never the legacy vendored one; OpenSSL 4 made ASN1_STRING
+# opaque, which deps/patches/net-snmp-5.9.5.2 accounts for.
 # The deps stages COPY the whole prefix (ext-snmp needs net-snmp-config and the
 # headers); php/build.sh's stage_runtime_deps ships only the library and MIBs.
 FROM toolchain AS net-snmp
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends libssl-dev
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add --cache-dir /var/cache/apk -U openssl-4.0-dev
 COPY deps/build-netsnmp.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
-COPY php/cflags.sh php/ldflags.sh /build/php/
+COPY deps/patches/net-snmp-5.9.5.2 /build/deps/patches/net-snmp-5.9.5.2
+COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
 RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
     bash /build/deps/build-netsnmp.sh /opt/net-snmp
 
 # --- deps: modern ---
-# PHP 8.1+ links against what trixie ships.
+# PHP 8.1+ links against what Wolfi ships. The system OpenSSL is 4.0: curl-dev
+# requires openssl-4.0-dev, which conflicts with openssl-dev (3.6), so ext/openssl
+# builds against 4.0 too, with the SSL_CTX options patch from deps/patches.
 FROM imagemagick AS deps-modern
 # GD also needs libavif-dev; the other image libraries come from the imagemagick stage.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      libssl-dev libcurl4-openssl-dev libxml2-dev libxslt1-dev libicu-dev \
-      libonig-dev libzip-dev libsqlite3-dev libpq-dev zlib1g-dev libzstd-dev \
-      libbrotli-dev libavif-dev \
-      libsodium-dev libargon2-dev libgmp-dev libreadline-dev libmemcached-dev \
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add --cache-dir /var/cache/apk -U \
+      openssl-4.0-dev curl-dev libxml2-dev libxslt-dev icu-dev \
+      oniguruma-dev libzip-dev sqlite-dev postgresql-18-dev zlib-dev zstd-dev \
+      brotli-dev libavif-dev \
+      libsodium-dev argon2-dev gmp-dev readline-dev libmemcached-dev \
 # Shared-extension dependencies: one package per non-empty `libs` entry in
 # php/ext.json for each linkage:"shared" extension. libmcrypt-dev is for mcrypt
-# on PHP < 8.0. imap is absent: trixie has no libc-client-dev. libpcre2-dev is
+# on PHP < 8.0. imap is absent: Wolfi has no c-client. pcre2-dev is
 # snuffleupagus's build dependency (its config.m4 calls pcre2-config).
-      librabbitmq-dev libbz2-dev libffi-dev libldap2-dev liblz4-dev \
-      libmcrypt-dev libssh2-1-dev libtidy-dev uuid-dev \
-      libyaml-dev libevent-dev libpcre2-dev
-# ext-snmp links this instead of libsnmp-dev.
+      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
+      libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
+      yaml-dev libevent-dev pcre2-dev
+# ext-snmp links this instead of the distro's net-snmp-dev.
 COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 ENV PHP_DEPS_PREFIX=""
 
 # --- deps: legacy ---
-# PHP 7.0-8.0 cannot link against trixie's libraries: OpenSSL 3 support only
+# PHP 7.0-8.0 cannot link against Wolfi's libraries: OpenSSL 3 support only
 # became solid in 8.1, and ICU 74+ needs C++17 that ext/intl below 8.1 does not
-# use. This era vendors pinned copies (deps/versions.lock), except libxml2:
-# trixie's 2.9.14-series package carries security backports the upstream tarball
-# lacks, so libxml2-dev comes from apt.
+# use, and libxml2 2.15 is past what php-src below 8.1.27 compiles against. This
+# era vendors pinned copies (deps/versions.lock), libxml2 and libxslt included.
 #
-# OpenSSL and ICU are built static-only by deps/build-deps.sh, so no EOL libssl.so
-# or duplicate ICU data exists in the image and neither needs an rpath. The rpath
+# OpenSSL, ICU, libxml2 and libxslt are built static-only by deps/build-deps.sh, so
+# no EOL libssl.so, duplicate ICU data or second libxml2 exists in the image and
+# none needs an rpath. The rpath
 # (LD_LIBRARY_PATH would break the host curl; see php/ldflags.sh) covers whatever
 # is shared under PHP_DEPS_PREFIX, i.e. the vendored curl of 7.0-7.2.
 #
 # curl is vendored only for 7.0-7.2: ext/curl's config.m4 takes a DIR-style
 # --with-curl=DIR through 7.3 and is pure pkg-config (PKG_CHECK_MODULES) from 7.4.
-# 7.4-8.0 build against trixie's libcurl4-openssl-dev; 7.4 and 8.0 carry
+# 7.4-8.0 build against Wolfi's curl-dev; 7.4 and 8.0 carry
 # deps/patches/php-*/010-curl-openssl3-not-old.patch so ext/curl does not link
 # a second OpenSSL.
 #
 # Two further build-environment adjustments:
 #   - ext/gd's --with-freetype-dir=/usr (php/ext.json overrides, 7.0-7.3) needs
-#     a freetype-config script, which freetype dropped in 2.9.1; the shim is
-#     created below.
+#     a freetype-config script, which upstream freetype dropped in 2.9.1; Wolfi's
+#     package still ships one, and the shim below is created only if it is absent.
 #   - ext/intl's -DU_USING_ICU_NAMESPACE=1 (7.0-7.3 use unqualified `icu::`
 #     types) is a compile flag set in php/build.sh's CPPFLAGS/CXXFLAGS.
 FROM imagemagick AS deps-legacy
 ARG PHP_VERSION
-# The image libraries come from the imagemagick stage, as in deps-modern. ICU is
-# vendored, so no libicu-dev. libssl-dev is for ext-snmp only: net-snmp-config
+# The image libraries come from the imagemagick stage, as in deps-modern. ICU,
+# libxml2 and libxslt are vendored, so no icu-dev, libxml2-dev or libxslt-dev
+# (php/build.sh points every PHP version at the vendored copies); pkgconf-dev
+# ships pkg.m4, which their autoreconf needs. openssl-4.0-dev is for ext-snmp only: net-snmp-config
 # adds -lssl -lcrypto, which needs the system libssl.so symlink. PHP itself is
 # pointed at the vendored OpenSSL by --with-openssl=/opt/php-deps (php/build.sh
 # asserts the substitution). No libavif-dev: GD has no AVIF before 8.1.
 # Otherwise the package set mirrors deps-modern and must be kept in sync by hand.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends \
-      libssl-dev libcurl4-openssl-dev libxslt1-dev libxml2-dev \
-      libonig-dev libzip-dev libsqlite3-dev libpq-dev zlib1g-dev libzstd-dev \
-      libbrotli-dev \
-      libsodium-dev libargon2-dev libgmp-dev libreadline-dev libmemcached-dev \
-      librabbitmq-dev libbz2-dev libffi-dev libldap2-dev liblz4-dev \
-      libmcrypt-dev libssh2-1-dev libtidy-dev uuid-dev \
-      libyaml-dev libevent-dev libpcre2-dev
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add --cache-dir /var/cache/apk -U \
+      openssl-4.0-dev curl-dev pkgconf-dev \
+      oniguruma-dev libzip-dev sqlite-dev postgresql-18-dev zlib-dev zstd-dev \
+      brotli-dev \
+      libsodium-dev argon2-dev gmp-dev readline-dev libmemcached-dev \
+      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
+      libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
+      yaml-dev libevent-dev pcre2-dev
 COPY deps/build-deps.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
-COPY php/cflags.sh php/ldflags.sh /build/php/
+COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
 RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
     bash /build/deps/build-deps.sh "$PHP_VERSION" /opt/php-deps
-# After the vendored build (twenty minutes of openssl + ICU + curl) so these
+# After the vendored build (twenty minutes of openssl + ICU + libxml2 + curl) so these
 # five-line steps do not invalidate it; build-deps.sh does not use either shim.
 # Both satisfy an autoconf search on 7.0-7.3 without changing what is linked,
 # and stay in this build-only stage.
@@ -193,30 +211,29 @@ RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
 #     then calls --cflags and --libs. 7.4 moved gd to pkg-config.
 #
 #  2. /usr/include/gmp.h. ext/gmp's config.m4 searches $i/include/gmp.h and
-#     $i/include/$($CC -dumpmachine)/gmp.h, but Debian ships gmp.h only in the
-#     multiarch directory. Clang's -dumpmachine ("x86_64-pc-linux-gnu") differs
-#     from Debian's triple ("x86_64-linux-gnu"), so that fallback missed and
-#     configure died with "Unable to locate gmp.h". gcc matches, but the symlink
-#     stays unconditional and keyed off the found path, which also covers clang
-#     and arm64 triples that do not match.
+#     $i/include/$($CC -dumpmachine)/gmp.h. Wolfi ships gmp.h in /usr/include, so
+#     this is a no-op there; it stays keyed off the found path so a distro that
+#     moves the header into a triple directory still configures.
 RUN set -eu; \
     case "$PHP_VERSION" in \
       7.0|7.1|7.2|7.3) \
-        printf '%s\n' '#!/bin/sh' 'case "$1" in' \
-          '  --cflags) exec pkg-config --cflags freetype2 ;;' \
-          '  --libs) exec pkg-config --libs freetype2 ;;' \
-          '  --ftversion) exec pkg-config --modversion freetype2 ;;' \
-          '  --prefix) exec pkg-config --variable=prefix freetype2 ;;' \
-          'esac' 'exit 1' > /usr/bin/freetype-config; \
-        chmod +x /usr/bin/freetype-config; \
+        if [ ! -e /usr/bin/freetype-config ]; then \
+          printf '%s\n' '#!/bin/sh' 'case "$1" in' \
+            '  --cflags) exec pkg-config --cflags freetype2 ;;' \
+            '  --libs) exec pkg-config --libs freetype2 ;;' \
+            '  --ftversion) exec pkg-config --modversion freetype2 ;;' \
+            '  --prefix) exec pkg-config --variable=prefix freetype2 ;;' \
+            'esac' 'exit 1' > /usr/bin/freetype-config; \
+          chmod +x /usr/bin/freetype-config; \
+        fi; \
         gmp_h="$(find /usr/include -maxdepth 2 -name gmp.h -print -quit)"; \
-        [ -n "$gmp_h" ] || { echo "libgmp-dev is installed but no gmp.h was found under /usr/include" >&2; exit 1; }; \
+        [ -n "$gmp_h" ] || { echo "gmp-dev is installed but no gmp.h was found under /usr/include" >&2; exit 1; }; \
         [ -e /usr/include/gmp.h ] || ln -s "$gmp_h" /usr/include/gmp.h; \
         echo "gmp.h: $gmp_h -> /usr/include/gmp.h"; \
         ;; \
       *) : ;; \
     esac
-# ext-snmp links this instead of libsnmp-dev.
+# ext-snmp links this instead of the distro's net-snmp-dev.
 COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 # PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR (the latter set in php/build.sh) is what makes
 # PHP's ./configure find the vendored openssl and icu: PHP_SETUP_OPENSSL and
@@ -228,17 +245,21 @@ COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 #
 # 7.0 is the exception: its PHP_SETUP_ICU does not use pkg-config. It runs
 # icu-config from $PHP_ICU_DIR/bin or $PATH and fails with "Unable to detect ICU
-# prefix"; trixie ships no icu-config. So 7.0 alone needs
+# prefix"; Wolfi's icu-dev ships no icu-config. So 7.0 alone needs
 # --with-icu-dir=${PHP_DEPS_PREFIX}, which comes from a php/ext.json override
 # and is spliced in by php/build.sh (derived from ${PHP_DEPS_PREFIX}/bin/icu-config
 # existing, like --with-curl, so the version range lives in one place). Hence this
-# ENV names only --with-openssl.
+# ENV names only --with-openssl and --with-xsl. 7.0-7.3 find libxslt by DIR
+# (xslt-config) and libxml2 by --with-libxml-dir, a php/ext.json override on dom
+# that php/build.sh splices like --with-icu-dir; 7.4+ find both through
+# PKG_CONFIG_LIBDIR and ignore the DIR value, which is why --with-xsl is
+# spliced for every version of this era.
 #
 # ${PHP_DEPS_PREFIX}/bin is deliberately not put on PATH: it holds the vendored
 # curl binary for 7.0-7.2, and shadowing /usr/bin/curl for the whole build is the
 # LD_LIBRARY_PATH failure again.
 ENV PHP_DEPS_PREFIX=/opt/php-deps
-ENV PREFIXED_CONFIGURE_FLAGS="--with-openssl"
+ENV PREFIXED_CONFIGURE_FLAGS="--with-openssl --with-xsl"
 
 # --- deps ---
 FROM deps-${PHP_ERA} AS deps
@@ -254,15 +275,27 @@ ARG PGO
 ARG ICU_VERSION
 WORKDIR /src
 
-# The clang profile runtime: Debian's `clang` does not pull it in, and without it
+# Wolfi's libargon2.pc and libmemcached.pc name library directories that do not
+# exist (${prefix}/lib/<triplet>-linux-gnu, /usr//usr/lib). php's configure turns every
+# non-default -L from pkg-config into an RPATH entry, so php, php-fpm and the
+# shared extensions would carry a search path into directories that the image
+# lacks and a later writer could populate. Pointing both at /usr/lib makes the -L
+# a default directory, which configure drops.
+RUN for pc in libargon2 libmemcached; do \
+      f="/usr/lib/pkgconfig/$pc.pc"; \
+      [ -f "$f" ] || { echo "$f is missing" >&2; exit 1; }; \
+      sed -i -e 's|/usr//usr/lib|/usr/lib|g' -e 's|/lib/[a-z0-9_]*-linux-gnu|/lib|g' "$f"; \
+      ! grep -qE '/lib/[^ /]+-linux-gnu|//usr' "$f" || { echo "$f still names a bad directory" >&2; exit 1; }; \
+    done
+
+# The clang profile runtime: Wolfi's `clang-19` does not pull it in, and without it
 # PGO pass 1 fails at the link on a missing libclang_rt.profile.a, twenty minutes
 # in. llvm-profdata (merges .profraw files) is asserted too. Installed here
 # rather than in `toolchain` because only this stage compiles with a profile
 # flag; upstream it would put ImageMagick and the legacy vendored libraries in
 # the invalidation path of every PGO change.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    apt-get update && apt-get install -y --no-install-recommends libclang-rt-dev \
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add --cache-dir /var/cache/apk -U compiler-rt-19 \
     && { command -v llvm-profdata >/dev/null || { echo "llvm-profdata is missing; two-pass PGO cannot merge a profile" >&2; exit 1; }; } \
     && { [ -n "$(find /usr/lib/llvm-* -name 'libclang_rt.profile*' -print -quit)" ] \
          || { echo "no libclang_rt.profile under /usr/lib/llvm-*; -fprofile-generate cannot link" >&2; exit 1; }; }
@@ -281,22 +314,30 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # fail and autoconf would read that as a feature answer.
 # gcc needs gold for a different reason: its profile-guided hot/cold split puts
 # hot functions in .text.hot.* input sections, and the default bfd ld
-# (binutils 2.47 on trixie) does not fold them into a .text.hot output section,
+# (binutils 2.47) does not fold them into a .text.hot output section,
 # so assert_profile_reached_the_link would measure nothing. gold does. A
 # -fuse-ld=gold flag fails for the same libtool reason as lld.
+# Wolfi's gcc does not look at PATH for ld: collect2 takes the first ld in
+# COMPILER_PATH, which ends with /usr/x86_64-pc-linux-gnu/bin (binutils' own
+# target directory). The PATH shim alone leaves gcc on bfd, so for gcc that
+# private ld is replaced as well and the check asks gcc which ld it will run.
 RUN set -eux; \
     mkdir -p /usr/local/lib/php-docker-ld; \
     case "$COMPILER" in \
       clang) ln -sf /usr/bin/ld.lld /usr/local/lib/php-docker-ld/ld ;; \
-      gcc)   ln -sf /usr/bin/ld.gold /usr/local/lib/php-docker-ld/ld ;; \
+      gcc)   ln -sf /usr/bin/ld.gold /usr/local/lib/php-docker-ld/ld; \
+             gcc_ld="$(gcc -print-prog-name=ld)"; \
+             case "$gcc_ld" in /*) ;; *) echo "FATAL: gcc -print-prog-name=ld printed '$gcc_ld', not an absolute path; the private ld cannot be replaced" >&2; exit 1 ;; esac; \
+             ln -sf /usr/bin/ld.gold "$gcc_ld" ;; \
     esac; \
     PATH=/usr/local/lib/php-docker-ld:$PATH; \
-    v="$(ld --version | head -1)"; \
+    if [ "$COMPILER" = gcc ]; then v="$("$(gcc -print-prog-name=ld)" --version | head -1)"; \
+    else v="$(ld --version | head -1)"; fi; \
     case "$COMPILER:$v" in \
       clang:*LLD*) echo "ok: ld on PATH is '$v'" ;; \
       clang:*) echo "FATAL: ld on PATH is '$v', not lld; ThinLTO shared-object links will fail" >&2; exit 1 ;; \
-      gcc:*GNU\ gold*) echo "ok: ld on PATH is '$v'" ;; \
-      gcc:*) echo "FATAL: ld on PATH is '$v', not gold; profile-guided .text.hot would not survive the link" >&2; exit 1 ;; \
+      gcc:*GNU\ gold*) echo "ok: ld run by gcc is '$v'" ;; \
+      gcc:*) echo "FATAL: ld run by gcc is '$v', not gold; profile-guided .text.hot would not survive the link" >&2; exit 1 ;; \
     esac
 ENV PATH=/usr/local/lib/php-docker-ld:$PATH
 
@@ -337,7 +378,7 @@ WORKDIR /src/php-${PHP_RELEASE}
 # silent behavior change on a security-relevant binary; a patch whose context no
 # longer matches exactly must fail the build. --forward turns an already-applied
 # patch into an error instead of an interactive prompt; --batch keeps the rest
-# non-interactive. A version without a directory needs no patches (8.1-8.5);
+# non-interactive. A version without a directory needs no patches;
 # deps/patches/README.md records which versions carry what. The count is echoed
 # so "applied nothing" is visible in the log.
 RUN set -eux; \
@@ -367,14 +408,13 @@ RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
 # /corpus-src stays read-only: it holds the endpoints files train.sh asserts
 # against, which training must not be able to rewrite.
 #
-# The apt cache mounts are for build.sh installing mariadb-server, which the
+# The apk cache mount is for build.sh installing mariadb-13.1, which the
 # PrestaShop corpus app needs while training (php/pgo/train.sh brackets it with
 # corpus/prestashop/db-up.sh and db-down.sh). It stays in this stage:
 # runtime-base copies only specific /usr/local paths out, and tests/smoke.sh
 # asserts the mariadb-server binaries are absent from shipped images.
 RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/var/cache/apt,sharing=locked \
-    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/var/cache/apk,sharing=locked \
     --mount=type=bind,from=corpus,source=/corpus,target=/corpus,rw \
     --mount=type=bind,from=corpus,source=/corpus-src,target=/corpus-src \
     bash /build/php/build.sh
@@ -451,9 +491,23 @@ COPY --chmod=0755 rootfs/ /stage/
 # no CA store of its own, so TLS peer verification through PHP's openssl extension
 # (file_get_contents, stream_socket_client, SoapClient, SMTP+TLS) would fail
 # without help; curl resolves its own bundle and hides it. deps/build-deps.sh's
-# `--openssldir=/etc/ssl` sets the compiled-in default to Debian's store; this ini
-# is the explicit half and is harmless on the modern era.
+# `--openssldir=/etc/ssl/openssl-1.1` sets the compiled-in default; this ini is the
+# explicit half and is harmless on the modern era.
 COPY conf/openssl.ini /stage/usr/local/etc/php/conf.d/12-openssl.ini
+
+# The legacy era's openssldir: a 1.1-syntax openssl.cnf (the system's is OpenSSL 4
+# syntax, which 1.1.1w cannot parse) and symlinks to the system CA store, so the
+# compiled-in default_cert_file/default_cert_dir resolve.
+ARG PHP_ERA
+COPY conf/openssl-1.1.cnf /tmp/openssl-1.1.cnf
+RUN set -eux; \
+    if [ "$PHP_ERA" = legacy ]; then \
+      install -d /stage/etc/ssl/openssl-1.1; \
+      install -m 0644 /tmp/openssl-1.1.cnf /stage/etc/ssl/openssl-1.1/openssl.cnf; \
+      ln -s /etc/ssl/certs /stage/etc/ssl/openssl-1.1/certs; \
+      ln -s /etc/ssl/cert.pem /stage/etc/ssl/openssl-1.1/cert.pem; \
+    fi; \
+    rm -f /tmp/openssl-1.1.cnf
 
 # Baseline opcache settings, shared unmodified by every flavor. The numeric prefix
 # sorts before the entrypoint-written 90-opcache-env.ini and 99-env.ini, which
@@ -520,65 +574,85 @@ FROM scratch AS runtime-payload-conf
 COPY --from=php-build /usr/local/etc/php /usr/local/etc/php
 COPY --from=runtime-conf /stage/ /
 
+# --- mariadb-dump ---
+# Build-only: mariadb-13.1-dump depends on perl for its slow-log scripts and
+# mariadb-13.1 (the server) on perl and OpenSSL 3, but mariadb-dump, mariadb-admin
+# and mariadb-check are native binaries linking only libssl 4, libcrypto 4, zlib and
+# glibc. runtime-base copies just those three, so neither perl nor the server ships.
+# WOLFI_INDEX_STATE and `apk upgrade` keep this layer in step with the runtime apk
+# layer, so these tools and the `mariadb` shell come from the same index and server
+# version. The copied binaries are not in the runtime image's apk database, so Trivy
+# cannot attribute CVEs to them.
+FROM ${BASE_IMAGE} AS mariadb-dump-src
+ARG WOLFI_INDEX_STATE=""
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    set -eux; \
+    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}"; \
+    echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories; \
+    apk upgrade --cache-dir /var/cache/apk -U; \
+    apk add --cache-dir /var/cache/apk mariadb-13.1 mariadb-13.1-dump; \
+    for b in mariadb-dump mariadb-admin mariadb-check; do \
+      test -x "/usr/bin/$b"; \
+      [ "$(head -c 4 "/usr/bin/$b" | tail -c 3)" = ELF ] || { echo "$b is not a native binary" >&2; exit 1; }; \
+    done
+
 # --- runtime-base ---
 FROM ${BASE_IMAGE} AS runtime-base
 ARG PHP_VERSION
 ARG WWW_UID=33
 ARG WWW_GID=33
-# Core client packages rather than the metapackages (~38MB instead of ~85MB).
-# 17 is trixie's PostgreSQL major.
-ARG PG_MAJOR=17
+# Client packages for the PostgreSQL major whose libpq links OpenSSL 4, like
+# everything else PHP loads; 17's libpq and libldap-2.6 pull OpenSSL 3 in beside it.
+ARG PG_MAJOR=18
 # Without a UTF-8 LC_CTYPE, PHP 7.x's basename()/pathinfo() treat multibyte
 # bytes as invalid and cut them away: basename('/x/файл.txt') is '.txt', and
 # ZipArchive::extractTo() writes '日本語/.txt'. 8.0+ is locale-independent there.
 # C.UTF-8 is built into glibc, no locales package needed.
-ENV DEBIAN_FRONTEND=noninteractive \
-    LANG=C.UTF-8
+ENV LANG=C.UTF-8
 
 COPY --from=php-build /tmp/runtime-packages.txt /tmp/runtime-packages.txt
-# upgrade: BASE_IMAGE is digest-pinned, so without it a Debian security fix to a
-# package the base already ships (e.g. libpcre2-8-0 on the legacy era) waits for
-# the next digest bump instead of landing in the weekly rebuild.
-# DEBIAN_ARCHIVE_STATE (CI: a hash of the trixie, trixie-updates and
-# trixie-security Release dates) re-runs this layer the day Debian publishes a
-# fix, instead of replaying the week-keyed cache until the next ISO week.
-ARG DEBIAN_ARCHIVE_STATE=""
+# The base's repository is apk.cgr.dev/chainguard; the public Wolfi index replaces
+# it (the signing key is already trusted), so a derived image's `apk add` reaches
+# the same packages this one was built from.
+#
+# upgrade: BASE_IMAGE is digest-pinned, so without it a security fix to a package
+# the base already ships waits for the next digest bump instead of landing in the
+# weekly rebuild. WOLFI_INDEX_STATE (CI: a hash of the APKINDEX files) re-runs
+# this layer the day Wolfi publishes a fix, instead of replaying the cached one.
+#
+# The package list is the tools every flavor keeps, the MariaDB shell and the
+# PostgreSQL client tools, and the libraries php and its extensions link
+# (scripts/runtime-libs.sh, resolved in php-build). libldap-2.7 is named so that
+# libpq's `so:libldap.so.2` cannot resolve to libldap-2.6 (OpenSSL 3). tar and
+# gzip are busybox applets, so they are not packages here. No shadow, no perl,
+# no ldd, no getent, no posix-libc-utils.
+ARG WOLFI_INDEX_STATE=""
 RUN set -eux; \
-    echo "debian archive state: ${DEBIAN_ARCHIVE_STATE:-unset}"; \
-    apt-get update; \
-    apt-get upgrade -y; \
-    apt-get install -y --no-install-recommends \
-      ca-certificates curl tzdata tini less nano procps \
-      tar gzip bzip2 zip unzip zstd xz-utils \
-      mariadb-client-core "postgresql-client-${PG_MAJOR}" \
-# libfcgi-bin ships cgi-fcgi, which php-fpm-healthcheck uses to speak FastCGI to
-# the pool's ping.path without a front web server.
-      libfcgi-bin \
+    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}"; \
+    echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories; \
+    apk upgrade --no-cache; \
+    apk add --no-cache \
+      bash ca-certificates curl tzdata tini less nano procps \
+      bzip2 zip unzip zstd xz \
+      mariadb-13.1-client "postgresql-${PG_MAJOR}-client" libldap-2.7 \
       $(tr '\n' ' ' < /tmp/runtime-packages.txt); \
-# /usr/bin/psql is a symlink to pg_wrapper, a perl script that dispatches between
-# installed postgres majors; with one major, it is the only reason ~49MB of perl
-# modules and libperl.so are here. Keep the real client binaries and drop the
-# wrapper. postgresql-client-N depends on postgresql-client-common, so the
-# binaries are copied out before the purge. Naming only `perl` lets apt take
-# libperl/perl-modules with it across perl majors; this works because nothing else
-# depends on libperl (Debian's libsnmp40t64 does, hence the vendored net-snmp,
-# deps/build-netsnmp.sh). tests/smoke.sh asserts libperl is gone. perl-base, with
-# /usr/bin/perl, stays: it is Essential.
-    for b in psql pg_dump pg_dumpall pg_restore pg_isready; do \
-      cp -a "/usr/lib/postgresql/${PG_MAJOR}/bin/$b" "/usr/local/bin/$b"; \
-    done; \
-    apt-get purge -y --auto-remove "postgresql-client-${PG_MAJOR}" perl; \
-# dpkg --audit exits 0 either way; any output means the purge left a
-# half-configured package.
-    audit="$(dpkg --audit 2>&1 || true)"; \
-    [ -z "$audit" ] || { echo "$audit" >&2; echo "FATAL: inconsistent dpkg state after purge" >&2; exit 1; }; \
-    rm -rf /var/lib/apt/lists/* /tmp/runtime-packages.txt; \
-# Housekeeping goes in this RUN because a later one would only whiteout files this
-# layer already stored. debconf keeps a *-old copy of its databases (0.8MB). Files
-# of installed packages stay, however unused: dpkg still lists the package, so apt
-# never restores a deleted file, and a derived image installing mariadb-server
-# fails in mariadb-install-db on the missing my_print_defaults.
-    rm -f /var/cache/debconf/*-old
+    rm -f /tmp/runtime-packages.txt
+ARG BUSYBOX_NET_APPLETS
+RUN set -eux; \
+    for applet in $BUSYBOX_NET_APPLETS; do \
+      for dir in /bin /sbin /usr/bin /usr/sbin; do \
+        case "$(readlink "$dir/$applet" 2>/dev/null)" in */busybox) rm -f "$dir/$applet" ;; esac; \
+      done; \
+    done
+COPY --from=mariadb-dump-src /usr/bin/mariadb-dump /usr/bin/mariadb-admin /usr/bin/mariadb-check /usr/bin/
+# mariadb-13.1-client ships only `mariadb`; keep the names scripts and people type.
+# Wrappers rather than symlinks: MariaDB warns "Deprecated program name" on stderr
+# when argv[0] is mysql*.
+RUN set -eux; \
+    for pair in mysql:mariadb mysqldump:mariadb-dump mysqladmin:mariadb-admin mysqlcheck:mariadb-check; do \
+      printf '#!/bin/sh\nexec %s "$@"\n' "${pair#*:}" > "/usr/bin/${pair%%:*}"; \
+      chmod 755 "/usr/bin/${pair%%:*}"; \
+    done
 
 # php-build's output, then the baked config, as two layers (see runtime-payload).
 # The config layer stays last so a config edit never re-ships the binaries.
@@ -586,9 +660,10 @@ COPY --from=runtime-payload / /
 COPY --from=runtime-payload-conf / /
 
 RUN set -eux; \
-    getent group www-data >/dev/null || groupadd -g "$WWW_GID" www-data; \
-    id -u www-data >/dev/null 2>&1 || useradd -u "$WWW_UID" -g "$WWW_GID" -s /usr/sbin/nologin -M www-data; \
+    grep -q '^www-data:' /etc/group || addgroup -S -g "$WWW_GID" www-data; \
+    grep -q '^www-data:' /etc/passwd || adduser -S -D -H -u "$WWW_UID" -G www-data -h /var/www -s /sbin/nologin www-data; \
     mkdir -p /app /usr/local/etc/php/conf.d; \
+    install -d -o www-data -g www-data /var/www; \
     chown -R www-data:www-data /app; \
 # php-ext-enable writes here as whatever user runs the container (the flavors set
 # USER www-data, and the entrypoint's PHP_EXT_ENABLE runs after the drop). Root
@@ -714,7 +789,7 @@ RUN set -eux; \
 EXPOSE 9000
 STOPSIGNAL SIGQUIT
 # php-fpm-healthcheck (vendored) speaks FastCGI to the pool's ping.path
-# (conf/www.conf) via cgi-fcgi, so no front web server or extra HTTP port is
+# (conf/www.conf) via php-fcgi, so no front web server or extra HTTP port is
 # needed. It runs as www-data, like the main command.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
   CMD php-fpm-healthcheck || exit 1
@@ -726,51 +801,57 @@ COPY conf/php-cli.ini /usr/local/etc/php/conf.d/10-php.ini
 USER www-data
 CMD ["php", "-a"]
 
-# Node 24 LTS for cli-builder, copied from the official image (trixie ships the
-# unmaintained Node 20). Pinned by multi-arch index digest so amd64 and arm64 both
-# resolve it and a retag cannot change what ships.
-FROM node:24-trixie-slim@sha256:7f486cabe892bff8fef04c0f7da8dba84a560be3e4e2740b7a86afc57ebec315 AS node24
-
-# Node, npm and semantic-release as one tree for cli-builder, finished here so no
-# intermediate npm lands in a shipped layer (upgrading npm in a later RUN left the
-# bundled 11.19 copy, ~20MB, underneath).
+# npm and semantic-release as one tree for cli-builder, installed under /usr/local
+# so the apk-managed Node (nodejs-24, /usr/bin/node) carries no npm of its own and
+# the pinned npm is the only one outside semantic-release's tree.
 #
-# npm moves past the bundled 11.19.1 to 11.21.1, the first release whose bundled
-# brace-expansion, undici and ip-address carry their fixes. /out is built by hand because
-# /usr/local/bin also holds the node image's docker-entrypoint.sh and yarn.
-# semantic-release is not run here (it refuses to start without git);
-# tests/smoke.sh runs `semantic-release --version` in the finished image. The
-# readme/changelog markdown in the packages is 2.5MB nothing reads.
-FROM node24 AS node-tools
-RUN set -eux; \
+# Wolfi's npm package is 12.x; the pin is npm 11.21.1, the first release whose
+# bundled brace-expansion, undici and ip-address carry their fixes. The apk npm is
+# only the bootstrap that installs it and never ships. semantic-release is not run
+# here (it refuses to start without git); tests/smoke.sh runs
+# `semantic-release --version` in the finished image. The readme/changelog markdown
+# in the packages is 2.5MB nothing reads.
+FROM ${BASE_IMAGE} AS node-tools
+ARG WOLFI_INDEX_STATE=""
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    set -eux; \
+    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}"; \
+    echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories; \
+    apk upgrade --cache-dir /var/cache/apk -U; \
+    apk add --cache-dir /var/cache/apk nodejs-24 npm; \
     node -v; \
-    npm install -g npm@11.21.1; \
-    npm -v; \
-    npm install -g semantic-release; \
-    npm cache clean --force; \
+    npm install -g --prefix /usr/local npm@11.21.1; \
+    [ "$(/usr/local/bin/npm -v)" = "11.21.1" ]; \
+    /usr/local/bin/npm install -g --prefix /usr/local semantic-release; \
+    /usr/local/bin/npm cache clean --force; \
     test -x /usr/local/bin/semantic-release; \
     find /usr/local/lib/node_modules -type f \( -iname 'readme*.md' -o -iname 'changelog*.md' -o -iname 'history.md' \) -delete; \
     mkdir -p /out/bin /out/lib; \
     cp -a /usr/local/lib/node_modules /out/lib/node_modules; \
-    for b in node npm npx corepack semantic-release; do \
+    for b in npm npx semantic-release; do \
       cp -a "/usr/local/bin/$b" "/out/bin/$b"; \
     done
 
 # cli-builder: composer, node and the CLI tooling a build or deploy stage needs.
 # No compiler or phpize; compiling extensions is ext-builder's job.
 FROM cli AS cli-builder
+ARG BUSYBOX_NET_APPLETS
 USER root
 COPY --from=node-tools /out/ /usr/local/
-# runtime-base already has less, nano, procps, zip, unzip and zstd.
-# mariadb-client-core has only the mariadb/mysql shell; mariadb-client adds
-# mariadb-dump/mysqldump (and pulls perl back in).
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+# runtime-base already has less, nano, procps, zip, unzip, zstd and the mariadb
+# shell, plus the mariadb-dump/-admin/-check binaries and mysql* wrappers it copies
+# from mariadb-dump-src; every flavor keeps those same copies, so all report one
+# version and apk audit stays clean.
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-      git rsync patch make brotli sqlite3 jq mariadb-client; \
-    rm -rf /var/lib/apt/lists/*; \
-    rm -f /var/cache/debconf/*-old
+    apk add --cache-dir /var/cache/apk -U \
+      nodejs-24 corepack git rsync patch make brotli sqlite jq; \
+    for applet in $BUSYBOX_NET_APPLETS; do \
+      for dir in /bin /sbin /usr/bin /usr/sbin; do \
+        case "$(readlink "$dir/$applet" 2>/dev/null)" in */busybox) rm -f "$dir/$applet" ;; esac; \
+      done; \
+    done; \
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 COPY conf/php-builder.ini /usr/local/etc/php/conf.d/10-php.ini
 # Verify the installer against Composer's published signature rather than piping
 # the download into php.
@@ -800,15 +881,22 @@ COPY --from=php-build /usr/local/include/php /usr/local/include/php
 # or PGO run), taking only the headers and phpize/php-config. Runs as root because
 # `make install` writes into the extension dir. No composer, no node.
 FROM cli AS ext-builder
+ARG BUSYBOX_NET_APPLETS
 USER root
-# g++: several extensions are C++. autoconf: phpize regenerates ./configure from
-# config.m4. pkg-config: extension configure scripts locate -dev libraries with it.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+# build-base: gcc, g++, make, binutils, glibc-dev and the openssf compiler wrappers
+# in /usr/local/bin, which stay on so extensions built here are hardened like
+# Wolfi's own. g++: several extensions are C++. autoconf: phpize regenerates
+# ./configure from config.m4. pkgconf: extension configure scripts locate -dev
+# libraries with it. A -dev package an extension needs is an `apk add` away; the
+# runtime libraries' headers (openssl-4.0-dev, ...) come from the same index.
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
-      gcc g++ make autoconf pkg-config libc6-dev; \
-    rm -rf /var/lib/apt/lists/*; \
-    rm -f /var/cache/debconf/*-old
+    apk add --cache-dir /var/cache/apk -U build-base autoconf pkgconf linux-headers; \
+    for applet in $BUSYBOX_NET_APPLETS; do \
+      for dir in /bin /sbin /usr/bin /usr/sbin; do \
+        case "$(readlink "$dir/$applet" 2>/dev/null)" in */busybox) rm -f "$dir/$applet" ;; esac; \
+      done; \
+    done; \
+    find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 COPY --from=ext-builder-payload / /
 CMD ["bash"]

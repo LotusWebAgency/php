@@ -1,13 +1,14 @@
 # php
 
-PHP 7.0 through 8.5, compiled from source on `debian:trixie-slim` with profile-guided optimization
-(PGO) trained on real PrestaShop, WordPress, Laravel, Symfony and Drupal applications. Binaries are
-hardened at the ELF level, Snuffleupagus virtual patching is available, and a read-only root
-filesystem is supported.
+PHP 7.0 through 8.5, compiled from source on Wolfi (`cgr.dev/chainguard/wolfi-base`, pinned by
+digest) with profile-guided optimization (PGO) trained on real PrestaShop, WordPress, Laravel,
+Symfony and Drupal applications. Binaries are hardened at the ELF level, Snuffleupagus virtual
+patching is available, and a read-only root filesystem is supported.
 
 Docker Hub: [`lotuswebagency/php`](https://hub.docker.com/r/lotuswebagency/php).
 Source: [github.com/LotusWebAgency/php](https://github.com/LotusWebAgency/php).
 Coming from `dementev/php-fpm-with-ext`? See [Migrating](#migrating-from-php-fpm-with-ext).
+Coming from a Debian- or Alpine-based PHP image? See [Moving from a Debian or Alpine base](#moving-from-a-debian-or-alpine-base).
 
 ```yaml
 services:
@@ -44,16 +45,22 @@ interpreter in them gets no upstream fixes. See [SUPPORT.md](SUPPORT.md).
 | Tag shape | Example | Meaning |
 |---|---|---|
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
-| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64` / `armv8-a` baseline. 8.4 and 8.5 only, not for `ext-builder`. |
+| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64-v2` / `armv8-a` baseline. 8.4 and 8.5 only, not for `ext-builder`. |
 | `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image (`default_version` in `matrix.json`, currently 8.5). |
 | `{release}-{flavor}[-v3]` | `8.5.11-fpm` | Full patch version. Read from the built image (`PHP_VERSION`) after tests and the Trivy gate, so a tag cannot name a version the image does not contain. |
 
-`-v3` images need a newer CPU. On amd64 older than Haswell/Excavator they refuse to start: glibc
-reads a GNU property note on the `php` and `php-fpm` binaries and exits 127 with
-`CPU ISA level is lower than required`. arm64 has no such check, so an unsupported core gets SIGILL. `armv9-a` code needs Neoverse N2/V2-class cores (Graviton4, Google Axion, Azure Cobalt
+`-v3` images need a newer CPU. On amd64 older than Haswell/Excavator they refuse to start: a startup
+check in the `php` and `php-fpm` binaries exits 127 with
+`this build requires an x86-64-v3 CPU`. arm64 has no such check, so an unsupported core gets SIGILL. `armv9-a` code needs Neoverse N2/V2-class cores (Graviton4, Google Axion, Azure Cobalt
 100, NVIDIA Grace). It does not run on Graviton2/3 or Ampere Altra. Apple M4-M6 do not provide SVE2
 in normal mode, so `-v3` also dies with SIGILL in Docker Desktop and OrbStack. Use the baseline tag
 on a Mac.
+
+The amd64 baseline is `x86-64-v2` (SSE4.2 and POPCNT; Intel Nehalem and newer, AMD Bulldozer and
+newer), not plain `x86-64`, because Wolfi's packages are built for it: its glibc, busybox and curl
+carry an `x86-64-v2` ISA requirement, so a CPU below that fails at the first `exec`. Both baselines
+use generic tuning (`-mtune=generic`), so the code is not tied to one core. Only the amd64 `-v3`
+tags check the CPU at startup.
 
 A tag names the PHP minor, so `8.4-fpm` moves with each 8.4 patch release. Pin the digest for
 reproducible builds: `FROM lotuswebagency/php:8.4-fpm@sha256:...`.
@@ -64,10 +71,28 @@ reproducible builds: `FROM lotuswebagency/php:8.4-fpm@sha256:...`.
 |---|---|
 | `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` (`php-fpm-healthcheck`) that needs no web server. |
 | `cli` | `php -a` by default. Scripts, cron jobs, queue workers. |
-| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, `mariadb-dump`, Node.js 24 LTS with npm and corepack, semantic-release and [Composer](https://getcomposer.org/) (installed with signature verification). No compiler. For build stages. |
-| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, libc6-dev and the PHP headers with `phpize` / `php-config`. Runs as root, no Composer, no Node.js. For build stages. |
+| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, Node.js 24 with npm 11.21.1 and corepack, semantic-release and [Composer](https://getcomposer.org/) (installed with signature verification). No compiler. For build stages. |
+| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize` / `php-config`. Runs as root, no Composer, no Node.js. Wolfi's openssf compiler wrappers stay on, so extensions built here get Wolfi's hardening flags. They also take Wolfi's default `-march`/`-mtune`, not the generic tuning the PHP build uses. For build stages. |
 
-All images use `tini` as PID 1. All but `ext-builder` run as `www-data` (UID 33).
+All images use `tini` as PID 1. All but `ext-builder` run as `www-data` (UID and GID 33).
+
+### Base image and tools
+
+The base is Wolfi, a glibc distribution. `/etc/apk/repositories` points at `packages.wolfi.dev/os`
+and nothing else. Every flavor has `apk`, bash, curl, nano, less, procps, tzdata, ca-certificates,
+zip, unzip, zstd, xz, bzip2, the PostgreSQL 18 client (`psql`, `pg_dump`, `pg_restore`) and the
+MariaDB 13.1 client. The MariaDB client is `mariadb`. `mysql`, `mysqldump`, `mysqladmin` and
+`mysqlcheck` are one-line wrapper scripts that `exec` `mariadb`, `mariadb-dump`, `mariadb-admin` and
+`mariadb-check`. The last three are copied from the MariaDB server package in a build stage, so the
+server and its perl dependency stay out of the image; they are not in apk's database.
+
+`php-fcgi` is a small FastCGI client, written in PHP, that sends one request to a pool and prints the
+body. The fpm healthcheck uses it, since Wolfi has no `cgi-fcgi`. Usage is in the header of
+[`rootfs/usr/local/bin/php-fcgi`](rootfs/usr/local/bin/php-fcgi).
+
+There is no apt, dpkg, `ldd`, `getent`, `useradd` or other shadow tool. `fpm` and `cli` have no perl;
+`cli-builder` and `ext-builder` do, because git and autoconf need it. Setuid and setgid bits are
+stripped in every flavor.
 
 ## Quick start
 
@@ -198,11 +223,12 @@ not covered by the tests.
 ## Extensions
 
 75 extensions, defined in [`php/ext.json`](php/ext.json); 74 are built (`imap` is registered but not
-built: Debian trixie has no `libc-client-dev`). The registry drives configure flags, the build and
+built: Wolfi has no c-client library). The registry drives configure flags, the build and
 the smoke test's assertions, and lists each extension's source, linkage, PHP range and purpose.
 
 - **53 are compiled in** and need nothing to use: the usual core set plus `igbinary`, `redis`,
-  `imagick`, `memcached`, `apcu` and `zstd`.
+  `imagick`, `memcached`, `apcu` and `zstd`. `imagick` reads HEIC and AVIF (static libheif,
+  libde265 and dav1d inside ImageMagick) but does not write them.
 - **21 are shared modules**, built but not loaded. Load them with `PHP_EXT_ENABLE: "ldap,uuid"`:
   `amqp`, `brotli`, `bz2`, `event`, `ffi` (7.4+), `ldap`, `lz4`, `mcrypt` (7.x),
   `mongodb` (8.1+), `msgpack`, `pcov` (7.1+), `protobuf` (8.2+), `snmp`, `snuffleupagus` (7.2+),
@@ -210,9 +236,9 @@ the smoke test's assertions, and lists each extension's source, linkage, PHP ran
 
 `php-ext-enable` refuses an unknown or unavailable name and lists what the image has. `xdebug` and
 `snuffleupagus` load as Zend extensions automatically. `ffi` is shipped disabled because it bypasses
-PHP-level sandboxing. `snmp` links a vendored client-only net-snmp in `/opt/net-snmp` instead of
-Debian's `libsnmp40t64`, which pulls in perl; MIBs are shipped but not loaded (set `MIBS=ALL` in the
-environment or `mibs +ALL` in `/etc/snmp/snmp.conf`).
+PHP-level sandboxing. `snmp` links a vendored client-only net-snmp in `/opt/net-snmp`, built against
+the image's OpenSSL, instead of a distro net-snmp package; MIBs are shipped but not loaded (set
+`MIBS=ALL` in the environment or `mibs +ALL` in `/etc/snmp/snmp.conf`).
 
 ### Adding your own extension
 
@@ -223,7 +249,7 @@ and copy only the `.so`:
 FROM lotuswebagency/php:8.5-ext-builder AS ext
 ARG MYEXT_VERSION=1.2.3
 ARG MYEXT_SHA256=<sha256 of the tarball>
-RUN apt-get update && apt-get install -y --no-install-recommends libmyext-dev
+RUN apk add --no-cache libmyext-dev
 RUN set -eux; \
     curl -fsSLo /tmp/myext.tgz "https://example.com/myext-${MYEXT_VERSION}.tgz"; \
     echo "${MYEXT_SHA256}  /tmp/myext.tgz" | sha256sum -c -; \
@@ -238,16 +264,20 @@ RUN set -eux; \
 FROM lotuswebagency/php:8.5-fpm
 COPY --from=ext /out/ /
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends libmyext1 \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache libmyext
 USER www-data
 ENV PHP_EXT_ENABLE=myext
 ```
 
 - Use the same PHP version tag in both stages, ideally pinned by digest. An extension built for one
   PHP minor does not load in another.
-- Install runtime libraries (`libmyext1`, not `-dev`) in the final stage as root, then switch back
+- Install runtime libraries (`libmyext`, not `-dev`) in the final stage as root, then switch back
   to `www-data`.
+- Package names are Wolfi's, not Debian's. `apk search` finds one by name, and
+  `apk info -W /usr/lib/libfoo.so.1` names the package that owns a file. Wolfi names some library
+  packages by version (`libicu78`). Headers for libraries the image already links come from the
+  same index: on 8.1 and later PHP uses OpenSSL 4, so the header package is `openssl-4.0-dev`.
+  `openssl-dev` is the OpenSSL 3 package and conflicts with it.
 - `PHP_EXT_ENABLE=myext` works for any `myext.so` in the extension directory. For another
   `zend_extension`, put a `zend_extension=myext.so` file in `/usr/local/etc/php/conf.d/`.
 - `ext-builder` has no `-v3` variant: an extension built against baseline headers loads in `-v3`
@@ -264,10 +294,18 @@ ENV PHP_EXT_ENABLE=myext
   dynamic symbols.
 - **`_FORTIFY_SOURCE=3`**: fortifiable libc calls resolve to `__*_chk`.
 - **Control-flow protection** (`-fcf-protection=full`, amd64): every function entry has an `endbr64`
-  landing pad. The loader-enforced IBT/SHSTK property note is not claimed, because Debian trixie's
-  own toolchain does not emit it.
-- Every link uses `-z relro -z now -z noexecstack --as-needed --build-id=sha1`.
+  landing pad. The loader-enforced IBT/SHSTK property note is not claimed, because it is absent
+  from these binaries.
+- Every link uses `-z relro -z now -z noexecstack --as-needed --build-id=sha1`, plus
+  `-z pack-relative-relocs` (packed `DT_RELR` relocations) where the linker supports it.
+- Wolfi's compiler wrappers add their own hardening spec and bake in `-mtune=sapphirerapids` (arm64:
+  `neoverse-v2`). The PHP build turns the hardening spec and clang's default config off, and
+  `php/cflags.sh` passes every hardening and `-march`/`-mtune` flag explicitly, vendored libraries
+  included.
 - Every setuid and setgid bit inherited from the base image is stripped.
+- Busybox's network applets (`ping`, `netstat`, `traceroute`, `arping`, `microcom` and the rest of
+  the raw-socket and interface set) are removed; `curl` stays. A derived image that runs
+  `apk add` gets the busybox links back and can prune them again.
 
 **Snuffleupagus.** [Virtual patching](https://github.com/jvoisin/snuffleupagus) is compiled in but
 not loaded by default. Four rulesets are baked into `/usr/local/etc/php/snuffleupagus/`: `default`,
@@ -301,13 +339,29 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
 
 ## How it is built
 
+- **Base image.** `cgr.dev/chainguard/wolfi-base`, pinned by digest in `matrix.json`. CI verifies
+  that digest's Chainguard cosign signature before any job builds on it, and every image carries the
+  `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest` labels. Packages
+  come from `packages.wolfi.dev/os` only. The runtime layer runs `apk upgrade`, so a rebuild picks up
+  Wolfi fixes published since the digest was pinned.
 - **Compiler per PHP era** (`compiler` in `matrix.json`). PHP 7.0-8.4 build with GCC 16.2, PGO and no
   LTO, because GCC's LTO rejects the HYBRID VM's global register variables. PHP 8.5 builds with
-  Debian's clang 19, PGO and ThinLTO, which gives the TAILCALL VM. `-std=gnu17` is pinned for every
-  version, because GCC 15's `gnu23` default breaks K&R-style code in php-src and PECL sources.
-- **Dependencies by era.** PHP 8.1+ uses Debian packages. PHP 7.0-8.0 uses OpenSSL and ICU vendored
-  from `deps/versions.lock` and linked statically, so no end-of-life `libssl.so` ships. PHP 7.0-7.2
-  also get a vendored curl. ImageMagick and net-snmp are built from source in every image.
+  clang 19, PGO and ThinLTO, which gives the TAILCALL VM. Both come from Wolfi packages. `-std=gnu17`
+  is pinned for every version, because GCC 15's `gnu23` default breaks K&R-style code in php-src and
+  PECL sources.
+- **Instruction set.** The amd64 baseline is `-march=x86-64-v2 -mtune=generic`, arm64 is
+  `-march=armv8-a -mtune=generic`. `-v3` is `-march=x86-64-v3` on amd64 and `-march=armv9-a` on
+  arm64, with a startup check on amd64 (see [Tags](#tags)). Flags: `php/cflags.sh`.
+- **Dependencies by era.** PHP 8.1-8.5 link Wolfi's libraries, including its system OpenSSL 4, so one
+  OpenSSL runs in the process: smoke fails an image that carries a `libssl` or `libcrypto` of major 1
+  or 3. Every PHP 8.1-8.5 build carries a patch that widens the `SSL_CTX` options in `ext/openssl`
+  to 64 bits, and 8.1 also needs one for OpenSSL 4's opaque `ASN1_STRING`. PHP 7.0-8.0 vendor, from
+  `deps/versions.lock` and linked statically, OpenSSL 1.1.1w (with a private openssldir,
+  `/etc/ssl/openssl-1.1`), ICU (67.1 on 7.0-7.3, 70.1 on 7.4-8.0), and libxml2 2.9.14 and libxslt
+  1.1.35 from Debian trixie's source
+  packages with Debian's security patches. No end-of-life `libssl.so` ships. PHP 7.0-7.2 also get a
+  vendored curl. ImageMagick and net-snmp are built from source in every image; ImageMagick carries
+  static libheif, libde265 and dav1d, which Trivy cannot see either.
 - **PGO on real applications.** Each tier replays PrestaShop, WordPress, Laravel and Symfony (plus
   Drupal on 8.4 and 8.5) through `php-fpm` under the shipped `conf/opcache.ini`, and the release
   build compiles against that profile. A version belongs to the tier with the greatest floor at or
@@ -391,6 +445,18 @@ docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --raw \
   | jq -r '.manifests[] | select(.platform.architecture == "arm64") | .digest'
 ```
 
+**What Trivy sees.** The CI gate scans every flavor for fixable CRITICAL and HIGH findings and
+reports none. The only accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s
+semantic-release, HIGH, no upstream fix; see [Accepted findings](SECURITY.md#accepted-findings)). It is
+suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan without that
+file shows it. Trivy reads the apk database, so it does not see what is outside it:
+
+- libraries built from source and linked statically or kept under `/opt`: ImageMagick (with static
+  libheif, libde265 and dav1d) and net-snmp in every image; OpenSSL 1.1.1w, ICU, libxml2 and libxslt in the 7.0-8.0 images; curl in 7.0-7.2.
+  libxml2 and libxslt are Debian trixie's 2.9.14 and 1.1.35 with Debian's security patches. These are
+  tracked by hand through the pins in `deps/versions.lock`.
+- `mariadb-dump`, `mariadb-admin` and `mariadb-check`, which are copied into the image.
+
 Trivy ignores `affected` VEX statements and ours are all `affected`, so scanners still show those
 findings. The CI gate reads a `.trivyignore` generated from the same file; each line expires on its
 statement's review date. Reporting and scope: [SECURITY.md](SECURITY.md).
@@ -464,7 +530,7 @@ Only the promotion and the description-sync jobs use the Docker Hub credentials,
 | `php/` | Extension registry (`ext.json`), pinned sources (`php-src.lock`, `pecl.lock`), build and flag scripts, PGO training (`pgo/`). |
 | `deps/` | Vendored library builds (`versions.lock`, `build-*.sh`), checksum-verified fetch, [source patches](deps/patches/README.md). |
 | `conf/` | Baked ini files, FPM pool config, Snuffleupagus rulesets. |
-| `rootfs/usr/local/bin/` | `docker-php-entrypoint`, `php-ext-enable`, `php-fpm-healthcheck`, `sp-upload-check` (upload validator for Snuffleupagus). |
+| `rootfs/usr/local/bin/` | `docker-php-entrypoint`, `php-ext-enable`, `php-fpm-healthcheck`, `php-fcgi` (FastCGI client the healthcheck uses), `sp-upload-check` (upload validator for Snuffleupagus). |
 | `shim/` | Source of the `chmod(0)` `LD_PRELOAD` shim. |
 | `scripts/`, `ci/` | Matrix generation, inputs hash, PGO tier checks; release, attestation, verification and VEX scripts. Both have unit tests. |
 | `vex/` | OpenVEX statements for accepted findings. |
@@ -488,6 +554,34 @@ Only the promotion and the description-sync jobs use the Docker Hub credentials,
   version's `fpm` image. `{version}-{flavor}` is unchanged.
 - **`LD_PRELOAD`:** enable the chmod shim with `PHP_CHMOD_SHIM=true` instead of setting
   `LD_PRELOAD` yourself.
+
+## Moving from a Debian or Alpine base
+
+This applies to any PHP image built on Debian (the official `php:*-fpm` images, and
+`dementev/php-fpm-with-ext` for 8.1 and later) or on Alpine (`dementev/php-fpm-with-ext` for
+7.0-8.0). The package, path and OpenSSL notes below are written for Debian. Alpine users already
+have apk, but move from musl to glibc, so rebuild every compiled extension in an `ext-builder` stage
+of the same tag. Configuration and tag differences for `php-fpm-with-ext` are in the section above.
+
+- **Packages:** `apt-get install` becomes `apk add --no-cache`, run as root (`USER root`). There is
+  no `apt-get`, `dpkg` or `.deb` tooling. Package names differ: `libjpeg-dev` is
+  `libjpeg-turbo-dev`, `libtiff-dev` is `tiff-dev`, `libxslt1-dev` is `libxslt-dev`, `uuid-dev` is
+  `util-linux-dev`, `libpq-dev` is `postgresql-18-dev`, `libssl-dev` is `openssl-4.0-dev` (8.1
+  and later). Use
+  `apk search` for the rest. See [Adding your own extension](#adding-your-own-extension).
+- **CPU:** the amd64 baseline needs `x86-64-v2`, which Wolfi's packages are built for. `-v3` tags
+  refuse to start on an amd64 CPU below `x86-64-v3`.
+- **OpenSSL:** PHP 8.1 to 8.5 use OpenSSL 4 (Debian-based images ship OpenSSL 3). An extension
+  compiled against `libssl.so.3` must be rebuilt in an `ext-builder` stage of the same tag.
+- **MySQL and MariaDB tools:** the client is MariaDB 13.1. `mysql`, `mysqldump`, `mysqladmin` and
+  `mysqlcheck` are wrapper scripts that run the `mariadb*` tool of the same role.
+- **Paths:** there is no multiarch directory. Libraries are in `/usr/lib`, not
+  `/usr/lib/x86_64-linux-gnu`.
+- **Missing tools:** `ldd`, `getent`, `useradd` and `groupadd` are absent. List a binary's libraries
+  with the loader (`/lib64/ld-linux-x86-64.so.2 --list <file>`, or `/lib/ld-linux-aarch64.so.1` on
+  arm64). Users and groups come from busybox `adduser` and `addgroup`. `perl` is absent from `fpm`
+  and `cli`.
+- **Unchanged:** `www-data` is still UID and GID 33, and PID 1 is still `tini`.
 
 ## Related images
 

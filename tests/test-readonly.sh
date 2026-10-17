@@ -213,13 +213,13 @@ fpm_probe() {
     set +e
     out=$(printf '%s' "$body" | docker exec -i -e SCRIPT_FILENAME="${dir}/ro-probe.php" -e SCRIPT_NAME=/ro-probe.php \
       -e REQUEST_METHOD=POST -e CONTENT_TYPE='multipart/form-data; boundary=B' -e CONTENT_LENGTH="${#body}" \
-      "$c" timeout 20 cgi-fcgi -bind -connect 127.0.0.1:9000 2>&1)
+      "$c" timeout 20 php-fcgi 127.0.0.1:9000 2>&1)
     rc=$?
     set -e
     [ "$rc" -eq 0 ] && break
     sleep 0.3
   done
-  [ "$rc" -eq 0 ] || fail "fpm: cgi-fcgi against $c never succeeded (last exit $rc): $out"
+  [ "$rc" -eq 0 ] || fail "fpm: php-fcgi against $c never succeeded (last exit $rc): $out"
   printf '%s\n' "$out"
 }
 
@@ -255,7 +255,7 @@ fi
 
 drun -d --name "$name" "${RO[@]}" -e PHP_MEMORY_LIMIT=300M -e PHP_EXT_ENABLE=bz2 -e PHP_CHMOD_SHIM=true "${sp_env[@]}" "$IMAGE" >/dev/null
 wait_healthy "$name"
-echo "ok: fpm -- starts read-only and php-fpm-healthcheck (cgi-fcgi ping) answers"
+echo "ok: fpm -- starts read-only and php-fpm-healthcheck (php-fcgi ping) answers"
 resp=$(fpm_probe "$name" /tmp)
 wait_healthy "$name"
 logs=$(docker logs "$name" 2>&1)

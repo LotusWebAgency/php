@@ -2,20 +2,17 @@
 # Minimal net-snmp, built from the source pinned in deps/versions.lock: the
 # client library (libnetsnmp) and the MIB files, nothing else.
 #
-# Why: Debian's libsnmp40t64 hard-depends on libperl5.40 (plus libwrap0,
-# libsensors5, libpci3) for the agent's embedded-perl glue. ext-snmp only needs
-# the client library, but the distro copy drags ~49 MB of perl into every
-# runtime image, and purging perl is impossible while another package depends
-# on it.
+# Why vendored: ext-snmp links one pinned copy built against the image's OpenSSL,
+# patched for OpenSSL 4 (deps/patches/net-snmp-5.9.5.2), and the runtime image
+# needs no distro net-snmp package.
 #
 # Left out: the agent and its mib modules, the command-line apps, scripts
-# (mib2c...), manuals, perl and python bindings, embedded perl, libwrap. Kept,
-# to match Debian's libsnmp where PHP users can see it: OpenSSL for USM
-# auth/priv (Debian's supported libssl, never an EOL one, and never the
-# static-only vendored 1.1.1w), AES-192/256 priv (--enable-blumenthal-aes), the
-# TLS/DTLS transports, the TSM security model, IPv6.
+# (mib2c...), manuals, perl and python bindings, embedded perl, libwrap. Kept:
+# OpenSSL for USM auth/priv (the image's supported libssl, never an EOL one, and
+# never the static-only vendored 1.1.1w), AES-192/256 priv
+# (--enable-blumenthal-aes), the TLS/DTLS transports, the TSM security model, IPv6.
 #
-# Defaults follow Debian so existing deployments keep working:
+# Paths and defaults follow Debian's libsnmp so existing deployments keep working:
 #   - /etc/snmp is the config directory, so a mounted /etc/snmp/snmp.conf is
 #     read as on a Debian host, and /var/lib/snmp is the persistent dir.
 #   - No MIB is loaded automatically (--with-mibs=":" matches the `mibs :` in
@@ -24,11 +21,11 @@
 #     parse about twenty MIB files. The files are installed and listed in the
 #     compiled-in MIB directories, so snmp_read_mib(), MIBS=ALL and `mibs +ALL`
 #     work.
-#   - The MIB search path is Debian's (`net-snmp-config --default-mibdirs` on a
-#     trixie libsnmp-dev: $HOME/.snmp/mibs and /usr/share/snmp/mibs with its
-#     iana and ietf subdirectories, which are not searched recursively) plus
-#     the shipped MIB directory, so MIBs mounted where a Debian host expects
-#     them are found without setting MIBDIRS.
+#   - The MIB search path is Debian's (`net-snmp-config --default-mibdirs` there:
+#     $HOME/.snmp/mibs and /usr/share/snmp/mibs with its iana and ietf
+#     subdirectories, which are not searched recursively) plus the shipped MIB
+#     directory, so MIBs mounted where a Debian host expects them are found
+#     without setting MIBDIRS.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -42,6 +39,11 @@ url=$(echo "$row" | awk '{print $6}')
 bash "$HERE/fetch-verified.sh" "$url" "$sha" /tmp/net-snmp.tar.gz
 mkdir -p /tmp/net-snmp && tar xf /tmp/net-snmp.tar.gz -C /tmp/net-snmp --strip-components=1
 cd /tmp/net-snmp
+
+# OpenSSL 4 made ASN1_STRING opaque; net-snmp 5.9.5.2 still reads its fields.
+for patch_file in "$HERE"/patches/net-snmp-"$version"/*.patch; do
+  patch -p1 --fuzz=0 < "$patch_file"
+done
 
 # Same posture as ImageMagick: one build shared by all PHP versions, baseline
 # flags, hardening from the shared flag scripts, self-referencing rpath.

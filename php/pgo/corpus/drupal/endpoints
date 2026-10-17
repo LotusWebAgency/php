@@ -1,6 +1,6 @@
 # See corpus/laravel/endpoints for the format. Drupal's docroot is web/, and its
 # database is the sqlite file `drush site:install` was pointed at, so the app
-# needs no server beside php (Debian's libsqlite 3.46.1 clears the 3.45 Drupal
+# needs no server beside php (the system libsqlite clears the 3.45 Drupal
 # 11 asks for). Only the 8.4 and 8.5 tiers carry Drupal -- see corpus/tiers.
 #
 # Node ids are what corpus/drupal/seed.php creates: articles 1-20 (each tagged,

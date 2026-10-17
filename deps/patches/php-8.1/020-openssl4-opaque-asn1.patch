@@ -1,0 +1,85 @@
+Source: local. Adapts the 8.1 branch's ext/openssl to OpenSSL 4, which made ASN1_STRING (and its ASN1_OCTET_STRING / ASN1_UTCTIME aliases) opaque and stopped exporting ERR_NUM_ERRORS. php-src's 8.2 and later branches no longer access these members directly; 8.1 is security-only and never got the change.
+
+--- a/ext/openssl/openssl.c
++++ b/ext/openssl/openssl.c
+@@ -705,7 +705,7 @@
+ 
+ static void php_openssl_add_assoc_asn1_string(zval * val, char * key, ASN1_STRING * str) /* {{{ */
+ {
+-	add_assoc_stringl(val, key, (char *)str->data, str->length);
++	add_assoc_stringl(val, key, (const char *)ASN1_STRING_get0_data(str), ASN1_STRING_length(str));
+ }
+ /* }}} */
+ 
+@@ -738,12 +738,12 @@
+ 	}
+ 
+ 	if (timestr_len < 13 && timestr_len != 11) {
+-		php_error_docref(NULL, E_WARNING, "Unable to parse time string %s correctly", timestr->data);
++		php_error_docref(NULL, E_WARNING, "Unable to parse time string %s correctly", (const char *)ASN1_STRING_get0_data(timestr));
+ 		return (time_t)-1;
+ 	}
+ 
+ 	if (ASN1_STRING_type(timestr) == V_ASN1_GENERALIZEDTIME && timestr_len < 15) {
+-		php_error_docref(NULL, E_WARNING, "Unable to parse time string %s correctly", timestr->data);
++		php_error_docref(NULL, E_WARNING, "Unable to parse time string %s correctly", (const char *)ASN1_STRING_get0_data(timestr));
+ 		return (time_t)-1;
+ 	}
+ 
+@@ -2095,8 +2095,8 @@
+ 	}
+ 
+ 	extension_data = X509_EXTENSION_get_data(extension);
+-	p = extension_data->data;
+-	length = extension_data->length;
++	p = ASN1_STRING_get0_data(extension_data);
++	length = ASN1_STRING_length(extension_data);
+ 	if (method->it) {
+ 		names = (GENERAL_NAMES*) (ASN1_item_d2i(NULL, &p, length,
+ 			ASN1_ITEM_ptr(method->it)));
+--- a/ext/openssl/php_openssl.h
++++ b/ext/openssl/php_openssl.h
+@@ -72,6 +72,11 @@
+ #	define PHP_OPENSSL_API
+ #endif
+ 
++/* OpenSSL 4 no longer exports ERR_NUM_ERRORS; 16 is the value it had. */
++#ifndef ERR_NUM_ERRORS
++#define ERR_NUM_ERRORS 16
++#endif
++
+ struct php_openssl_errors {
+ 	int buffer[ERR_NUM_ERRORS];
+ 	int top;
+--- a/ext/openssl/xp_ssl.c
++++ b/ext/openssl/xp_ssl.c
+@@ -482,12 +482,12 @@
+ 			}
+ 			OPENSSL_free(cert_name);
+ 		} else if (san->type == GEN_IPADD) {
+-			if (san->d.iPAddress->length == 4) {
++			if (ASN1_STRING_length(san->d.iPAddress) == 4) {
+ 				sprintf(ipbuffer, "%d.%d.%d.%d",
+-					san->d.iPAddress->data[0],
+-					san->d.iPAddress->data[1],
+-					san->d.iPAddress->data[2],
+-					san->d.iPAddress->data[3]
++					ASN1_STRING_get0_data(san->d.iPAddress)[0],
++					ASN1_STRING_get0_data(san->d.iPAddress)[1],
++					ASN1_STRING_get0_data(san->d.iPAddress)[2],
++					ASN1_STRING_get0_data(san->d.iPAddress)[3]
+ 				);
+ 				if (strcasecmp(subject_name, (const char*)ipbuffer) == 0) {
+ 					sk_GENERAL_NAME_pop_free(alt_names, GENERAL_NAME_free);
+@@ -496,9 +496,9 @@
+ 				}
+ 			}
+ #ifdef HAVE_IPV6_SAN
+-			else if (san->d.ip->length == 16 && subject_name_is_ipv6) {
++			else if (ASN1_STRING_length(san->d.iPAddress) == 16 && subject_name_is_ipv6) {
+ 				ipbuffer[0] = 0;
+-				EXPAND_IPV6_ADDRESS(ipbuffer, san->d.iPAddress->data);
++				EXPAND_IPV6_ADDRESS(ipbuffer, ASN1_STRING_get0_data(san->d.iPAddress));
+ 				if (strcasecmp((const char*)subject_name_ipv6_expanded, (const char*)ipbuffer) == 0) {
+ 					sk_GENERAL_NAME_pop_free(alt_names, GENERAL_NAME_free);
+ 

@@ -1,6 +1,7 @@
 #!/bin/sh
-# Stands in for mysqladmin inside a runtime -fpm image, which ships
-# mariadb-client-core (the mariadb shell) but not mysqladmin. Mounted at
+# Stands in for mysqladmin inside a runtime -fpm image, whose mysqladmin is a
+# wrapper around mariadb-admin: a real `shutdown` would stop the sidecar the
+# harness owns, and `ping` should not need more than the mariadb shell. Mounted at
 # /usr/local/bin/mysqladmin by tests/test-corpus-tiers.sh so that
 # php/pgo/corpus/prestashop/db-up.sh and db-down.sh find the sidecar database
 # the way they find their own: over TCP loopback, in a network namespace shared

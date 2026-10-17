@@ -53,7 +53,7 @@ single_value() {
   esac
 }
 
-# Retries a `cgi-fcgi` request: `docker exec true` succeeding only proves the
+# Retries a `php-fcgi` request: `docker exec true` succeeding only proves the
 # namespace is enterable, not that php-fpm is accepting connections yet, and a
 # top-level `var=$(cmd)` trips `set -e` on a non-zero exit, so a connection-refused
 # race would kill the suite with no FAIL message.
@@ -62,13 +62,13 @@ fcgi_request() {
   local out rc
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     set +e
-    out=$(docker exec "$@" "$cname" cgi-fcgi -bind -connect 127.0.0.1:9000 2>&1)
+    out=$(docker exec "$@" "$cname" php-fcgi -i 127.0.0.1:9000 2>&1)
     rc=$?
     set -e
     [ "$rc" -eq 0 ] && break
     sleep 0.3
   done
-  [ "$rc" -eq 0 ] || fail "fcgi_request: cgi-fcgi against $cname never succeeded (last exit $rc): $out"
+  [ "$rc" -eq 0 ] || fail "fcgi_request: php-fcgi against $cname never succeeded (last exit $rc): $out"
   echo "$out"
 }
 

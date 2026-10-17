@@ -79,13 +79,13 @@ PY
 built=0 skipped=0
 
 # imap's php constraint (ext.json: >=7.0,<8.4) is right about php-src
-# availability but not about this environment: Debian dropped c-client, so
-# libc-client-dev has never existed on trixie. That is not a per-version registry
+# availability but not about this environment: Wolfi ships no c-client, so
+# there is no imap development package to build against. That is not a per-version registry
 # gap to override (test_ext_registry.py's test_imap_excluded_above_83 pins the
 # constraint deliberately), and every targeted version that has ext/imap
 # (7.0-8.3) sits inside the range. configure fails here, not phpize, so the
 # pecl.lock/php-src-dir skips below do not catch it; it is skipped loudly and
-# counted. The list may only grow by "trixie categorically cannot build this",
+# counted. The list may only grow by "Wolfi categorically cannot build this",
 # never "this run happened to fail": a per-version entry here says the latter,
 # while an ext.json range says "this pinned version does not support that PHP".
 KNOWN_UNBUILDABLE="imap"
@@ -110,29 +110,39 @@ if [ "$LIST_ONLY" -eq 1 ]; then
   exit 0
 fi
 
-# Debian multiarch: the one thing every phpize'd extension here needs told.
+# Libraries live directly in /usr/lib on Wolfi, for both amd64 and arm64: no
+# multiarch subdirectory.
 #
 # Several config.m4 files test for their library at $DIR/$PHP_LIBDIR/libfoo.so
-# with $PHP_LIBDIR defaulting to "lib", while Debian ships libraries under
-# /usr/lib/<triplet>. ext/ldap is the one that broke: on 7.0 it tests only
-# $LDAP_LIBDIR/liblber.so ("configure: error: Cannot find ldap libraries in
-# /usr/lib."), and on 7.1-8.0 its multiarch fallback
-# $LDAP_LIBDIR/$($CC -dumpmachine)/liblber.so misses too, because clang's
-# -dumpmachine prints x86_64-pc-linux-gnu where Debian (and gcc) say
-# x86_64-linux-gnu.
-#
-# --with-libdir is PHP's own answer (the official docker-library/php images pass
-# it too). Pointing it at the multiarch subdirectory makes $PHP_LIBDIR name the
-# directory the libraries are really in, for every extension at once. It also
-# makes PHP_ADD_LIBRARY_WITH_PATH skip a redundant -L (build/php.m4 suppresses -L
-# for /usr/$PHP_LIBDIR).
-#
-# Derived from dpkg, never spelled out: this file also runs on arm64. A missing
-# dpkg-architecture is a hard error because an omitted flag does not fail, it
-# just goes back to searching the wrong directory.
-command -v dpkg-architecture >/dev/null 2>&1 || {
-  echo "dpkg-architecture not found; cannot derive the multiarch libdir" >&2; exit 1; }
-LIBDIR_ARG="--with-libdir=lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)"
+# with $PHP_LIBDIR defaulting to "lib". ext/ldap on 7.0 tests only
+# $LDAP_LIBDIR/liblber.so, and its multiarch fallback on 7.1-8.0 uses
+# $($CC -dumpmachine), which clang spells x86_64-pc-linux-gnu. Passing
+# --with-libdir=lib explicitly keeps $PHP_LIBDIR pinned for every extension at
+# once (it is also the default the main build, which does not pass the flag,
+# configures with) and makes PHP_ADD_LIBRARY_WITH_PATH skip a redundant -L
+# (build/php.m4 suppresses -L for /usr/$PHP_LIBDIR).
+LIBDIR_ARG="--with-libdir=lib"
+
+# ext/tidy before 7.3 only knows tidy-html5's old header name, buffio.h; Debian's
+# libtidy-dev shipped a forwarding header, Wolfi's tidy-html5-dev does not. The
+# forwarder lives in a build-only directory so it never reaches the image.
+TIDY_COMPAT_DIR="/tmp/php-docker-tidy-compat"
+if [ $(( ${PHP_VERSION%%.*} * 100 + ${PHP_VERSION##*.} )) -lt 703 ] \
+   && [ -f /usr/include/tidybuffio.h ] && [ ! -f /usr/include/buffio.h ]; then
+  mkdir -p "$TIDY_COMPAT_DIR"
+  printf '#include <tidybuffio.h>\n' > "$TIDY_COMPAT_DIR/buffio.h"
+  export CPPFLAGS="-I${TIDY_COMPAT_DIR} ${CPPFLAGS:-}"
+fi
+
+# xmlrpc (7.x) links libxml2, which the legacy era vendors as a static archive
+# under PHP_DEPS_PREFIX: 7.4 finds it through pkg-config, 7.0-7.3 through
+# xml2-config in $PHP_LIBXML_DIR (phpize builds do not register --with-libxml-dir,
+# so the variable comes from the environment). The modern era has no prefix and
+# uses the system libxml2.
+if [ -n "${PHP_DEPS_PREFIX:-}" ] && [ -x "${PHP_DEPS_PREFIX}/bin/xml2-config" ]; then
+  export PKG_CONFIG_PATH="${PHP_DEPS_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+  export PHP_LIBXML_DIR="$PHP_DEPS_PREFIX"
+fi
 echo "shared extensions: configuring with $LIBDIR_ARG"
 
 # Required, not defaulted: falling back to "modern" on a legacy build would

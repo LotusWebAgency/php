@@ -35,12 +35,13 @@ up while it is migrated.
 - **You get** a working PHP of that version, built with the same PGO training, hardening, extension
   set and configuration surface as every other tag.
 - **You do not get** security fixes for the PHP runtime. Upstream stopped shipping them on the dates
-  above. The weekly rebuild patches the Debian base layer, but the interpreter's source does not
-  change. Treat anything at `8.1` or below as an unpatched interpreter.
+  above. The weekly rebuild applies Wolfi package updates to the base layer, but the interpreter's
+  source does not change. Treat anything at `8.1` or below as an unpatched interpreter.
 - **Rebuilds are reproducible.** Each PHP release tarball is pinned by sha256 and GPG-verified
   (`php/php-src.lock`). Each PECL extension is pinned by sha256 (`php/pecl.lock`). For PHP 7.0-8.0,
-  OpenSSL and ICU are vendored and pinned (`deps/versions.lock`), as is curl on 7.0-7.2. A rebuild
-  produces the same interpreter, not a newer one.
+  OpenSSL, ICU, libxml2 and libxslt are vendored and pinned (`deps/versions.lock`), as is curl on
+  7.0-7.2. Trivy cannot see those, so they are tracked by hand. A rebuild produces the same
+  interpreter, not a newer one.
 
 The upgrade path for your application is your call. This page states the status and the date, not a
 target version.
@@ -53,6 +54,9 @@ pin the digest:
 ```dockerfile
 FROM lotuswebagency/php:8.4-fpm@sha256:...
 ```
+
+A rebuild also picks up new Wolfi packages (`apk upgrade`), so the system libraries can differ between
+two builds of one tag. Pin the digest to keep the exact set you tested.
 
 ## Patch cadence
 

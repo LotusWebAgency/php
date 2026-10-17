@@ -45,15 +45,16 @@ size_of() {  # size_of <image> -> bytes (sum of uncompressed layers, see header)
 }
 
 breakdown() {  # breakdown <image> -- installed packages by size, largest /usr/local paths
-  # dpkg's Installed-Size and du's default block size are both in KiB (1024-byte
-  # units). Convert to bytes first (*1024), then apply the same decimal-MB
-  # divisor as size_of()/human(), so every number on this page is in one unit.
+  # The apk database records each package's installed size ("I:") in bytes; du's
+  # default block size is KiB, so the du figures are converted to bytes (*1024).
+  # Both then use the same decimal-MB divisor as size_of()/human(), so every
+  # number on this page is in one unit.
   local image="$1"
   echo
   echo "=== $image: top 15 installed packages by size ==="
   docker run --rm --entrypoint sh "$image" -c \
-    "dpkg-query -W -f='\${Installed-Size}\t\${Package}\n' 2>/dev/null | sort -rn | head -15" \
-    | awk 'BEGIN{FS="\t"} {printf "%8.1f MB  %s\n", $1*1024/1000/1000, $2}'
+    "awk '/^P:/ { name = substr(\$0, 3) } /^I:/ { print substr(\$0, 3) \"\\t\" name }' /lib/apk/db/installed | sort -rn | head -15" \
+    | awk 'BEGIN{FS="\t"} {printf "%8.1f MB  %s\n", $1/1000/1000, $2}'
   echo
   echo "=== $image: largest paths under /usr/local ==="
   docker run --rm --entrypoint sh "$image" -c \

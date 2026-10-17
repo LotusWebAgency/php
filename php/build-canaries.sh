@@ -200,7 +200,7 @@ assert_ifunc_canary() {
     # autoconf dumps its cache into config.log; the forced value has to be
     # visible there, or the assignment never reached configure at all and the
     # macro is absent for some other reason entirely.
-    if ! grep -q 'ax_cv_have_func_attribute_ifunc=no' config.log; then
+    if ! grep -qE "ax_cv_have_func_attribute_ifunc='?no'?" config.log; then
       echo "FATAL: this branch's configure has the ifunc probe, but config.log" \
            "has no record of ax_cv_have_func_attribute_ifunc=no -- the override" \
            "was not applied and the macro's absence means something else" >&2
@@ -247,8 +247,9 @@ assert_attribute_canary() {
   fi
 
   # autoconf dumps its cache into config.log; that dump is the record of what
-  # each probe decided.
-  answers="$(grep -oE 'ax_cv_have_func_attribute_[a-z0-9_]+=(yes|no)' config.log 2>/dev/null | sort -u || true)"
+  # each probe decided. The dump goes through the shell's `set`, which quotes the
+  # value ('yes') under Wolfi's busybox sh and leaves it bare under dash.
+  answers="$(grep -oE "ax_cv_have_func_attribute_[a-z0-9_]+='?(yes|no)'?" config.log 2>/dev/null | tr -d "'" | sort -u || true)"
   if [ -z "$answers" ]; then
     echo "FATAL: configure probes $(wc -w <<<"$probed") function attribute(s) but config.log's" \
          "cache dump records no answer for any of them -- this canary measured nothing" >&2
