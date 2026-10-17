@@ -28,9 +28,26 @@ rebuild cadence: [SUPPORT.md](SUPPORT.md).
 Every build (pull request, push to `develop`, merge to `main`, weekly rebuild) runs a Trivy scan and
 fails on any fixable CRITICAL or HIGH finding before an image can be published.
 
-Trivy scans the OS package layer. It cannot see libraries built from source and vendored under `/opt`:
-ImageMagick and net-snmp in every image, and OpenSSL, ICU (and curl on 7.0-7.2) in the 7.0-8.0 images.
-Those are tracked by hand through the pins in `deps/versions.lock`.
+Trivy reads the apk database of the Wolfi base and reports 0 known vulnerabilities on the current
+images, all flavors tested. The Debian trixie base these images replaced showed hundreds. Findings
+accepted instead of fixed are listed under [Accepted findings](#accepted-findings).
+
+Trivy cannot see what is outside the apk database. Libraries built from source and linked statically
+or kept under `/opt` are tracked by hand through the pins in `deps/versions.lock`:
+
+- ImageMagick and net-snmp in every image.
+- OpenSSL 1.1.1w (static, with a private openssldir `/etc/ssl/openssl-1.1`), ICU 67.1 or 70.1,
+  libxml2 2.9.14 and libxslt 1.1.35 in the 7.0-8.0 images, and curl on 7.0-7.2. libxml2 and libxslt
+  are Debian trixie's source packages with Debian's security patches applied.
+- `mariadb-dump`, `mariadb-admin` and `mariadb-check`, copied from the MariaDB server package in a
+  build stage and so not in the image's apk database.
+
+PHP 8.1 to 8.5 use Wolfi's system OpenSSL 4, which `apk upgrade` updates with the rest of the base.
+
+The base image, `cgr.dev/chainguard/wolfi-base`, is pinned by digest. CI verifies that digest's
+Chainguard cosign signature before any job builds on it. Packages come from `packages.wolfi.dev/os`
+only, and every image carries `org.opencontainers.image.base.name` and
+`org.opencontainers.image.base.digest` labels.
 
 Only `main` publishes. A release is built, tested, signed and attested in a GHCR staging repository,
 then each multi-arch list is copied to Docker Hub with its signatures and attestations and tagged
