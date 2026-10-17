@@ -86,8 +86,8 @@ Check with `sha256sum deps/patches/*/*.patch`.
 
 ### When each can go
 
-- **curl:** when these versions stop being built, or when the base image's libcurl reports a version
-  string the old probe understands (it will not).
+- **curl:** when these versions stop being built, or when Wolfi's libcurl reports a version string
+  the old probe understands (it will not).
 - **dom, snmp, zip:** when their PHP versions are dropped, or when `snmp` / `zip` leave `php/ext.json`
   for them. These are genuine php-src bugs on branches that will not get another release.
 - **intl msgformat:** if `deps/build-deps.sh` ever builds ICU shared instead of static for 7.0-7.3.
@@ -95,6 +95,7 @@ Check with `sha256sum deps/patches/*/*.patch`.
   library and ICU's 30 MB data blob back into every layer, which is what `--disable-shared` avoids.
 - **openssl uint64:** per version, once a release of that version carries the fix, or when it stops
   being built against OpenSSL 4.
+- **opaque ASN1 (8.1):** when 8.1 leaves the matrix. It is end-of-life and will not get the change.
 - **preserve-none:** see the table.
 - **ARM64 interpreter inlining:** after a compiler upgrade passes the autoload regression without
   the patch on both baseline and v3 builds with PGO and ThinLTO.
