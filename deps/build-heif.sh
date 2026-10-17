@@ -42,12 +42,13 @@ fetch_and_unpack() {  # fetch_and_unpack <name> -> unpacked into /tmp/<name>-src
 
 fetch_and_unpack dav1d
 # Tools, tests and examples off; both bit depths stay on (10-bit HEIC/AVIF). The
-# plain buildtype leaves optimization and hardening to CFLAGS.
+# plain buildtype leaves optimization and hardening to CFLAGS. NDEBUG compiles asserts out
+# of all three decoders, which parse untrusted uploads.
 (
   cd /tmp/dav1d-src
   meson setup build \
     --prefix="$PREFIX" --libdir=lib --buildtype=plain \
-    -Ddefault_library=static -Db_staticpic=true \
+    -Ddefault_library=static -Db_staticpic=true -Db_ndebug=true \
     -Denable_tools=false -Denable_tests=false -Denable_examples=false -Denable_docs=false
   meson compile -C build
   meson install -C build
@@ -60,6 +61,7 @@ fetch_and_unpack libde265
   cmake -S . -B build \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=None \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_C_FLAGS="$CFLAGS -DNDEBUG" -DCMAKE_CXX_FLAGS="$CXXFLAGS -DNDEBUG" \
     -DENABLE_SDL=OFF -DENABLE_ENCODER=OFF -DENABLE_SHERLOCK265=OFF
   cmake --build build -j"$(nproc)"
   cmake --install build
@@ -72,6 +74,7 @@ fetch_and_unpack libheif
   cmake -S . -B build \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_BUILD_TYPE=None \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_C_FLAGS="$CFLAGS -DNDEBUG" -DCMAKE_CXX_FLAGS="$CXXFLAGS -DNDEBUG" \
     -DENABLE_PLUGIN_LOADING=OFF \
     -DWITH_LIBDE265=ON -DWITH_LIBDE265_PLUGIN=OFF \
     -DWITH_DAV1D=ON -DWITH_DAV1D_PLUGIN=OFF \
