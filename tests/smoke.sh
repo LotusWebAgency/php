@@ -254,6 +254,23 @@ for fmt in PNG JPEG WEBP AVIF; do
 done
 echo "ok: imagick delegate formats present"
 
+# HEIC and AVIF decode through the static libheif/libde265/dav1d stack linked into
+# libMagickCore (deps/build-heif.sh); the format list above only proves the coders
+# registered. Each fixture is a lossy 64x64 encode of a red half and a blue half.
+heif_out=$(drun --rm -v "$ROOT/tests/fixtures/imagick:/fixtures:ro" "$IMAGE" php -r '
+foreach (["heic", "avif"] as $ext) {
+  $im = new Imagick("/fixtures/two-bars.$ext");
+  $l = $im->getImagePixelColor(16, 32)->getColor();
+  $r = $im->getImagePixelColor(48, 32)->getColor();
+  $ok = $im->getImageWidth() === 64 && $im->getImageHeight() === 64
+    && $l["r"] > 200 && $l["g"] < 60 && $l["b"] < 60
+    && $r["b"] > 200 && $r["r"] < 60 && $r["g"] < 60;
+  echo $ext, ":", $ok ? "ok" : "bad", "\n";
+}')
+[ "$heif_out" = $'heic:ok\navif:ok' ] \
+  || { echo "FAIL: Imagick did not decode the HEIC/AVIF fixtures correctly (got: $heif_out)"; exit 1; }
+echo "ok: imagick decodes HEIC and AVIF (red|blue fixtures)"
+
 # ImageMagick is built with --disable-openmp; confirm that holds once imagick
 # links it into the php binary -- OpenMP spawns a thread per core per request if
 # it sneaks back in under FPM.
@@ -620,6 +637,12 @@ esac
 stray_pkgs=$(grep -E "$stray_regex" <<<"$apk_installed" | tr '\n' ' ' || true)
 [ -z "$stray_pkgs" ] || { echo "FAIL: the runtime image carries perl/snmp library packages ($stray_pkgs) -- ext-snmp is meant to link the vendored /opt/net-snmp"; exit 1; }
 echo "ok: no ${perl_note}net-snmp* or libsnmp* package in the image (control: glibc is visible to the same query)"
+
+# HEIC/AVIF are decoded by static libraries inside libMagickCore, so the distro
+# libheif and the SDL/gdk-pixbuf/codec closure it pulls in must not be installed.
+heif_pkgs=$(grep -E '^(libheif|libde265|libsdl2|gdk-pixbuf|libdav1d|aom-libs|rav1e|openh264|libx265.*|libsvtav1enc.*)$' <<<"$apk_installed" | tr '\n' ' ' || true)
+[ -z "$heif_pkgs" ] || { echo "FAIL: the image carries the distro libheif stack ($heif_pkgs) -- HEIC/AVIF decode is meant to be static in libMagickCore"; exit 1; }
+echo "ok: no libheif, libde265, SDL, gdk-pixbuf or AV1/HEVC codec packages in the image"
 
 # The Wolfi base, asserted rather than assumed. The repository file is rewritten to
 # the public mirror, because the base image ships the vendor's authenticated one.

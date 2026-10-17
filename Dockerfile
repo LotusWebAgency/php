@@ -7,6 +7,7 @@ ARG PHP_ERA=modern
 ARG COMPILER=clang
 
 # --- toolchain ---
+
 FROM ${BASE_IMAGE} AS toolchain-base
 ARG COMPILER=clang
 # The compiler binary names COMPILER implies, supplied by docker-bake.hcl (clang
@@ -90,8 +91,8 @@ FROM toolchain AS imagemagick
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk add --cache-dir /var/cache/apk -U \
       libpng-dev libjpeg-turbo-dev libwebp-dev tiff-dev freetype-dev \
-      libheif-dev libde265-dev openjpeg-dev
-COPY deps/build-imagemagick.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
+      openjpeg-dev cmake samurai meson nasm
+COPY deps/build-imagemagick.sh deps/build-heif.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
 COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
 RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
     bash /build/deps/build-imagemagick.sh /opt/imagemagick
