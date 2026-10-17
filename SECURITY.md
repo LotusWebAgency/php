@@ -28,9 +28,10 @@ rebuild cadence: [SUPPORT.md](SUPPORT.md).
 Every build (pull request, push to `develop`, merge to `main`, weekly rebuild) runs a Trivy scan and
 fails on any fixable CRITICAL or HIGH finding before an image can be published.
 
-Trivy reads the apk database of the Wolfi base and reports 0 known vulnerabilities on the current
-images, all flavors tested. The Debian trixie base these images replaced showed hundreds. Findings
-accepted instead of fixed are listed under [Accepted findings](#accepted-findings).
+The gate scans every flavor for fixable CRITICAL and HIGH findings and reports none. The only
+accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s semantic-release, no upstream
+fix; see [Accepted findings](#accepted-findings)). It is suppressed through the `.trivyignore`
+generated from `vex/php.openvex.json`, so a scan without that file shows it.
 
 Trivy cannot see what is outside the apk database. Libraries built from source and linked statically
 or kept under `/opt` are tracked by hand through the pins in `deps/versions.lock`:

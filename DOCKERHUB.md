@@ -8,8 +8,8 @@ patching is available, and a read-only root filesystem is supported.
 Source and full docs: [github.com/LotusWebAgency/php](https://github.com/LotusWebAgency/php).
 Replaces `dementev/php-fpm-with-ext`
 ([migration notes](https://github.com/LotusWebAgency/php#migrating-from-php-fpm-with-ext)).
-Coming from a Debian-based image? See
-[Migrating from the Debian-based tags](https://github.com/LotusWebAgency/php#migrating-from-the-debian-based-tags).
+Coming from a Debian- or Alpine-based PHP image? See
+[Moving from a Debian or Alpine base](https://github.com/LotusWebAgency/php#moving-from-a-debian-or-alpine-base).
 
 ```yaml
 services:
@@ -54,8 +54,9 @@ check prints `this build requires an x86-64-v3 CPU`, exit 127). On arm64 there i
 gets SIGILL: `armv9-a` code needs Neoverse N2/V2-class cores (Graviton4, Axion, Cobalt 100, Grace),
 not Graviton2/3, Ampere Altra or Apple silicon. Use the baseline tag on a Mac.
 
-The amd64 baseline is `x86-64-v2` (SSE4.2 and POPCNT; Intel Nehalem and newer), not plain `x86-64`,
-because Wolfi's glibc and libraries are built for it. Both baselines use generic tuning.
+The amd64 baseline is `x86-64-v2` (SSE4.2 and POPCNT; Intel Nehalem and newer, AMD Bulldozer and
+newer), not plain `x86-64`, because Wolfi's packages are built for it. Both baselines use generic
+tuning. Only the amd64 `-v3` tags check the CPU at startup.
 
 `8.4-fpm` moves with each 8.4 patch release. Pin the digest for reproducible builds.
 
@@ -66,7 +67,7 @@ because Wolfi's glibc and libraries are built for it. Both baselines use generic
 | `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` that needs no web server. |
 | `cli` | `php -a` by default. Scripts, cron jobs, queue workers. |
 | `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, Node.js 24 with npm 11.21.1 and corepack, semantic-release and Composer. No compiler. For build stages. |
-| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize`. Runs as root. For build stages. |
+| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize`. Runs as root. Extensions built here take Wolfi's default `-march`/`-mtune`, not the generic tuning the PHP build uses. For build stages. |
 
 All images run `tini` as PID 1. All but `ext-builder` run as `www-data` (UID and GID 33).
 
@@ -217,7 +218,7 @@ ENV PHP_EXT_ENABLE=myext
   `www-data`.
 - Package names are Wolfi's, not Debian's: `apk search` finds one by name, and
   `apk info -W /usr/lib/libfoo.so.1` names the package that owns a file. On 8.1 and later PHP uses
-  OpenSSL 4, so the header package is `openssl-4.0-dev`; `openssl-dev` is OpenSSL 3.6.
+  OpenSSL 4, so the header package is `openssl-4.0-dev`. `openssl-dev` is the OpenSSL 3 package and conflicts with it.
 - For a `zend_extension` other than xdebug, opcache or snuffleupagus, put a
   `zend_extension=myext.so` file in `/usr/local/etc/php/conf.d/` instead of using `PHP_EXT_ENABLE`.
 
@@ -258,32 +259,37 @@ CI verifies the base image's Chainguard cosign signature before building on it, 
 carries `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest` labels.
 
 Pull requests and `develop` pushes build and test without publishing to Docker Hub. A Trivy gate
-fails the build on any fixable CRITICAL or HIGH finding. Trivy reports 0 known vulnerabilities on
-the current images, all flavors tested; the Debian trixie base they replaced showed hundreds. Trivy
-reads the apk database, so it cannot see libraries built from source and linked statically or kept
-under `/opt`: ImageMagick and net-snmp in every image, OpenSSL 1.1.1w, ICU, libxml2 and libxslt in
-the 7.0-8.0 builds (the last two are Debian trixie's 2.9.14 and 1.1.35 with Debian's security
-patches), curl in 7.0-7.2. Those are tracked by hand through `deps/versions.lock`, as are the
+fails the build on any fixable CRITICAL or HIGH finding and reports none for any flavor. The only
+accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s semantic-release, no upstream
+fix; see [Accepted findings](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md#accepted-findings)).
+It is suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan without
+that file shows it. Trivy reads the apk database, so it cannot see libraries built from source and
+linked statically or kept under `/opt`: ImageMagick and net-snmp in every image, OpenSSL 1.1.1w, ICU,
+libxml2 and libxslt in the 7.0-8.0 builds (the last two are Debian trixie's 2.9.14 and 1.1.35 with
+Debian's security patches), curl in 7.0-7.2. Those are tracked by hand through `deps/versions.lock`, as are the
 `mariadb-dump`, `mariadb-admin` and `mariadb-check` binaries copied into the image. Reporting
 channel: [SECURITY.md](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md).
 
-## Migrating from the Debian-based tags
+## Moving from a Debian or Alpine base
 
-For earlier builds of these tags that used `debian:trixie-slim`, and for any Debian-based PHP image:
+This applies to any PHP image built on Debian (the official `php:*-fpm` images, and
+`dementev/php-fpm-with-ext` for 8.1 and later) or on Alpine (`dementev/php-fpm-with-ext` for
+7.0-8.0). The notes below are written for Debian. Alpine users already have apk, but move from musl
+to glibc, so rebuild every compiled extension in an `ext-builder` stage of the same tag.
 
 - `apt-get install` becomes `apk add --no-cache`, run as root. There is no `apt-get` or `dpkg`, and
   package names differ (`libjpeg-dev` is `libjpeg-turbo-dev`, `libtiff-dev` is `tiff-dev`,
   `libxslt1-dev` is `libxslt-dev`, `uuid-dev` is `util-linux-dev`, `libpq-dev` is
   `postgresql-18-dev`).
 - The amd64 baseline needs `x86-64-v2`. `-v3` tags refuse to start below `x86-64-v3`.
-- PHP 8.1 to 8.5 use OpenSSL 4 (Debian trixie shipped OpenSSL 3). Rebuild extensions you compiled
+- PHP 8.1 to 8.5 use OpenSSL 4 (Debian-based images ship OpenSSL 3). Rebuild extensions compiled
   against `libssl.so.3` in an `ext-builder` stage of the same tag.
 - `mysql*` names are wrappers around the MariaDB 13.1 `mariadb*` tools.
 - Libraries are in `/usr/lib`, not `/usr/lib/x86_64-linux-gnu`. `ldd`, `getent`, `useradd` and
   `groupadd` are absent; list a binary's libraries with the loader
   (`/lib64/ld-linux-x86-64.so.2 --list <file>`, `/lib/ld-linux-aarch64.so.1` on arm64).
 
-Full notes: [README](https://github.com/LotusWebAgency/php#migrating-from-the-debian-based-tags).
+Full notes: [README](https://github.com/LotusWebAgency/php#moving-from-a-debian-or-alpine-base).
 
 ## Related images
 
