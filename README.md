@@ -441,7 +441,7 @@ docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --raw \
 
 **What Trivy sees.** The CI gate scans every flavor for fixable CRITICAL and HIGH findings and
 reports none. The only accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s
-semantic-release, no upstream fix; see [Accepted findings](SECURITY.md#accepted-findings)). It is
+semantic-release, HIGH, no upstream fix; see [Accepted findings](SECURITY.md#accepted-findings)). It is
 suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan without that
 file shows it. Trivy reads the apk database, so it does not see what is outside it:
 

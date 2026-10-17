@@ -29,7 +29,7 @@ Every build (pull request, push to `develop`, merge to `main`, weekly rebuild) r
 fails on any fixable CRITICAL or HIGH finding before an image can be published.
 
 The gate scans every flavor for fixable CRITICAL and HIGH findings and reports none. The only
-accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s semantic-release, no upstream
+accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s semantic-release, HIGH, no upstream
 fix; see [Accepted findings](#accepted-findings)). It is suppressed through the `.trivyignore`
 generated from `vex/php.openvex.json`, so a scan without that file shows it.
 

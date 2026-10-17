@@ -260,7 +260,7 @@ carries `org.opencontainers.image.base.name` and `org.opencontainers.image.base.
 
 Pull requests and `develop` pushes build and test without publishing to Docker Hub. A Trivy gate
 fails the build on any fixable CRITICAL or HIGH finding and reports none for any flavor. The only
-accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s semantic-release, no upstream
+accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s semantic-release, HIGH, no upstream
 fix; see [Accepted findings](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md#accepted-findings)).
 It is suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan without
 that file shows it. Trivy reads the apk database, so it cannot see libraries built from source and
