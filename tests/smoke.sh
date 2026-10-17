@@ -1213,6 +1213,12 @@ fmt=$(drun --rm "$IMAGE" php -r '$f=new NumberFormatter("de_DE",NumberFormatter:
 [ "$fmt" = "1.234,5" ] || { echo "FAIL: intl de_DE formatting wrong: expected '1.234,5', got '$fmt'"; exit 1; }
 echo "ok: intl formats de_DE correctly (1234.5 -> $fmt)"
 
+# ext/iconv converts through glibc's gconv modules. Without them only UTF-8,
+# ASCII and Latin-1 work, and iconv() to any legacy codepage returns false.
+cp=$(drun --rm "$IMAGE" php -r 'echo bin2hex((string) @iconv("UTF-8", "Windows-1251", "\xd0\x9f"));')
+[ "$cp" = "cf" ] || { echo "FAIL: iconv UTF-8 -> Windows-1251 wrong: expected 'cf', got '$cp' (gconv modules missing?)"; exit 1; }
+echo "ok: iconv converts to Windows-1251"
+
 # ext/openssl must load a config it can parse without being handed one. The legacy
 # era's vendored OpenSSL 1.1.1w reads <openssldir>/openssl.cnf, and Wolfi's own
 # /etc/ssl/openssl.cnf is OpenSSL 4 syntax: with that file in reach, key and CSR

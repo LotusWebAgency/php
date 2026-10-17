@@ -607,7 +607,8 @@ ARG PG_MAJOR=18
 # Without a UTF-8 LC_CTYPE, PHP 7.x's basename()/pathinfo() treat multibyte
 # bytes as invalid and cut them away: basename('/x/файл.txt') is '.txt', and
 # ZipArchive::extractTo() writes '日本語/.txt'. 8.0+ is locale-independent there.
-# C.UTF-8 is built into glibc, no locales package needed.
+# C.UTF-8 is built into glibc, no locales package needed. glibc-iconv carries the
+# gconv modules ext/iconv needs for any codepage beyond UTF-8, ASCII and Latin-1.
 ENV LANG=C.UTF-8
 
 COPY --from=php-build /tmp/runtime-packages.txt /tmp/runtime-packages.txt
@@ -632,7 +633,7 @@ RUN set -eux; \
     echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories; \
     apk upgrade --no-cache; \
     apk add --no-cache \
-      bash ca-certificates curl tzdata tini less nano procps \
+      bash ca-certificates curl tzdata tini less nano procps glibc-iconv \
       bzip2 zip unzip zstd xz \
       mariadb-13.1-client "postgresql-${PG_MAJOR}-client" libldap-2.7 \
       $(tr '\n' ' ' < /tmp/runtime-packages.txt); \
