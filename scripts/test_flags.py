@@ -61,6 +61,23 @@ class TestLdflags(unittest.TestCase):
         self.assertIn("-Wl,-z,noexecstack", flags)
         self.assertIn("-Wl,--as-needed", flags)
 
+    def _flags_with_linker(self, banner):
+        # A stand-in `ld` first on PATH decides what ldflags.sh sees as the linker.
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "ld"
+            fake.write_text(f"#!/bin/sh\necho '{banner}'\n")
+            fake.chmod(0o755)
+            env = dict(os.environ, PATH=f"{tmp}:{os.environ['PATH']}")
+            return run("php/ldflags.sh", env=env)
+
+    def test_packed_relocs_for_gnu_ld_and_lld(self):
+        for banner in ("GNU ld (GNU Binutils) 2.47", "LLD 19.1.7 (compatible with GNU linkers)"):
+            self.assertIn("-Wl,-z,pack-relative-relocs", self._flags_with_linker(banner).split(), banner)
+
+    def test_no_packed_relocs_for_gold(self):
+        # gold fails the link on `-z pack-relative-relocs` instead of ignoring it.
+        self.assertNotIn("pack-relative-relocs", self._flags_with_linker("GNU gold (GNU Binutils 2.47) 1.16"))
+
     def test_no_prefix_emits_no_rpath(self):
         flags = run("php/ldflags.sh")
         self.assertNotIn("rpath", flags)

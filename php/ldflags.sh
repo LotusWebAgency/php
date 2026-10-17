@@ -12,6 +12,17 @@
 set -euo pipefail
 FLAGS="-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,--as-needed -Wl,--build-id=sha1"
 
+# Packed relative relocations (DT_RELR, glibc 2.36+; the base ships 2.44) shrink every
+# PIE and shared object's relocation table and speed up its load. GNU ld and lld take
+# -z pack-relative-relocs; gold rejects it as an unknown -z option, and the gcc era's
+# php-build links with gold (the Dockerfile's ld shim), so the flag follows the linker
+# `ld` resolves to rather than the compiler.
+LD_BANNER="$(ld --version 2>/dev/null || true)"
+case "$LD_BANNER" in
+  *'GNU gold'*) ;;
+  *) FLAGS="$FLAGS -Wl,-z,pack-relative-relocs" ;;
+esac
+
 HAS_PREFIX=0
 for PREFIX in "$@"; do
   [ -n "$PREFIX" ] || continue

@@ -1068,6 +1068,21 @@ module_files=("$hard_dir/php-chmod-sanitize.so")
 module_files+=("$hard_dir"/ext/*.so $im_libs $nsnmp_libs)
 bash "$HERE/assert-elf-hardening.sh" "modules-$EXPECT" "${module_files[@]}" || exit 1
 
+# Packed relative relocations (DT_RELR): php/ldflags.sh passes -z pack-relative-relocs
+# to every linker that accepts it. gold, which links the gcc era's php, rejects the
+# flag, so php itself is only held to it on the clang era; the vendored libraries are
+# linked by lld or GNU ld in every era.
+has_relr() { readelf -dW "$1" | grep -q '(RELRSZ)'; }
+# shellcheck disable=SC2206  # both lists are deliberate word-splits
+relr_files=($im_libs $nsnmp_libs)
+case "$VM_COMPILER" in
+  clang*) relr_files+=("$hard_dir/php" "$hard_dir"/ext/*.so); [ -f "$hard_dir/php-fpm" ] && relr_files+=("$hard_dir/php-fpm") ;;
+esac
+relr_missing=""
+for f in "${relr_files[@]}"; do has_relr "$f" || relr_missing="$relr_missing $(basename "$f")"; done
+[ -z "$relr_missing" ] || { echo "FAIL: no DT_RELR (-z pack-relative-relocs did not take) in:$relr_missing"; exit 1; }
+echo "ok: ${#relr_files[@]} ELF files carry packed relative relocations (DT_RELR)"
+
 # RPATH/RUNPATH hygiene: every directory a shipped ELF names must exist in the
 # image. A leaked build-stage rpath (e.g. libtool hardcoding the GCC 16
 # toolchain's lib dir, /opt/gcc16/lib64, via the stale libstdc++.la) names a
