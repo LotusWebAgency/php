@@ -24,10 +24,6 @@ ARG CXX_COMPILER=clang++
 ARG AR_COMPILER=llvm-ar
 ARG RANLIB_COMPILER=llvm-ranlib
 ARG NM_COMPILER=llvm-nm
-# upgrade: the digest-pinned base can hold a library older than the -dev package the
-# deps stages install next (sqlite-libs 3.54.0 beside sqlite-dev 3.54.1, whose
-# libsqlite3.so names a file only 3.54.1 ships), and gold, unlike GNU ld, fails the
-# link on that dangling symlink.
 # The base's repository is apk.cgr.dev/chainguard; every package here comes from
 # the public Wolfi index instead. The Wolfi signing key is already trusted by the
 # base, so only the URL changes.
@@ -40,8 +36,15 @@ ARG NM_COMPILER=llvm-nm
 # into registers via GCC global register variables (HAVE_GCC_GLOBAL_REGS,
 # Zend/zend_execute.c), a GNU-C extension clang lacks, so COMPILER=gcc is the
 # path that keeps that dispatch.
+# upgrade: the digest-pinned base can hold a library older than the -dev package the
+# deps stages install next (sqlite-libs 3.54.0 beside sqlite-dev 3.54.1, whose
+# libsqlite3.so names a file only 3.54.1 ships), and gold, unlike GNU ld, fails the
+# link on that dangling symlink. WOLFI_INDEX_STATE re-runs this layer whenever the
+# index stamp changes instead of replaying a cached upgrade.
+ARG WOLFI_INDEX_STATE=""
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
+    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}" \
+    && echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
     && apk upgrade --cache-dir /var/cache/apk -U \
     && apk add --cache-dir /var/cache/apk \
       build-base clang-19 lld-19 llvm-19 binutils-gold ccache pkgconf ca-certificates curl \
