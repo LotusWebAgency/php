@@ -18,6 +18,10 @@ ARG CXX_COMPILER=clang++
 ARG AR_COMPILER=llvm-ar
 ARG RANLIB_COMPILER=llvm-ranlib
 ARG NM_COMPILER=llvm-nm
+# upgrade: the digest-pinned base can hold a library older than the -dev package the
+# deps stages install next (sqlite-libs 3.54.0 beside sqlite-dev 3.54.1, whose
+# libsqlite3.so names a file only 3.54.1 ships), and gold, unlike GNU ld, fails the
+# link on that dangling symlink.
 # The base's repository is apk.cgr.dev/chainguard; every package here comes from
 # the public Wolfi index instead. The Wolfi signing key is already trusted by the
 # base, so only the URL changes.
@@ -32,7 +36,8 @@ ARG NM_COMPILER=llvm-nm
 # path that keeps that dispatch.
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
-    && apk add --cache-dir /var/cache/apk -U \
+    && apk upgrade --cache-dir /var/cache/apk -U \
+    && apk add --cache-dir /var/cache/apk \
       build-base clang-19 lld-19 llvm-19 binutils-gold ccache pkgconf ca-certificates curl \
       bash coreutils findutils grep sed gawk diffutils \
       autoconf automake libtool bison re2c patch xz file \
