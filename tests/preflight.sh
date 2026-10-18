@@ -343,6 +343,7 @@ DEBIAN_ALLOW=(
   scripts/test_versions_lock.py 'debian_trixie' "asserts deps/versions.lock vendors Debian trixie's libxml2/libxslt sources"
   deps/build-deps.sh 'trixie' "comment citing trixie as the vendored libxml2/libxslt source"
   deps/versions.lock 'trixie' "comment citing trixie as the vendored libxml2/libxslt source"
+  ci/extended-run.sh 'install -y --no-install-recommends qemu-user-static' "runner-side (Ubuntu) install of the static qemu the uarch suite needs"
 )
 if [ $((${#DEBIAN_ALLOW[@]} % 3)) -ne 0 ]; then
   fail "DEBIAN_ALLOW must hold <path> <regex> <reason> triples"
