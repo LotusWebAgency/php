@@ -82,7 +82,13 @@ esac
 echo "ok: Zend module API $api_ext on all three"
 
 # ------------------------------------------------- multi-stage build of the .so
-cleanup() { docker rmi -f "$DERIVED_REPO:$VERSION-fpm" "$DERIVED_REPO:$VERSION-cli" >/dev/null 2>&1 || true; }
+hello_dir=""
+hello_cid=""
+cleanup() {
+  [ -z "$hello_cid" ] || docker rm -f "$hello_cid" >/dev/null 2>&1 || true
+  [ -z "$hello_dir" ] || rm -rf "$hello_dir"
+  docker rmi -f "$DERIVED_REPO:$VERSION-fpm" "$DERIVED_REPO:$VERSION-cli" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
 
 # --builder default: the docker driver, which resolves FROM against the local
@@ -98,6 +104,21 @@ for flavor in fpm cli; do
     || fail "multi-stage build of the ext-hello fixture failed for $flavor (re-run without -q: docker buildx build --builder default --network=none -f $FIXTURE/Dockerfile --target $flavor --build-arg PHP_VERSION=$VERSION --build-arg PHP_IMAGE=$PHP_IMAGE $FIXTURE)"
 done
 echo "ok: ext-hello compiled in ext-builder and COPYed into fpm and cli of php $VERSION"
+
+# The module an extension author builds with the ext-builder must carry the same
+# hardening as the shared extensions the image ships: PIE-style link flags (full
+# RELRO, BIND_NOW, non-executable stack) and the code-level properties. Measured
+# on the .so that landed in the derived image, not on the flags that were meant
+# to produce it. Needs readelf and objdump (or llvm-objdump) on the host, as
+# smoke.sh does.
+hello_dir="$(mktemp -d)"
+hello_cid="$(docker create --pull never "$DERIVED_REPO:$VERSION-fpm")"
+docker cp "$hello_cid:$pc_dir/hello.so" "$hello_dir/hello.so" >/dev/null \
+  || fail "could not copy $pc_dir/hello.so out of the derived fpm image"
+bash "$HERE/assert-elf-hardening.sh" --code "ext-builder-hello-$VERSION" "$hello_dir/hello.so" \
+  || fail "the hello.so built by ext-builder is not hardened like the shipped extensions"
+docker rm -f "$hello_cid" >/dev/null 2>&1 || true
+hello_cid=""
 
 # ------------------------------------------------------ load and call, per flavor
 for flavor in fpm cli; do
