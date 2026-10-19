@@ -379,12 +379,14 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
   static libheif, libde265 and dav1d, which Trivy cannot see either.
 - **PGO on real applications.** Each tier replays PrestaShop, WordPress, Laravel and Symfony (plus
   Drupal on 8.4 and 8.5) through an instrumented `php-fpm` (one static pool per app, requests sent
-  over FastCGI with `php-fcgi`, pool stopped with SIGQUIT so every worker writes its profile) under
-  the `opcache.ini` the image ships, and an instrumented CLI runs a CLI workload alongside. The
-  release build compiles against the merged profile. A build fails if a request does not answer
-  200 with the expected content, if `php-fpm` writes no profile data, or if the profile has no
-  counts for `php-fpm`'s own request loop (clang) or no usable profile for the engine, `main`,
-  `sapi/fpm` and opcache sources (gcc). A version belongs to the tier with the greatest floor at or
+  over FastCGI with `php-fcgi`, pool stopped with SIGQUIT and a `process_control_timeout` long
+  enough for every worker to leave through `exit()` and write its profile) under the `opcache.ini`
+  the image ships, and an instrumented CLI runs a CLI workload alongside. The release build compiles
+  against the merged profile. A build fails if a request does not answer 200 with the expected
+  content, if a worker does not exit cleanly, if a pool's profile does not hold every worker's
+  requests (clang: `fcgi_accept_request` ran at least once per request; gcc: one profile run per
+  `php-fpm` process), or if pass 2 finds no usable profile for an engine, `main`, `sapi/fpm` or
+  opcache object linked into `php`, `php-fpm` or `opcache.so`. A version belongs to the tier with the greatest floor at or
   below it. Pins: `php/pgo/corpus.lock`, `php/pgo/corpus/tiers`.
 
   | Tier floor | Serves | PrestaShop | Laravel skeleton | Symfony | WordPress | Drupal |

@@ -20,9 +20,23 @@
 # the images run is the FastCGI parser, the request loop and the process manager,
 # and those are what the profile has to describe. One pool per app (a static pool
 # of PGO_FPM_WORKERS workers on a unix socket) is fed through php-fcgi, the
-# FastCGI client the images ship for their healthcheck. The pool is stopped with
-# SIGQUIT, which makes the master and every worker leave through exit(), the path
-# where the profiling runtime writes its data; SIGTERM does not reliably.
+# FastCGI client the images ship for their healthcheck.
+#
+# The profiling runtimes write a process's counters at exit() (an atexit handler
+# for clang, a destructor for gcc), so every worker has to leave through exit().
+# SIGQUIT alone does not get there: the master forwards it to the workers and arms
+# a process_control_timeout timer, and when that timer fires it sends SIGTERM, then
+# SIGKILL (fpm_pctl_action_next in sapi/fpm/fpm/fpm_process_ctl.c). The default
+# timeout is 0, so SIGTERM follows at once, and a worker's SIGTERM is SIG_DFL
+# (fpm_signals_init_child), which kills it before its counters are written. Each
+# pool therefore sets process_control_timeout, and its log is at debug level,
+# because fpm logs a child's exit during shutdown at debug only
+# (fpm_children_bury); fpm_stop requires every worker to have exited with code 0.
+#
+# How far that flush got is checked per pool on the profile itself: the clang
+# profile's fcgi_accept_request (a worker-only function) must have run once per
+# request, and the run count gcc keeps in fpm_main.gcda must have grown by one per
+# worker plus the master.
 #
 # Nothing here may fail quietly: every request must answer 200, clear the byte
 # floor and carry the expected substring, or the build fails. A profile trained on
@@ -68,7 +82,9 @@ OPCACHE_SRC="${PGO_OPCACHE_INI:-/build/conf/opcache.ini}"
 FPM_WORKERS="${PGO_FPM_WORKERS:-4}"
 # The FastCGI client; the Dockerfile copies rootfs/usr/local/bin/php-fcgi here.
 FCGI_CLIENT="${PGO_FCGI_CLIENT:-/build/bin/php-fcgi}"
-# How long a SIGQUIT'd master gets to leave before it is declared stuck.
+# How long a SIGQUIT'd pool's workers get to leave through exit() (the pool's
+# process_control_timeout) before the master escalates to SIGTERM. The watchdog
+# that declares the master itself stuck waits FPM_STOP_SECONDS + 30.
 FPM_STOP_SECONDS="${PGO_FPM_STOP_SECONDS:-120}"
 # Optional key=value record for php/build.sh to fold into the image's build record.
 SUMMARY="${PGO_TRAIN_SUMMARY:-}"
@@ -196,7 +212,9 @@ mkdir -p "$PROFDIR"
 # nothing before the first process exits, hence the ${n:-0}.
 profraw_count() { local n; n="$(
   if [ "$COMPILER" = gcc ]; then
-    find "$PROFDIR" -name '*.gcda' -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1
+    # sed reads to the end where head would exit early and SIGPIPE sort, which
+    # pipefail turns into a failure.
+    find "$PROFDIR" -name '*.gcda' -printf '%T@\n' 2>/dev/null | sort -rn | sed -n '1{s/\..*//;p;}'
   else
     find "$PROFDIR" -maxdepth 1 -name '*.profraw' | wc -l
   fi
@@ -282,6 +300,9 @@ fcgi_request() {
   REMOTE_ADDR=127.0.0.1 REMOTE_PORT=40000 HTTP_USER_AGENT=pgo-train HTTP_ACCEPT='*/*' \
   GCOV_PREFIX="${SCRATCH}/client-gcov" LLVM_PROFILE_FILE="${SCRATCH}/client.profraw" \
     "$PHP_BIN" -n "$FCGI_CLIENT" -t 300 -i "$FPM_SOCK" >"$5" 2>"${SCRATCH}/client.err" || rc=$?
+  # Every answered request went through a worker's fcgi_accept_request; the
+  # per-pool profile check holds the profile to this count.
+  [ "$rc" -ne 0 ] || POOL_REQUESTS=$((POOL_REQUESTS + 1))
   return "$rc"
 }
 
@@ -360,13 +381,15 @@ fpm_start() {
   # No user/group: the master runs as root in the build and -R permits it, which
   # leaves the workers root too, so they can write the profile directory. clear_env
   # off lets workers see CORPUS_WP_HOST. decorate_workers_output is 7.3+ and would
-  # be an unknown directive on 7.0-7.2, so it is left out.
+  # be an unknown directive on 7.0-7.2, so it is left out. process_control_timeout
+  # and log_level = debug: see the header (both exist on every version trained).
   cat >"$conf" <<EOF
 [global]
 pid = ${SCRATCH}/fpm-${app}.pid
 error_log = ${FPM_LOG}
-log_level = notice
+log_level = debug
 daemonize = no
+process_control_timeout = ${FPM_STOP_SECONDS}s
 
 [www]
 listen = ${FPM_SOCK}
@@ -386,6 +409,7 @@ EOF
     cd "${CORPUS}/${app}" && exec "$FPM_BIN" -R -F -y "$conf" "${php_args[@]}" -d max_execution_time=300
   ) >"${FPM_LOG}.out" 2>&1 &
   FPM_PID=$!
+  POOL_REQUESTS=0
 
   up=no
   for _ in $(seq 1 120); do
@@ -416,17 +440,18 @@ EOF
   echo "ok: $app pool up (php-fpm master $FPM_PID, $FPM_CHILDREN workers, opcache enabled)"
 }
 
-# fpm_stop: graceful shutdown. SIGQUIT makes the master stop accepting, wait for
-# every worker's request to finish and let each leave through exit(), where the
-# profiling runtime writes. A master that does not leave is killed by a watchdog
-# and reported, never waited on forever.
+# fpm_stop: graceful shutdown. SIGQUIT makes the master stop accepting and
+# forward it to the workers, which finish their request and leave through exit(),
+# where the profiling runtime writes; the pool's process_control_timeout keeps the
+# master from escalating to SIGTERM meanwhile (see the header). A master that does
+# not leave is killed by a watchdog and reported, never waited on forever.
 fpm_stop() {
-  local pid="$FPM_PID" watchdog rc workers child
+  local pid="$FPM_PID" watchdog rc workers child clean
   workers="$(child_pids "$pid")"
   kill -QUIT "$pid" 2>/dev/null \
     || { show_pool_logs; fail "$app: the php-fpm master is already gone before the graceful stop -- it died while serving"; }
   rm -f "${SCRATCH}/fpm-stop-timeout"
-  ( sleep "$FPM_STOP_SECONDS"; touch "${SCRATCH}/fpm-stop-timeout"; kill -KILL "$pid" 2>/dev/null || true ) >/dev/null 2>&1 </dev/null &
+  ( sleep "$((FPM_STOP_SECONDS + 30))"; touch "${SCRATCH}/fpm-stop-timeout"; kill -KILL "$pid" 2>/dev/null || true ) >/dev/null 2>&1 </dev/null &
   watchdog=$!
   if wait "$pid"; then rc=0; else rc=$?; fi
   for child in $(child_pids "$watchdog"); do kill "$child" 2>/dev/null || true; done
@@ -437,7 +462,7 @@ fpm_stop() {
     for child in $workers; do kill -KILL "$child" 2>/dev/null || true; done
     show_pool_logs
     FPM_PID=""
-    fail "$app: the php-fpm master did not stop within ${FPM_STOP_SECONDS}s of SIGQUIT -- its workers' counters were never flushed"
+    fail "$app: the php-fpm master did not stop within $((FPM_STOP_SECONDS + 30))s of SIGQUIT -- its workers' counters were never flushed"
   fi
   FPM_PID=""
   if [ "$rc" -ne 0 ]; then
@@ -448,6 +473,62 @@ fpm_stop() {
     grep -E 'exited on signal|exited with code [1-9]|SIGKILL' "$FPM_LOG" >&2
     fail "$app: a php-fpm worker did not exit normally -- it never flushed its profile counters"
   fi
+  # Positive control for the check above: at debug level every worker's exit is
+  # logged, so an empty log, or a log level that hid the exits, cannot pass by
+  # absence.
+  clean="$(grep -c 'exited with code 0' "$FPM_LOG" || true)"
+  [ "$clean" -eq "$FPM_WORKERS" ] \
+    || { show_pool_logs; fail "$app: the pool log shows $clean worker(s) exiting with code 0, expected $FPM_WORKERS -- the workers' counters were not all flushed"; }
+}
+
+# fpm_pool_flushed <app> <gcc-runs-before>: the profile itself shows every worker's
+# counters, not just the master's.
+#   clang: the pool's workers merge into the one fpm-<app>-*.profraw (%p is
+#          resolved once, in the master, and inherited across fork(); %m makes
+#          each writer merge under a lock instead of truncating). fcgi_accept_request
+#          runs only in workers, once per accepted request, so its busiest block
+#          must have run at least once per answered request.
+#   gcc:   libgcov counts in each .gcda's object summary how many processes merged
+#          into it. fpm_main.c is linked only into php-fpm, so this pool must have
+#          added exactly one run per worker plus the master.
+fpm_pool_flushed() {
+  local app="$1" runs_before="$2" runs part count
+  if [ "$COMPILER" = gcc ]; then
+    runs="$(fpm_main_gcda_runs)"
+    [ "$((runs - runs_before))" -eq "$((FPM_WORKERS + 1))" ] \
+      || fail "$app: fpm_main.gcda gained $((runs - runs_before)) run(s), expected $((FPM_WORKERS + 1)) (master + $FPM_WORKERS workers) -- not every php-fpm process flushed its counters"
+    echo "ok: $app: $((runs - runs_before)) php-fpm processes merged into the gcov counters (master + $FPM_WORKERS workers)"
+  else
+    part="${SCRATCH}/fpm-${app}.profdata"
+    llvm-profdata merge -output="$part" "$PROFDIR"/fpm-"${app}"-*.profraw \
+      || fail "$app: llvm-profdata could not merge the pool's profile"
+    count="$(max_block_count fcgi_accept_request "$part")"
+    rm -f "$part"
+    [ "$count" -ge "$POOL_REQUESTS" ] \
+      || fail "$app: fcgi_accept_request ran at most $count times in the pool's profile for $POOL_REQUESTS answered requests -- the workers' counters were not all flushed"
+    echo "ok: $app: fcgi_accept_request ran up to $count times for $POOL_REQUESTS answered requests"
+  fi
+}
+
+# fpm_main_gcda_runs: the run count in sapi/fpm/fpm/fpm_main.c's .gcda, 0 before
+# any php-fpm has exited.
+fpm_main_gcda_runs() {
+  local f n
+  f="$(find "$PROFDIR" -name '*#sapi#fpm#fpm#fpm_main.gcda')"
+  [ -n "$f" ] || { echo 0; return 0; }
+  [ "$(printf '%s\n' "$f" | wc -l)" -eq 1 ] || fail "more than one fpm_main.gcda under $PROFDIR: $f"
+  n="$(gcov-dump "$f" | sed -n 's/.*OBJECT_SUMMARY runs=\([0-9][0-9]*\).*/\1/p')"
+  [ -n "$n" ] || fail "gcov-dump printed no OBJECT_SUMMARY run count for $f"
+  echo "$n"
+}
+
+# max_block_count <function> <profdata>: the largest block counter of the functions
+# whose name contains <function>. IR-level profiles carry no "Function count"
+# line (llvm-profdata prints it for front-end instrumentation only), so the block
+# counters are what says whether, and how often, the function ran.
+max_block_count() {
+  llvm-profdata show --counts --function="$1" "$2" \
+    | awk '/Block counts:/ { gsub(/[][,]/, " "); for (i = 3; i <= NF; i++) if ($i + 0 > max) max = $i + 0 } END { print max + 0 }'
 }
 
 # --- HTTP through php-fpm, one app at a time --------------------------------
@@ -516,6 +597,8 @@ while IFS=$'\t' read -r app docroot version paths; do
   # touch has one-second resolution on some filesystems: wait it out so a file
   # written by this pool is strictly newer than the marker.
   sleep 1.1
+  fpm_runs_before=0
+  [ "$COMPILER" != gcc ] || fpm_runs_before="$(fpm_main_gcda_runs)"
   fpm_start "$app"
 
   hit() {  # hit <path> <assert-body: yes|no> <floor> <expect>
@@ -559,6 +642,7 @@ while IFS=$'\t' read -r app docroot version paths; do
   echo "  $app ${control_path} -> $FCGI_CODE (negative control)"
 
   fpm_stop
+  fpm_pool_flushed "$app" "$fpm_runs_before"
 
   now="$(profraw_count)"
   [ "$now" -gt "$before" ] \
@@ -569,10 +653,8 @@ while IFS=$'\t' read -r app docroot version paths; do
   if [ "$COMPILER" = gcc ]; then
     echo "ok: $app updated the gcov counters ($fpm_files sapi/fpm .gcda file(s) rewritten by the pool)"
   else
-    # Workers inherit the master's resolved file name across fork(), so with %m
-    # they merge into the master's file: the count says "something was written",
-    # not "one file per worker". The function-level check in php/build.sh proves
-    # the workers' request path is in the merged profile.
+    # Workers merge into the master's file (see fpm_pool_flushed): the count says
+    # "something was written", not "one file per worker".
     echo "ok: $app contributed $fpm_files php-fpm profile file(s) ($(( now - before )) new in total)"
   fi
 
