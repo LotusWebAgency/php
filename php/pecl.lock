@@ -16,13 +16,14 @@
 # Move to 3.2.17 stable once PECL publishes it.
 igbinary      3.2.17RC1 91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc  7.0.0    -
 redis         6.3.0     0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5  7.4.0    -
-# phpredis 6.x declares a PHP 7.4.0 floor, so 7.0-7.3 pin the last 5.x line
-# instead (same tarball for all four, hence the identical sha256 -- the rows
-# are per-version because that is how fetch-pecl.sh keys an override).
+# phpredis 6.1+ declares a PHP 7.4.0 floor and 6.0.x a 7.2.0 floor. 7.2 and 7.3
+# therefore pin 6.0.2, the last release that declares support for them, and
+# 7.0-7.1 pin the last 5.x line (rows are per-version because that is how
+# fetch-pecl.sh keys an override).
 redis@7.0     5.3.7     b958166ccda4f40bd17c6998f9e2239021ae644467cd8ad5c15def420aad65b0  7.0.0    -
 redis@7.1     5.3.7     b958166ccda4f40bd17c6998f9e2239021ae644467cd8ad5c15def420aad65b0  7.0.0    -
-redis@7.2     5.3.7     b958166ccda4f40bd17c6998f9e2239021ae644467cd8ad5c15def420aad65b0  7.0.0    -
-redis@7.3     5.3.7     b958166ccda4f40bd17c6998f9e2239021ae644467cd8ad5c15def420aad65b0  7.0.0    -
+redis@7.2     6.0.2     01aeccb0e14f897fe56f0509be6e6991ff0ad459f9d34e95e4556d02699b9a03  7.2.0    -
+redis@7.3     6.0.2     01aeccb0e14f897fe56f0509be6e6991ff0ad459f9d34e95e4556d02699b9a03  7.2.0    -
 memcached     3.4.0     c163434eb0da97c8f45c7ad41d979d381f8b81c49402b1b90b063987fb37972e  7.0.0    -
 apcu          5.1.28    ca9c1820810a168786f8048a4c3f8c9e3fd941407ad1553259fb2e30b5f057bf  7.0.0    -
 zstd          0.18.0    223d0f77eb5a5e73cf5e7a0652dd8fde7ffdcc843e7f30eeb3998283dec847b9  7.0      -
@@ -49,7 +50,7 @@ mcrypt        1.0.9     2a9ef0817d3bf677f6d7baf8e325629a2758974735d8abad65663847
 # support for a PHP this project still builds. Same mechanism as redis above,
 # honored by build-shared-ext.sh too. Every version below is the newest release
 # whose own package.xml declares support for that PHP.
-xdebug@7.0    2.8.1     838be3974e2555bbbd796eb57c34840659815f23079417b5042e8b534fe61520  7.0.0    -
+xdebug@7.0    2.9.0     8dd1f867805d4ae78ccefc1825da1180eb82efbe6d6575eef2cc3dd1aeca5943  7.0.0    -
 xdebug@7.1    2.9.8     f555b6cc58d96c9965af942d22e0f1818b7a477a410c76b1ab0eebe85a762f8a  7.1.0    7.4.99
 xdebug@7.2    3.1.6     554eca0b4d5b7b93cb2258fab0b0bd84cc8721e74322a2255c14e137cbcad5d2  7.2.0    8.1.99
 xdebug@7.3    3.1.6     554eca0b4d5b7b93cb2258fab0b0bd84cc8721e74322a2255c14e137cbcad5d2  7.2.0    8.1.99
@@ -72,7 +73,7 @@ ssh2@7.4      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95
 # (verified against https://pecl.php.net/rest/p/packages.xml and a 404 on
 # allreleases.xml). The real extension is kjdev/php-ext-lz4, the same class of
 # problem as snuffleupagus below, so ext.json lists it as source=github.
-lz4           0.7.1     e5913a346c65ed5d3d487398332a66629db2c863e02dfe0e949f653471853fcc  -        -
+lz4           0.8.0     1be0116c3bd3160c3eeb6f5869407f1a8d67f30ad672e71c8d10756fd30edab5  -        -
 # snuffleupagus v0.14.0: built and smoke-tested on every PHP from 7.2 to 8.5.
 # Bumping it means re-syncing conf/snuffleupagus/*.rules against the new tag's
 # config/default.rules first (see the header of default.rules); the registry
