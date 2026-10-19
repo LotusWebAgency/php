@@ -533,6 +533,52 @@ assert_profile_reached_the_link() {
   done
 }
 
+# Which pass-2 diagnostics fail the build.
+#
+# Pass 2 compiles every object against the pass-1 profile, and a profile that is
+# missing or no longer matches the source for the code every request runs through
+# is the failure this build exists to rule out: the binary still links, still
+# passes its tests and is quietly not optimized. Core code is php-fpm's own
+# (sapi/fpm), the engine (Zend/), the runtime (main/) and opcache (ext/opcache).
+# Everything else (PECL-style extensions no corpus request reaches, TSRM, host
+# build tools) may lack a profile; that stays a warning, counted below.
+#
+# gcc: a TU linked into php, php-fpm or opcache.so gets a .gcda at exit even with
+# zero counts, so "profile count data file not found" on a core object means it
+# was never linked into a binary the training ran. Objects gcc built for the host
+# (the JIT's minilua/dynasm/gen_* generators) never run under training and are the
+# only exceptions. A source/profile mismatch is -Wcoverage-mismatch, an error by
+# default and no longer silenced (gcc has no LTO here that could reorder passes).
+# clang: nothing is emitted for an unprofiled function, so the checkable symptom is
+# the ThinLTO backend's hash-mismatch / out-of-date diagnostic for a core file.
+PGO_GCC_CORE_MISSING_RE="[/#](sapi[/#]fpm|Zend|main|ext[/#]opcache)[/#][^' ]*\.gcda'"
+PGO_GCC_HOST_TOOL_RE="[/#](minilua|dynasm[a-z0-9_]*|gen_[a-z0-9_]+)\.gcda'"
+PGO_CLANG_CORE_MISMATCH_RE="(^|[ :'/])(sapi/fpm|Zend|main|ext/opcache)/"
+
+# core_profile_problems <gcc|clang>: pass-2 compile log on stdin, offending lines on stdout
+core_profile_problems() {
+  case "$1" in
+    gcc)   grep -F 'profile count data file not found' | grep -E -- "$PGO_GCC_CORE_MISSING_RE" | grep -vE -- "$PGO_GCC_HOST_TOOL_RE" || true ;;
+    clang) grep -E 'hash mismatch|profile-instr-out-of-date|profile-instr-missing|mismatched data' | grep -E -- "$PGO_CLANG_CORE_MISMATCH_RE" || true ;;
+  esac
+}
+
+# Positive and negative controls for the filter above: a regex that matched nothing
+# would make an empty result mean "all good" for every build.
+assert_core_profile_filter_discriminates() {
+  local missing_core missing_other missing_tool mismatch_core mismatch_other
+  missing_core="warning: '/p/#build#php-8.4.1#sapi#fpm#fpm#fpm_main.gcda' profile count data file not found [-Wmissing-profile]"
+  missing_other="warning: '/p/#build#php-8.4.1#ext#standard#array.gcda' profile count data file not found [-Wmissing-profile]"
+  missing_tool="warning: '/p/#build#php-8.4.1#ext#opcache#jit#ir#dynasm#minilua.gcda' profile count data file not found [-Wmissing-profile]"
+  mismatch_core="warning: Zend/zend_execute.c: function control flow change detected (hash mismatch) execute_ex [-Wbackend-plugin]"
+  mismatch_other="warning: ext/standard/array.c: function control flow change detected (hash mismatch) php_array_data_compare [-Wbackend-plugin]"
+  [ "$(printf '%s\n' "$missing_core" | core_profile_problems gcc | wc -l)" -eq 1 ] \
+    && [ -z "$(printf '%s\n%s\n' "$missing_other" "$missing_tool" | core_profile_problems gcc)" ] \
+    && [ "$(printf '%s\n' "$mismatch_core" | core_profile_problems clang | wc -l)" -eq 1 ] \
+    && [ -z "$(printf '%s\n' "$mismatch_other" | core_profile_problems clang)" ] \
+    || { echo "FATAL: the core-profile filter does not tell core objects from the rest -- an empty result from it would prove nothing" >&2; exit 1; }
+}
+
 # assert_isa_gate <v3|baseline> <binary> [<binary>...]
 #
 # On amd64 a v3 image must carry php/isa-gate-x86-64-v3.c in every SAPI
@@ -1072,6 +1118,15 @@ if [ "$PGO" = true ]; then
     [ -n "$max_count" ] && [ "$max_count" -gt "${requests:?train summary has no request count}" ] 2>/dev/null \
       || { echo "FATAL: the profile's busiest function ran $max_count times for $requests requests -- the workload was not recorded" >&2; exit 1; }
     echo "ok: profile covers $total_functions functions, busiest ran $max_count times over $requests requests"
+    # php-fpm's own request loop must be in the merged profile, or the fpm labels
+    # merged without reaching it. fcgi_accept_request runs once per request and
+    # fpm_event_loop once per master; --function matches by substring.
+    for fpm_function in fcgi_accept_request fpm_event_loop; do
+      fpm_function_count="$(llvm-profdata show --function="$fpm_function" "$PROFDATA" | awk '/Function count:/ {sum += $3} END {print sum + 0}')"
+      [ "$fpm_function_count" -gt 0 ] \
+        || { echo "FATAL: the merged profile has no counts for $fpm_function -- php-fpm's own code was not trained" >&2; exit 1; }
+      echo "ok: merged profile counts $fpm_function ${fpm_function_count} times"
+    done
     PROF_FLAGS_USED="-fprofile-use=$PROFDATA"
     profdata_sha256="$(sha256sum "$PROFDATA" | awk '{print $1}')"
     profile_merge="balanced-by-total-count"
@@ -1092,11 +1147,12 @@ if [ "$PGO" = true ]; then
     # -fprofile-partial-training: most PECL extensions' code is not on any
     # corpus request path, and without this flag gcc treats an unexercised
     # function as *guaranteed cold* rather than merely unmeasured, which can
-    # demote code the training workload simply never reached. -Wno-coverage-mismatch
-    # tolerates a source line-map drift between pass 1 and pass 2 objects (LTO
-    # can reorder inlining decisions between passes); both are gcc >=12 flags,
-    # present in gcc 16.
-    PROF_FLAGS_USED="-fprofile-use=$PROFRAW_DIR -fprofile-partial-training -Wno-coverage-mismatch -Wno-missing-profile"
+    # demote code the training workload simply never reached.
+    #
+    # No -Wno-coverage-mismatch and no -Wno-missing-profile: a stale profile is an
+    # error, and a missing one is judged per object by core_profile_problems after
+    # pass 2 (core objects fail the build, the rest stay warnings).
+    PROF_FLAGS_USED="-fprofile-use=$PROFRAW_DIR -fprofile-partial-training"
     profdata_sha256="n/a-gcc"
     profile_merge="flat-accumulated-in-place"
     ;;
@@ -1104,7 +1160,16 @@ if [ "$PGO" = true ]; then
 
   echo "=== pass 2: profile-guided$([ "${COMPILER:-clang}" = gcc ] && echo '' || echo ' + lto')"
   make clean
-  php_make PROF_FLAGS="$PROF_FLAGS_USED"
+  assert_core_profile_filter_discriminates
+  PASS2_LOG=/tmp/pgo-pass2.log
+  php_make PROF_FLAGS="$PROF_FLAGS_USED" 2>&1 | tee "$PASS2_LOG"
+  core_problems="$(core_profile_problems "${COMPILER:-clang}" <"$PASS2_LOG")"
+  if [ -n "$core_problems" ]; then
+    printf '%s\n' "$core_problems" | head -20 >&2
+    echo "FATAL: pass 2 found no usable profile for $(printf '%s\n' "$core_problems" | wc -l) core object(s) (sapi/fpm, Zend, main, ext/opcache) -- the engine would ship unoptimized under a PGO label" >&2
+    exit 1
+  fi
+  echo "ok: pass 2 found a matching profile for every core object ($(grep -cF 'profile count data file not found' "$PASS2_LOG" || true) non-core warning(s))"
 
   record=(
     "prof_flags=$PROF_FLAGS_USED"
