@@ -471,8 +471,10 @@ def uploads(c):
     j = r.json()
     s.ok("jpeg in, jpeg recognized", j["original"]["mime"] == "image/jpeg" and j["original"]["width"] == 32, j["original"])
     s.ok("imagick thumbnail of a small jpeg", j["imagick_jpeg"]["width"] == 24, j["imagick_jpeg"])
+    # No "<" in big.png: random bytes would hold "<?=" now and then, and the hardened
+    # config's sp-upload-check would drop the upload before Laravel's size rule runs.
     for name, body, mime in (("notes.png", b"not an image at all " * 50, "image/png"), ("doc.pdf", b"%PDF-1.4\n%%EOF\n", "application/pdf"),
-                              ("big.png", b"\x89PNG\r\n\x1a\n" + os.urandom(5 * 1024 * 1024), "image/png")):
+                              ("big.png", b"\x89PNG\r\n\x1a\n" + os.urandom(5 * 1024 * 1024).replace(b"<", b"\x00"), "image/png")):
         r = c.request("POST", "/dashboard/upload", data={"_token": tok}, files={"image": (name, body, mime)}, headers={"Accept": "application/json"}, follow=False)
         s.ok(f"upload of {name} is rejected by validation", r.status == 422, (r.status, r.text[:200]))
     r = c.request("POST", "/dashboard/upload", data={"_token": tok}, headers={"Accept": "application/json"}, follow=False)
