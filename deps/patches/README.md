@@ -63,7 +63,18 @@ reconsidered for the matrix.
 its `url` pins. `php/build-shared-ext.sh` applies them with the same `patch --fuzz=0` command at the
 tarball root, before descending into `subdir`, and prints the count. Keying by tag means a version
 bump in `ext.json` finds no directory and applies nothing, so the patch has to be re-reviewed against
-the new release to come back. No extension is patched at the moment.
+the new release to come back.
+
+| Patch | Extension | Problem |
+|---|---|---|
+| `ext-snuffleupagus-v0.14.0/010-keep-fortify-source-3` | snuffleupagus v0.14.0 | `src/config.m4` appends `-D_FORTIFY_SOURCE=2` to `CFLAGS` after the build's `-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3` (`php/cflags.sh`). The last definition wins, so the module was compiled at fortify level 2. The patch drops upstream's define. Its other flags (`-fstack-protector-strong`, `-Wl,-z,relro,-z,now`, warnings) match ours or weaken nothing; `-O0` is debug-only. Remove it once a release stops forcing the level. |
+
+No other registry extension (PECL or GitHub) or vendored dependency overrides a hardening flag.
+Their `-O0` and `-fno-omit-frame-pointer` blocks sit behind debug, developer or coverage switches
+that the build never passes. Two build systems need a nudge instead of a patch: ImageMagick's
+`AX_GCC_ARCHFLAG` would append `-mtune=<build host CPU>` after ours, so `deps/build-imagemagick.sh`
+passes `--with-gcc-arch=no`; OpenSSL 1.1.1 and curl put their own `-O3`/`-O2` before the user
+`CFLAGS` or step aside for it, so our `-O2` stands.
 
 ### Byte-identical copies
 
