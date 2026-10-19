@@ -1189,8 +1189,9 @@ if [ "$PGO" = true ]; then
     record_linked_gcda "$PGO_LINKED_GCDA" "${linked_bins[@]}"
     # Positive control: the request path of php-fpm (its main loop and the
     # FastCGI parser) must be among the names, or the list measured nothing.
-    for want in '#sapi#fpm#fpm#fpm_main.gcda' '#main#fastcgi.gcda' '#Zend#zend_execute.gcda'; do
-      grep -qF -- "$want" "$PGO_LINKED_GCDA" \
+    # libtool links the PIC object from .libs/ on 7.x, so either path counts.
+    for want in '#sapi#fpm#fpm#(\.libs#)?fpm_main\.gcda' '#main#(\.libs#)?fastcgi\.gcda' '#Zend#(\.libs#)?zend_execute\.gcda'; do
+      grep -qE -- "$want" "$PGO_LINKED_GCDA" \
         || { echo "FATAL: no *${want} among the .gcda paths named by ${linked_bins[*]} -- the linked-object list is wrong" >&2; exit 1; }
     done
     # Every linked core object must have been written: the processes that ran it

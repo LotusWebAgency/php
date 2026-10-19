@@ -496,7 +496,8 @@ fpm_pool_flushed() {
   if [ "$COMPILER" = gcc ]; then
     runs="$(fpm_main_gcda_runs)"
     [ "$((runs - runs_before))" -eq "$((FPM_WORKERS + 1))" ] \
-      || fail "$app: fpm_main.gcda gained $((runs - runs_before)) run(s), expected $((FPM_WORKERS + 1)) (master + $FPM_WORKERS workers) -- not every php-fpm process flushed its counters"
+      || { show_pool_logs; find "$PROFDIR" -name '*fpm_main*' >&2
+           fail "$app: fpm_main.gcda gained $((runs - runs_before)) run(s), expected $((FPM_WORKERS + 1)) (master + $FPM_WORKERS workers) -- not every php-fpm process flushed its counters"; }
     echo "ok: $app: $((runs - runs_before)) php-fpm processes merged into the gcov counters (master + $FPM_WORKERS workers)"
   else
     part="${SCRATCH}/fpm-${app}.profdata"
@@ -511,10 +512,11 @@ fpm_pool_flushed() {
 }
 
 # fpm_main_gcda_runs: the run count in sapi/fpm/fpm/fpm_main.c's .gcda, 0 before
-# any php-fpm has exited.
+# any php-fpm has exited. On 7.x libtool links the PIC object from .libs/, so the
+# .gcda is named after that path.
 fpm_main_gcda_runs() {
   local f n
-  f="$(find "$PROFDIR" -name '*#sapi#fpm#fpm#fpm_main.gcda')"
+  f="$(find "$PROFDIR" \( -name '*#sapi#fpm#fpm#fpm_main.gcda' -o -name '*#sapi#fpm#fpm#.libs#fpm_main.gcda' \))"
   [ -n "$f" ] || { echo 0; return 0; }
   [ "$(printf '%s\n' "$f" | wc -l)" -eq 1 ] || fail "more than one fpm_main.gcda under $PROFDIR: $f"
   n="$(gcov-dump "$f" | sed -n 's/.*OBJECT_SUMMARY runs=\([0-9][0-9]*\).*/\1/p')"
