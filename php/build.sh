@@ -986,7 +986,7 @@ if [ "$PGO" = true ]; then
   echo "ok: mariadb-13.1 installed for training"
 
   echo "=== training"
-  PGO_TRAIN_SUMMARY="$TRAIN_SUMMARY" \
+  PHP_VERSION="$PHP_VERSION" COMPILER="${COMPILER:-clang}" PGO_TRAIN_SUMMARY="$TRAIN_SUMMARY" \
     bash "$HERE/pgo/train.sh" "$PWD/sapi/cli/php" "$PGO_CORPUS" "$PGO_CORPUS_SRC" "$PROFRAW_DIR"
   [ -f "$TRAIN_SUMMARY" ] || { echo "FATAL: train.sh wrote no summary" >&2; exit 1; }
   # Parsed, not sourced: `apps=laravel=12.66.0 symfony=7.4.16 ...` sourced by
@@ -998,6 +998,11 @@ if [ "$PGO" = true ]; then
   profraw_files="$(summary_field profraw_files)"
   iterations_per_path="$(summary_field iterations_per_path)"
   apps="$(summary_field apps)"
+  fpm_workers="$(summary_field fpm_workers)"
+  fpm_profile_files="$(summary_field fpm_profile_files)"
+  training_labels="$(summary_field labels)"
+  [ -n "$fpm_profile_files" ] && [ "$fpm_profile_files" -gt 0 ] 2>/dev/null \
+    || { echo "FATAL: the training summary reports no php-fpm profile files ('$fpm_profile_files') -- php-fpm was not trained" >&2; exit 1; }
 
   # A flat merge is the wrong merge. llvm-profdata sums counters, so a
   # workload's share of the profile is its raw instruction count, and those
@@ -1110,6 +1115,9 @@ if [ "$PGO" = true ]; then
     "training_profraw_files=${profraw_files:-}"
     "training_iterations_per_path=${iterations_per_path:-}"
     "training_corpus=${apps:-}"
+    "training_labels=${training_labels:-}"
+    "training_fpm_workers=${fpm_workers:-}"
+    "training_fpm_profile_files=${fpm_profile_files:-}"
     "profile_merge=$profile_merge"
     "profile_weights=${weights}"
   )

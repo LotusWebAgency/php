@@ -169,7 +169,18 @@ esac
 
 if [ "$expect_pgo" = true ]; then
   requests="$(field training_requests)"
-  [ "${requests:-0}" -gt 0 ] 2>/dev/null || fail "training made $requests http requests"
+  [ "${requests:-0}" -gt 0 ] 2>/dev/null || fail "training made $requests fastcgi requests"
+  # php-fpm is trained itself: one fpm-<app> workload per corpus app next to the
+  # CLI one, and its own profile files came out of the pool.
+  labels="$(field training_labels)"
+  corpus_apps="$(field training_corpus)"
+  want_labels="cli"
+  for entry in $corpus_apps; do want_labels="${want_labels} fpm-${entry%%=*}"; done
+  [ "$labels" = "$want_labels" ] \
+    || fail "the build trained the workloads '$labels' but a php-fpm-trained build of '$corpus_apps' has '$want_labels'"
+  fpm_files="$(field training_fpm_profile_files)"
+  [ "${fpm_files:-0}" -gt 0 ] 2>/dev/null || fail "the build record reports $fpm_files php-fpm profile files -- php-fpm itself was not trained"
+  echo "ok: php-fpm and the CLI were trained (workloads: $labels; $fpm_files php-fpm profile files)"
   if [ "$compiler" = clang ]; then
     sha="$(field profdata_sha256)"
     [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail "profdata_sha256 is not a sha256: '$sha'"
@@ -218,6 +229,17 @@ docker cp "$cid:/usr/local/bin/php" "$tmp/php" >/dev/null
 binaries=("$tmp/php")
 if docker cp "$cid:/usr/local/sbin/php-fpm" "$tmp/php-fpm" >/dev/null 2>&1; then
   binaries+=("$tmp/php-fpm")
+fi
+# opcache is a shared module on every branch except 8.5, which compiles it in (so
+# php and php-fpm already carry its code). The shared one is part of the profile
+# claim: it holds the JIT and the compile path.
+docker cp "$cid:/usr/local/lib/php/extensions" "$tmp/extensions" >/dev/null 2>&1 || true
+opcache_so="$(find "$tmp/extensions" -name opcache.so 2>/dev/null | head -1)"
+if [ "$VERSION" = 8.5 ]; then
+  [ -z "$opcache_so" ] || fail "php 8.5 compiles opcache in, yet the image ships a shared $opcache_so"
+else
+  [ -s "$opcache_so" ] || fail "php $VERSION ships opcache as a shared module but the image has no opcache.so under /usr/local/lib/php/extensions"
+  binaries+=("$opcache_so")
 fi
 docker rm -f "$cid" >/dev/null; cid=""
 [ -s "$tmp/php" ] || fail "the extracted php binary is empty -- docker cp produced nothing to measure"

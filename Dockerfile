@@ -348,9 +348,12 @@ COPY deps/patches/ /build/patches/
 # `COPY php/` tree above.
 COPY deps/fetch-verified.sh /build/deps/fetch-verified.sh
 # The runtime opcache settings. php/pgo/train.sh replays them onto the
-# instrumented binary so the profile is taken with the JIT, interned-string
+# instrumented binaries so the profile is taken with the JIT, interned-string
 # buffer and accelerated-file count deployments use, with no second copy to drift.
 COPY conf/opcache.ini /build/conf/opcache.ini
+# php/pgo/train.sh feeds the instrumented php-fpm through this FastCGI client, run by
+# the instrumented php.
+COPY --chmod=0755 rootfs/usr/local/bin/php-fcgi /build/bin/php-fcgi
 
 # php.net tarballs are GPG-signed. The release keys are vendored in
 # php/release-keys.asc and imported offline: a keyserver fetch per build is flaky
