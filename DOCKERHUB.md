@@ -56,7 +56,9 @@ not Graviton2/3, Ampere Altra or Apple silicon. Use the baseline tag on a Mac.
 
 The amd64 baseline is `x86-64-v2` (SSE4.2 and POPCNT; Intel Nehalem and newer, AMD Bulldozer and
 newer), not plain `x86-64`, because Wolfi's packages are built for it. Both baselines use generic
-tuning. Only the amd64 `-v3` tags check the CPU at startup.
+tuning. amd64 `-v3` also tunes generic; arm64 `-v3` tunes for `neoverse-v2`. Only the amd64 `-v3`
+tags check the CPU at startup. The vendored ImageMagick, heif stack (libheif, libde265, dav1d) and
+net-snmp are built for the baseline in every image, `-v3` included.
 
 `8.4-fpm` moves with each 8.4 patch release. Pin the digest for reproducible builds.
 
@@ -128,7 +130,7 @@ variable that is set but empty, or contains a newline, stops the container with 
 | `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, 64-512 MB | `opcache.memory_consumption` |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS`, `PHP_OPCACHE_REVALIDATE_FREQ` | `1`, `2` | Set validation to `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
-| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing`, `64M` | PHP 8+ only. |
+| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing`, `64M` | PHP 8.1+, and 8.0 on amd64 (8.0 on arm64 has no JIT). |
 | `PHP_EXT_ENABLE` | unset | Comma-separated shared extensions to load, for example `ldap,uuid`. |
 | `PHP_SNUFFLEUPAGUS` | unset | `default`, `wordpress`, `prestashop`, `laravel`, or a custom ruleset name. |
 | `PHP_CHMOD_SHIM` | `0` | `true` enables the PrestaShop `chmod(0)` cache-bug shim. |
@@ -229,7 +231,11 @@ ENV PHP_EXT_ENABLE=myext
 
 Measured on the shipped ELF binaries, not assumed from compiler flags: PIE, full RELRO
 (`GNU_RELRO` and `BIND_NOW`), non-executable stack, `-fstack-protector-strong`,
-`_FORTIFY_SOURCE=3`, and `-fcf-protection=full` on amd64. Links use packed relative relocations
+`_FORTIFY_SOURCE=3`, and `-fcf-protection=full` on amd64. On arm64, PAC and BTI
+(`-mbranch-protection=standard`) are compiled in; on PHP 7.0-8.4 (gcc, gold) BTI is not enforced at
+runtime, because gold writes no `PT_GNU_PROPERTY` header and glibc enforces BTI from it. The compilers
+also run with zero-initialized locals, no null-check deletion, wrapping signed overflow and no strict
+aliasing. Links use packed relative relocations
 (`-z pack-relative-relocs`, `DT_RELR`) where the linker supports it. Every setuid and setgid bit
 inherited from the base image is stripped. Busybox's network applets (`ping`, `netstat`,
 `traceroute`, `arping`, `microcom` and the rest of the raw-socket and interface set) are removed;

@@ -59,8 +59,12 @@ on a Mac.
 The amd64 baseline is `x86-64-v2` (SSE4.2 and POPCNT; Intel Nehalem and newer, AMD Bulldozer and
 newer), not plain `x86-64`, because Wolfi's packages are built for it: its glibc, busybox and curl
 carry an `x86-64-v2` ISA requirement, so a CPU below that fails at the first `exec`. Both baselines
-use generic tuning (`-mtune=generic`), so the code is not tied to one core. Only the amd64 `-v3`
-tags check the CPU at startup.
+use generic tuning (`-mtune=generic`), so the code is not tied to one core. amd64 `-v3` also tunes
+generic; arm64 `-v3` tunes for `neoverse-v2`, under both compilers. Only the amd64 `-v3` tags check
+the CPU at startup.
+
+The vendored ImageMagick, the heif stack (libheif, libde265, dav1d) and net-snmp are built for the
+baseline in every image, `-v3` included. Their code runs on any CPU the baseline tag supports.
 
 A tag names the PHP minor, so `8.4-fpm` moves with each 8.4 patch release. Pin the digest for
 reproducible builds: `FROM lotuswebagency/php:8.4-fpm@sha256:...`.
@@ -151,7 +155,7 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS` | `1` | `opcache.validate_timestamps`. Set `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_REVALIDATE_FREQ` | `2` | `opcache.revalidate_freq` |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
-| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing`, `64M` | `opcache.jit`, `opcache.jit_buffer_size`. PHP 8+ only. |
+| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing`, `64M` | `opcache.jit`, `opcache.jit_buffer_size`. PHP 8.1+, and 8.0 on amd64. 8.0 on arm64 has no JIT: its opcache builds one for x86 only. |
 | `PHP_EXT_ENABLE` | unset | Comma-separated shared extensions to load. See [Extensions](#extensions). |
 | `PHP_SNUFFLEUPAGUS` | unset | Ruleset name to load. See [Hardening](#hardening). |
 | `PHP_CHMOD_SHIM` | `0` | `1`, `true`, `yes` or `on` preloads the [chmod shim](#hardening). `0`, `false`, `no`, `off` disable it. Anything else is refused. |
@@ -293,15 +297,26 @@ ENV PHP_EXT_ENABLE=myext
 - **Stack protector** (`-fstack-protector-strong`): `__stack_chk_fail` is in the main binary's
   dynamic symbols.
 - **`_FORTIFY_SOURCE=3`**: fortifiable libc calls resolve to `__*_chk`.
-- **Control-flow protection** (`-fcf-protection=full`, amd64): every function entry has an `endbr64`
-  landing pad. The loader-enforced IBT/SHSTK property note is not claimed, because it is absent
-  from these binaries.
+- **Control-flow protection**, checked on php-src's own functions (the vendored static libraries
+  would otherwise hide a gap):
+  - amd64 (`-fcf-protection=full`): at least half of the function entries start with an `endbr64`
+    landing pad. The loader-enforced IBT/SHSTK property note is not claimed, because it is absent
+    from these binaries.
+  - arm64 (`-mbranch-protection=standard`): at least half of the entries start with `bti` or a
+    `paciasp`/`pacibsp` instruction, so PAC and BTI are compiled in. On PHP 7.0-8.4 (gcc, linked with
+    gold) BTI is not enforced at runtime: gold writes no `PT_GNU_PROPERTY` header, and glibc turns BTI
+    on from that header.
 - Every link uses `-z relro -z now -z noexecstack --as-needed --build-id=sha1`, plus
   `-z pack-relative-relocs` (packed `DT_RELR` relocations) where the linker supports it.
 - Wolfi's compiler wrappers add their own hardening spec and bake in `-mtune=sapphirerapids` (arm64:
   `neoverse-v2`). The PHP build turns the hardening spec and clang's default config off, and
   `php/cflags.sh` passes every hardening and `-march`/`-mtune` flag explicitly, vendored libraries
-  included.
+  included. Besides the flags above, that set is `-ftrivial-auto-var-init=zero`,
+  `-fno-delete-null-pointer-checks`, `-fno-strict-overflow` and `-fno-strict-aliasing` on both
+  compilers, `-fzero-init-padding-bits=all` on gcc only (clang has no such option) and
+  `-D_GLIBCXX_ASSERTIONS` for C++. It reaches php, PECL and shared extensions, the chmod shim and the
+  vendored libraries. Snuffleupagus's build file forces `_FORTIFY_SOURCE=2`; a patch in
+  `deps/patches/` removes that, so the module is built at level 3 like everything else.
 - Every setuid and setgid bit inherited from the base image is stripped.
 - Busybox's network applets (`ping`, `netstat`, `traceroute`, `arping`, `microcom` and the rest of
   the raw-socket and interface set) are removed; `curl` stays. A derived image that runs
