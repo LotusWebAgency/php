@@ -544,25 +544,51 @@ assert_profile_reached_the_link() {
 # is the failure this build exists to rule out: the binary still links, still
 # passes its tests and is quietly not optimized. Core code is php-fpm's own
 # (sapi/fpm), the engine (Zend/), the runtime (main/) and opcache (ext/opcache).
-# Everything else (PECL-style extensions no corpus request reaches, TSRM, host
-# build tools) may lack a profile; that stays a warning, counted below.
+# Everything else (PECL-style extensions no corpus request reaches, TSRM) may lack
+# a profile; that stays a warning, counted below.
 #
-# gcc: a TU linked into php, php-fpm or opcache.so gets a .gcda at exit even with
-# zero counts, so "profile count data file not found" on a core object means it
-# was never linked into a binary the training ran. Objects gcc built for the host
-# (the JIT's minilua/dynasm/gen_* generators) never run under training and are the
-# only exceptions. A source/profile mismatch is -Wcoverage-mismatch, an error by
-# default and no longer silenced (gcc has no LTO here that could reorder passes).
+# gcc: every object linked into an instrumented binary carries the path of its
+# .gcda, and libgcov writes that file at exit even with zero counts, so after
+# training each of them exists. Objects that are not linked into php, php-fpm or
+# opcache.so never get one, and pass 2 warns about them without that meaning
+# anything: libtool compiles every core source twice, a PIC copy under .libs/
+# (which no shipped binary links) and the copy beside it that php and php-fpm link,
+# and the JIT's host generators (minilua, dynasm, gen_*) never run under training.
+# So a missing profile fails the build only for a core object whose .gcda path one
+# of the trained binaries names (record_linked_gcda). Code a workload legitimately
+# never reaches (fpm's Solaris event port, its slowlog tracer) is linked, so its
+# .gcda exists with zero counts and passes. A source/profile mismatch is
+# -Wcoverage-mismatch, an error by default and not silenced (gcc has no LTO here
+# that could reorder passes).
 # clang: nothing is emitted for an unprofiled function, so the checkable symptom is
 # the ThinLTO backend's hash-mismatch / out-of-date diagnostic for a core file.
-PGO_GCC_CORE_MISSING_RE="[/#](sapi[/#]fpm|Zend|main|ext[/#]opcache)[/#][^' ]*\.gcda'"
-PGO_GCC_HOST_TOOL_RE="[/#](minilua|dynasm[a-z0-9_]*|gen_[a-z0-9_]+)\.gcda'"
+PGO_GCC_CORE_RE="[/#](sapi[/#]fpm|Zend|main|ext[/#]opcache)[/#][^' ]*\.gcda"
 PGO_CLANG_CORE_MISMATCH_RE="(^|[ :'/])(sapi/fpm|Zend|main|ext/opcache)/"
+# The .gcda paths named by the trained binaries, one per line (record_linked_gcda).
+PGO_LINKED_GCDA=/tmp/pgo-linked-gcda.list
 
-# core_profile_problems <gcc|clang>: pass-2 compile log on stdin, offending lines on stdout
+# record_linked_gcda <list> <binary>...: write the .gcda path of every object
+# linked into the instrumented binaries to <list>. gcc stores the path as a string
+# in each object's coverage info.
+record_linked_gcda() {
+  local list="$1"; shift
+  strings -a "$@" >"${list}.strings"
+  grep -E '\.gcda$' "${list}.strings" | sort -u >"$list" || true
+  rm -f "${list}.strings"
+}
+
+# core_profile_problems <gcc|clang> [<linked-list>]: pass-2 compile log on stdin,
+# offending lines on stdout. gcc needs the list from record_linked_gcda.
 core_profile_problems() {
   case "$1" in
-    gcc)   grep -F 'profile count data file not found' | grep -E -- "$PGO_GCC_CORE_MISSING_RE" | grep -vE -- "$PGO_GCC_HOST_TOOL_RE" || true ;;
+    gcc)
+      # Quoted as gcc prints them, so a path matches whole: the .libs copy of an
+      # object does not contain the linked copy's quoted path. Without a list
+      # nothing would match, so its absence is itself reported as a problem.
+      [ -s "${2:-}" ] || { echo "no linked-object list at '${2:-}' -- cannot tell which missing profiles matter"; return 0; }
+      sed "s/.*/'&'/" "$2" >"${2}.quoted"
+      grep -F 'profile count data file not found' | grep -E -- "${PGO_GCC_CORE_RE}'" | grep -F -f "${2}.quoted" || true
+      ;;
     clang) grep -E 'hash mismatch|profile-instr-out-of-date|profile-instr-missing|mismatched data' | grep -E -- "$PGO_CLANG_CORE_MISMATCH_RE" || true ;;
   esac
 }
@@ -570,17 +596,21 @@ core_profile_problems() {
 # Positive and negative controls for the filter above: a regex that matched nothing
 # would make an empty result mean "all good" for every build.
 assert_core_profile_filter_discriminates() {
-  local missing_core missing_other missing_tool mismatch_core mismatch_other
+  local linked missing_core missing_unlinked missing_other missing_tool mismatch_core mismatch_other
+  linked="$(mktemp)"
+  printf '%s\n' '/p/#build#php-8.4.1#sapi#fpm#fpm#fpm_main.gcda' '/p/#build#php-8.4.1#ext#standard#array.gcda' >"$linked"
   missing_core="warning: '/p/#build#php-8.4.1#sapi#fpm#fpm#fpm_main.gcda' profile count data file not found [-Wmissing-profile]"
+  missing_unlinked="warning: '/p/#build#php-8.4.1#sapi#fpm#fpm#.libs#fpm_main.gcda' profile count data file not found [-Wmissing-profile]"
   missing_other="warning: '/p/#build#php-8.4.1#ext#standard#array.gcda' profile count data file not found [-Wmissing-profile]"
   missing_tool="warning: '/p/#build#php-8.4.1#ext#opcache#jit#ir#dynasm#minilua.gcda' profile count data file not found [-Wmissing-profile]"
   mismatch_core="warning: Zend/zend_execute.c: function control flow change detected (hash mismatch) execute_ex [-Wbackend-plugin]"
   mismatch_other="warning: ext/standard/array.c: function control flow change detected (hash mismatch) php_array_data_compare [-Wbackend-plugin]"
-  [ "$(printf '%s\n' "$missing_core" | core_profile_problems gcc | wc -l)" -eq 1 ] \
-    && [ -z "$(printf '%s\n%s\n' "$missing_other" "$missing_tool" | core_profile_problems gcc)" ] \
+  [ "$(printf '%s\n' "$missing_core" | core_profile_problems gcc "$linked" | wc -l)" -eq 1 ] \
+    && [ -z "$(printf '%s\n%s\n%s\n' "$missing_unlinked" "$missing_other" "$missing_tool" | core_profile_problems gcc "$linked")" ] \
     && [ "$(printf '%s\n' "$mismatch_core" | core_profile_problems clang | wc -l)" -eq 1 ] \
     && [ -z "$(printf '%s\n' "$mismatch_other" | core_profile_problems clang)" ] \
-    || { echo "FATAL: the core-profile filter does not tell core objects from the rest -- an empty result from it would prove nothing" >&2; exit 1; }
+    || { echo "FATAL: the core-profile filter does not tell linked core objects from the rest -- an empty result from it would prove nothing" >&2; exit 1; }
+  rm -f "$linked" "${linked}.quoted"
 }
 
 # assert_isa_gate <v3|baseline> <binary> [<binary>...]
@@ -1122,14 +1152,21 @@ if [ "$PGO" = true ]; then
     [ -n "$max_count" ] && [ "$max_count" -gt "${requests:?train summary has no request count}" ] 2>/dev/null \
       || { echo "FATAL: the profile's busiest function ran $max_count times for $requests requests -- the workload was not recorded" >&2; exit 1; }
     echo "ok: profile covers $total_functions functions, busiest ran $max_count times over $requests requests"
-    # php-fpm's own request loop must be in the merged profile, or the fpm labels
-    # merged without reaching it. fcgi_accept_request runs once per request and
-    # fpm_event_loop once per master; --function matches by substring.
+    # php-fpm's own code must be in the merged profile, or the fpm labels merged
+    # without reaching it. fcgi_accept_request runs in the workers, once per
+    # request, so with every worker's counters flushed its busiest block ran at
+    # least once per request (weights only multiply); fpm_event_loop is the
+    # master's. The largest block counter, because an IR-level profile has no
+    # "Function count" line for llvm-profdata to print; --function matches by
+    # substring.
     for fpm_function in fcgi_accept_request fpm_event_loop; do
-      fpm_function_count="$(llvm-profdata show --function="$fpm_function" "$PROFDATA" | awk '/Function count:/ {sum += $3} END {print sum + 0}')"
-      [ "$fpm_function_count" -gt 0 ] \
-        || { echo "FATAL: the merged profile has no counts for $fpm_function -- php-fpm's own code was not trained" >&2; exit 1; }
-      echo "ok: merged profile counts $fpm_function ${fpm_function_count} times"
+      fpm_function_count="$(llvm-profdata show --counts --function="$fpm_function" "$PROFDATA" \
+        | awk '/Block counts:/ { gsub(/[][,]/, " "); for (i = 3; i <= NF; i++) if ($i + 0 > max) max = $i + 0 } END { print max + 0 }')"
+      fpm_function_floor=1
+      [ "$fpm_function" != fcgi_accept_request ] || fpm_function_floor="$requests"
+      [ "$fpm_function_count" -ge "$fpm_function_floor" ] \
+        || { echo "FATAL: the merged profile's busiest block in $fpm_function ran $fpm_function_count times, the floor is $fpm_function_floor -- php-fpm's own code was not trained" >&2; exit 1; }
+      echo "ok: merged profile: $fpm_function's busiest block ran ${fpm_function_count} times (floor $fpm_function_floor)"
     done
     PROF_FLAGS_USED="-fprofile-use=$PROFDATA"
     profdata_sha256="$(sha256sum "$PROFDATA" | awk '{print $1}')"
@@ -1146,6 +1183,25 @@ if [ "$PGO" = true ]; then
     gcda_count="$(find "$PROFRAW_DIR" -name '*.gcda' | wc -l)"
     [ "$gcda_count" -gt 0 ] || { echo "FATAL: no .gcda files under $PROFRAW_DIR after training -- pass 2 would build unguided" >&2; exit 1; }
     echo "ok: $gcda_count .gcda file(s) present under $PROFRAW_DIR"
+    # Before `make clean` removes the instrumented binaries that name them.
+    linked_bins=("$PWD/sapi/cli/php" "$PWD/sapi/fpm/php-fpm")
+    [ ! -f "$PWD/modules/opcache.so" ] || linked_bins+=("$PWD/modules/opcache.so")
+    record_linked_gcda "$PGO_LINKED_GCDA" "${linked_bins[@]}"
+    # Positive control: the request path of php-fpm (its main loop and the
+    # FastCGI parser) must be among the names, or the list measured nothing.
+    for want in '#sapi#fpm#fpm#fpm_main.gcda' '#main#fastcgi.gcda' '#Zend#zend_execute.gcda'; do
+      grep -qF -- "$want" "$PGO_LINKED_GCDA" \
+        || { echo "FATAL: no *${want} among the .gcda paths named by ${linked_bins[*]} -- the linked-object list is wrong" >&2; exit 1; }
+    done
+    # Every linked core object must have been written: the processes that ran it
+    # exited through the path where libgcov writes.
+    linked_missing="$(grep -E -- "$PGO_GCC_CORE_RE" "$PGO_LINKED_GCDA" | while IFS= read -r f; do [ -f "$f" ] || printf '%s\n' "$f"; done)"
+    if [ -n "$linked_missing" ]; then
+      head -n 20 <<<"$linked_missing" >&2
+      echo "FATAL: $(wc -l <<<"$linked_missing") core object(s) linked into the trained binaries have no .gcda after training" >&2
+      exit 1
+    fi
+    echo "ok: every core object linked into ${linked_bins[*]##*/} has a .gcda ($(grep -cE -- "$PGO_GCC_CORE_RE" "$PGO_LINKED_GCDA") core of $(wc -l <"$PGO_LINKED_GCDA") linked)"
     total_functions="n/a-gcc"
     max_count="n/a-gcc"
     # -fprofile-partial-training: most PECL extensions' code is not on any
@@ -1167,13 +1223,16 @@ if [ "$PGO" = true ]; then
   assert_core_profile_filter_discriminates
   PASS2_LOG=/tmp/pgo-pass2.log
   php_make PROF_FLAGS="$PROF_FLAGS_USED" 2>&1 | tee "$PASS2_LOG"
-  core_problems="$(core_profile_problems "${COMPILER:-clang}" <"$PASS2_LOG")"
+  core_problems="$(core_profile_problems "${COMPILER:-clang}" "$PGO_LINKED_GCDA" <"$PASS2_LOG")"
   if [ -n "$core_problems" ]; then
-    printf '%s\n' "$core_problems" | head -20 >&2
-    echo "FATAL: pass 2 found no usable profile for $(printf '%s\n' "$core_problems" | wc -l) core object(s) (sapi/fpm, Zend, main, ext/opcache) -- the engine would ship unoptimized under a PGO label" >&2
+    # Here-strings, not `printf | head`: head exits after 20 lines, and the
+    # writer's SIGPIPE is a failure under pipefail that would end the build before
+    # this message.
+    head -n 20 <<<"$core_problems" >&2
+    echo "FATAL: pass 2 found no usable profile for $(wc -l <<<"$core_problems") linked core object(s) (sapi/fpm, Zend, main, ext/opcache) -- the engine would ship unoptimized under a PGO label" >&2
     exit 1
   fi
-  echo "ok: pass 2 found a matching profile for every core object ($(grep -cF 'profile count data file not found' "$PASS2_LOG" || true) non-core warning(s))"
+  echo "ok: pass 2 found a matching profile for every linked core object ($(grep -cF 'profile count data file not found' "$PASS2_LOG" || true) warning(s) for unlinked or non-core objects)"
 
   record=(
     "prof_flags=$PROF_FLAGS_USED"
