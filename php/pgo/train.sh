@@ -199,8 +199,11 @@ loaded="$("$PHP_BIN" "${php_args[@]}" -r 'echo extension_loaded("Zend OPcache") 
 [ "$loaded" = "1" ] || fail "opcache is not active for the training binary (got '$loaded') -- the profile would describe an engine this image never runs"
 echo "ok: opcache active for training (${#php_args[@]} ini overrides from the shipped ini, $OPCACHE_SRC for php $PHP_VERSION)"
 # php-fpm lists Zend extensions under -m as well; the request-level proof that the
-# pool really runs with it enabled is the probe each pool answers below.
-"$FPM_BIN" "${php_args[@]}" -m 2>/dev/null | grep -q 'Zend OPcache' \
+# pool really runs with it enabled is the probe each pool answers below. Captured
+# first: grep -q on a pipe exits at the match and can SIGPIPE php-fpm mid-listing,
+# which pipefail turns into a failure.
+fpm_modules="$("$FPM_BIN" "${php_args[@]}" -m 2>/dev/null || true)"
+grep -q 'Zend OPcache' <<<"$fpm_modules" \
   || fail "php-fpm does not load Zend OPcache with the training ini -- the fpm profile would describe an engine this image never runs"
 
 mkdir -p "$PROFDIR"
