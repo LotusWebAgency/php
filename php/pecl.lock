@@ -72,7 +72,7 @@ ssh2@7.4      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95
 # (verified against https://pecl.php.net/rest/p/packages.xml and a 404 on
 # allreleases.xml). The real extension is kjdev/php-ext-lz4, the same class of
 # problem as snuffleupagus below, so ext.json lists it as source=github.
-lz4           0.7.1     e5913a346c65ed5d3d487398332a66629db2c863e02dfe0e949f653471853fcc  -        -
+lz4           0.8.0     1be0116c3bd3160c3eeb6f5869407f1a8d67f30ad672e71c8d10756fd30edab5  -        -
 # snuffleupagus v0.14.0: built and smoke-tested on every PHP from 7.2 to 8.5.
 # Bumping it means re-syncing conf/snuffleupagus/*.rules against the new tag's
 # config/default.rules first (see the header of default.rules); the registry

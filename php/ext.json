@@ -576,7 +576,7 @@
       "linkage": "shared",
       "php": ">=7.0",
       "configure": "--enable-lz4 --with-lz4-includedir=/usr",
-      "url": "https://github.com/kjdev/php-ext-lz4/archive/refs/tags/0.7.1.tar.gz",
+      "url": "https://github.com/kjdev/php-ext-lz4/archive/refs/tags/0.8.0.tar.gz",
       "libs": ["lz4-dev"],
       "why": "Opt-in fast-compression session serializer for high-traffic Laravel APIs"
     },
