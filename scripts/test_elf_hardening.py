@@ -72,7 +72,9 @@ class TestElfHardening(unittest.TestCase):
         (self.d / "exe.c").write_text(SRC_EXE)
         (self.d / "sink.c").write_text(SINK)
         (self.d / "tiny.c").write_text(SRC_TINY)
-        self.cflags = sh("bash", str(CFLAGS), "baseline").stdout.split()
+        # cflags.sh guards its gcc-only flags on $COMPILER, so name the one in use.
+        env = {**os.environ, "COMPILER": CC}
+        self.cflags = sh("bash", str(CFLAGS), "baseline", env=env).stdout.split()
         self.ldflags = sh("bash", str(LDFLAGS)).stdout.split()
 
     def tearDown(self):
