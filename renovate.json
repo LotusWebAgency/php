@@ -96,6 +96,16 @@
       "enabled": false
     },
     {
+      "description": "php/pgo/Dockerfile.corpus pins one prestashop/prestashop digest per corpus tier with no tag, so Renovate resolves each to the digest of latest and collapses every tier onto the newest PrestaShop. php/pgo/corpus.lock (ignored above) is the source of truth for those digests; bump both by hand",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "matchFileNames": [
+        "php/pgo/Dockerfile.corpus"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Auto-merge the base-image digest pin (matrix.json and every ARG default) the same way as the Dockerfile bases",
       "matchManagers": [
         "custom.regex"
