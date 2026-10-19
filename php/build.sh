@@ -1205,6 +1205,19 @@ php_install
 # --strip-unneeded keeps allocated sections, .text.hot among them (verified).
 assert_profile_reached_the_link "$([ "$PGO" = true ] && echo yes || echo no)" \
   /usr/local/bin/php /usr/local/sbin/php-fpm
+# opcache is a separate shared object on every branch but 8.5, which links it into
+# php and php-fpm (covered above). The JIT and the compile path live in it, so it
+# gets the same .text.hot assertion, at the same floor. The 5% floor was set from
+# the two executables; opcache.so's own share is not measured separately, and a
+# link that drops the section prefix for shared modules fails here, not silently.
+if [ -f "$PWD/modules/opcache.so" ]; then
+  installed_opcache="$(find /usr/local/lib/php/extensions -name opcache.so | head -1)"
+  [ -n "$installed_opcache" ] \
+    || { echo "FATAL: modules/opcache.so was built but make install placed no opcache.so under /usr/local/lib/php/extensions" >&2; exit 1; }
+  assert_profile_reached_the_link "$([ "$PGO" = true ] && echo yes || echo no)" "$installed_opcache"
+else
+  echo "ok: opcache is compiled into php and php-fpm on php ${PHP_VERSION}; their .text.hot assertion covers it"
+fi
 assert_no_ifunc_symbols /usr/local/bin/php /usr/local/sbin/php-fpm
 # amd64 only: arm64 has no startup gate, its v3 (armv9-a) images simply fault on
 # an older core.
