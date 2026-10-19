@@ -43,6 +43,7 @@ fi
 php_docker_flag_split "$PHP_ERA"
 
 BASE_CFLAGS="$(bash "$HERE/cflags.sh" "$UARCH")"
+BASE_CXXFLAGS="$(bash "$HERE/cflags.sh" "$UARCH" cxx)"
 # The legacy era's opcache optimizer detects integer overflow in its range
 # inference (zend_inference.c) by testing the result of a signed add, which is
 # undefined behavior. GCC 16 folds those checks away and SCCP then proves a loop
@@ -51,9 +52,11 @@ BASE_CFLAGS="$(bash "$HERE/cflags.sh" "$UARCH")"
 # defined.
 if [ "$PHP_ERA" = legacy ]; then
   BASE_CFLAGS="$BASE_CFLAGS -fwrapv"
+  BASE_CXXFLAGS="$BASE_CXXFLAGS -fwrapv"
 fi
 # -std=gnu17 is part of BASE_CFLAGS for every version and compiler; see
-# php/cflags.sh.
+# php/cflags.sh. BASE_CXXFLAGS is cflags.sh's C++ variant: no -std=gnu17, plus
+# the libstdc++ assertions.
 
 # CFLAGS/CXXFLAGS/LDFLAGS are exported per pass by php_set_pass_flags() below,
 # from these BASE_* values.
@@ -66,7 +69,7 @@ case "$PHP_VERSION" in
   7.0) CXX_STD="-std=c++11" ;;
   *)   CXX_STD="-std=c++17" ;;
 esac
-BASE_CXXFLAGS="$BASE_CFLAGS $CXX_STD"
+BASE_CXXFLAGS="$BASE_CXXFLAGS $CXX_STD"
 # ImageMagick lives at /opt/imagemagick in every era, not under PHP_DEPS_PREFIX.
 # imagick needs an rpath to it or the php binary cannot resolve libMagickWand; a
 # global LD_LIBRARY_PATH would break host binaries such as curl.
@@ -76,8 +79,9 @@ export EXTRA_LDFLAGS_PROGRAM="-pie"
 # amd64 v3: the SAPI executables refuse to start on a CPU without x86-64-v3
 # instead of dying later with SIGILL. php/isa-gate-x86-64-v3.c is a priority-101
 # constructor that checks __builtin_cpu_supports("x86-64-v3") and exits 127. The
-# loader is not involved: glibc 2.44 does not act on a GNU property note and
-# neither gold nor lld emits PT_GNU_PROPERTY, so a note would enforce nothing.
+# loader is not involved: glibc 2.44 does not act on a GNU property note, gold
+# emits no PT_GNU_PROPERTY and lld emits one but drops the ISA-needed property,
+# so a note would enforce nothing.
 #
 # The gate is compiled here, separately, with the baseline (x86-64-v2) flags (no
 # v3 -march, no PGO, no LTO), so the code that runs before the check is baseline

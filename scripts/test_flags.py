@@ -15,6 +15,25 @@ def run(script, *args, env=None):
     return out.stdout.strip()
 
 
+def cflags(uarch="baseline", lang="c", compiler="gcc", machine=None):
+    """Run cflags.sh as the given compiler on the given machine (uname -m is faked for arm64)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, COMPILER=compiler)
+        if machine:
+            fake = Path(tmp) / "uname"
+            fake.write_text(f"#!/bin/sh\necho {machine}\n")
+            fake.chmod(0o755)
+            env["PATH"] = f"{tmp}:{os.environ['PATH']}"
+        return run("php/cflags.sh", uarch, lang, env=env).split()
+
+
+MACHINES = ("x86_64", "aarch64")
+COMPILERS = ("gcc", "clang")
+# Wolfi's default hardening set that the Dockerfile switches off and cflags.sh restores.
+RESTORED = ("-ftrivial-auto-var-init=zero", "-fno-delete-null-pointer-checks",
+            "-fno-strict-overflow", "-fno-strict-aliasing")
+
+
 class TestCflags(unittest.TestCase):
     def test_hardening_flags_always_present(self):
         flags = run("php/cflags.sh", "baseline")
@@ -43,7 +62,7 @@ class TestCflags(unittest.TestCase):
     def test_no_isa_note_flag(self):
         # The v3 startup refusal is a linked-in constructor (php/isa-gate-x86-64-v3.c),
         # not a GNU property note, so no flag asks the compiler for one.
-        for compiler in ("gcc", "clang"):
+        for compiler in COMPILERS:
             env = dict(os.environ, COMPILER=compiler)
             for uarch in ("baseline", "v3"):
                 self.assertNotIn("-mneeded", run("php/cflags.sh", uarch, env=env).split())
@@ -51,6 +70,78 @@ class TestCflags(unittest.TestCase):
     def test_arch_specific_cfi_flag(self):
         flags = run("php/cflags.sh", "baseline")
         self.assertTrue("-fcf-protection=full" in flags or "-mbranch-protection=standard" in flags)
+
+    def test_cfi_flag_per_arch(self):
+        for compiler in COMPILERS:
+            for uarch in ("baseline", "v3"):
+                amd64 = cflags(uarch, "c", compiler, "x86_64")
+                arm64 = cflags(uarch, "c", compiler, "aarch64")
+                self.assertIn("-fcf-protection=full", amd64)
+                self.assertNotIn("-mbranch-protection=standard", amd64)
+                self.assertIn("-mbranch-protection=standard", arm64)
+                self.assertNotIn("-fcf-protection=full", arm64)
+
+    def test_restored_default_hardening_on_every_combination(self):
+        for machine in MACHINES:
+            for compiler in COMPILERS:
+                for uarch in ("baseline", "v3"):
+                    for lang in ("c", "cxx"):
+                        flags = cflags(uarch, lang, compiler, machine)
+                        label = (machine, compiler, uarch, lang)
+                        for expected in RESTORED + ("-O2", "-fstack-protector-strong",
+                                                    "-fstack-clash-protection", "-D_FORTIFY_SOURCE=3"):
+                            self.assertIn(expected, flags, label)
+
+    def test_zero_init_padding_bits_is_gcc_only(self):
+        # clang (19 and later) has no such option and errors on it.
+        for machine in MACHINES:
+            for lang in ("c", "cxx"):
+                self.assertIn("-fzero-init-padding-bits=all", cflags("baseline", lang, "gcc", machine))
+                self.assertNotIn("-fzero-init-padding-bits=all", cflags("baseline", lang, "clang", machine))
+
+    def test_language_specific_flags(self):
+        for compiler in COMPILERS:
+            c = cflags("baseline", "c", compiler)
+            cxx = cflags("baseline", "cxx", compiler)
+            self.assertIn("-std=gnu17", c)
+            self.assertNotIn("-D_GLIBCXX_ASSERTIONS", c)
+            # callers append their own -std=c++NN; gnu17 is invalid for C++
+            self.assertNotIn("-std=gnu17", cxx)
+            self.assertIn("-D_GLIBCXX_ASSERTIONS", cxx)
+
+    def test_c_and_cxx_differ_only_in_language_flags(self):
+        for compiler in COMPILERS:
+            c = set(cflags("v3", "c", compiler)) - {"-std=gnu17"}
+            cxx = set(cflags("v3", "cxx", compiler)) - {"-D_GLIBCXX_ASSERTIONS"}
+            self.assertEqual(c, cxx)
+
+    def test_language_defaults_to_c(self):
+        self.assertEqual(run("php/cflags.sh", "baseline"), run("php/cflags.sh", "baseline", "c"))
+
+    def test_unknown_language_and_compiler_fail(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            run("php/cflags.sh", "baseline", "fortran")
+        with self.assertRaises(subprocess.CalledProcessError):
+            run("php/cflags.sh", "baseline", "c", env=dict(os.environ, COMPILER="icc"))
+
+    def test_mtune_is_explicit_and_identical_across_compilers(self):
+        expected = {("x86_64", "baseline"): "-mtune=generic", ("x86_64", "v3"): "-mtune=generic",
+                    ("aarch64", "baseline"): "-mtune=generic", ("aarch64", "v3"): "-mtune=neoverse-v2"}
+        for (machine, uarch), mtune in expected.items():
+            per_compiler = [[f for f in cflags(uarch, "c", c, machine) if f.startswith("-mtune=")]
+                            for c in COMPILERS]
+            self.assertEqual(per_compiler, [[mtune], [mtune]], (machine, uarch))
+
+    def test_arm64_march_per_level(self):
+        for compiler in COMPILERS:
+            self.assertIn("-march=armv8-a", cflags("baseline", "c", compiler, "aarch64"))
+            self.assertIn("-march=armv9-a", cflags("v3", "c", compiler, "aarch64"))
+
+    def test_fortify_not_redefined_after_the_final_level(self):
+        # -U must come before the only -D, for every combination.
+        for machine in MACHINES:
+            flags = cflags("v3", "cxx", "clang", machine)
+            self.assertEqual([f for f in flags if f.startswith("-D_FORTIFY_SOURCE")], ["-D_FORTIFY_SOURCE=3"])
 
 
 class TestLdflags(unittest.TestCase):

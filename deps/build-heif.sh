@@ -24,9 +24,10 @@ lock_field() {  # lock_field <name> <field-number>
 # same posture as ImageMagick itself (baseline, shared by every uarch variant).
 export CFLAGS
 CFLAGS="$(bash "$ROOT/php/cflags.sh" baseline)"
-# -std=gnu17 is C-only; the C++ projects choose their own standard.
+# The C++ variant has no C-only -std=gnu17; the C++ projects choose their own
+# standard.
 export CXXFLAGS
-CXXFLAGS="$(printf '%s' "$CFLAGS" | sed -E 's/(^| )-std=[^ ]+//g')"
+CXXFLAGS="$(bash "$ROOT/php/cflags.sh" baseline cxx)"
 export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
 
 fetch_and_unpack() {  # fetch_and_unpack <name> -> unpacked into /tmp/<name>-src

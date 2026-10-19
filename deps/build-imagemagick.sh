@@ -42,7 +42,8 @@ echo "libheif for imagemagick: $(pkg-config --cflags --libs libheif)"
 # hardening without the -v3 tuning.
 export CFLAGS
 CFLAGS="$(bash "$ROOT/php/cflags.sh" baseline)"
-export CXXFLAGS="$CFLAGS -std=c++17"
+export CXXFLAGS
+CXXFLAGS="$(bash "$ROOT/php/cflags.sh" baseline cxx) -std=c++17"
 # Self-referencing rpath: MagickWand.so and friends find each other in
 # $PREFIX/lib without a global LD_LIBRARY_PATH (which would shadow system
 # libraries for other binaries). Also applies the project's hardening ld flags
@@ -50,8 +51,11 @@ export CXXFLAGS="$CFLAGS -std=c++17"
 export LDFLAGS
 LDFLAGS="$(bash "$ROOT/php/ldflags.sh" "$PREFIX")"
 
+# --with-gcc-arch=no: configure's AX_GCC_ARCHFLAG would append -mtune=<build host CPU>
+# after cflags.sh's explicit -mtune, tying the library to whichever runner built it.
 ./configure \
   --prefix="$PREFIX" \
+  --with-gcc-arch=no \
   --without-x \
   --disable-openmp \
   --disable-opencl \

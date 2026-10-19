@@ -56,7 +56,8 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # Wolfi's compilers harden by default (gcc through /usr/local/bin wrappers that add
 # -specs openssf.spec, clang through /etc/clang/*.cfg) and bake in -march=x86-64-v2
 # -mtune=sapphirerapids (arm64: armv8-a+crc+crypto -mtune=neoverse-v2). Both switches
-# turn those defaults off so php/cflags.sh decides every flag. GCC_SPEC_FILE drops
+# turn those defaults off so php/cflags.sh decides every flag, including the part of
+# the default hardening set it restores itself. GCC_SPEC_FILE drops
 # only the hardening: gcc keeps its compiled-in -march/-mtune, so every compile,
 # vendored libraries included, must take its arch flags from php/cflags.sh.
 ENV GCC_SPEC_FILE=no-hardening.spec CLANG_NO_DEFAULT_CONFIG=1
@@ -100,7 +101,8 @@ FROM toolchain-select-${COMPILER} AS toolchain
 # --- imagemagick ---
 # ImageMagick from source: the distro build is a standing CVE source and its
 # default OpenMP support causes thread explosions in FPM workers. One stage that
-# both deps eras derive from, so it builds once per (arch, uarch, COMPILER).
+# both deps eras derive from, so it builds once per (arch, COMPILER). It has no
+# UARCH: ImageMagick is always baseline.
 FROM toolchain AS imagemagick
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk add --cache-dir /var/cache/apk -U \
@@ -436,7 +438,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
     set -eux; \
     export CFLAGS="$(bash /build/php/cflags.sh "$UARCH")"; \
-    export CXXFLAGS="$CFLAGS -std=c++17"; \
+    export CXXFLAGS="$(bash /build/php/cflags.sh "$UARCH" cxx) -std=c++17"; \
     export LDFLAGS="$(bash /build/php/ldflags.sh)"; \
     export PHP_ERA="$PHP_ERA"; \
     bash /build/php/build-shared-ext.sh "$PHP_VERSION" "$PWD"; \

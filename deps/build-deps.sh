@@ -42,8 +42,9 @@ PREFIX="${2:-/opt/php-deps}"
 export CFLAGS="$(bash "${HERE}/../php/cflags.sh" "${UARCH:-baseline}")"
 # ICU is C++ and needs CXXFLAGS for PIC objects: the gcc image's compiler does
 # not default to PIE, and the PIE php link would fail on libicu*.a relocations.
-# -std=gnu17 is C-only, so it is dropped; ICU picks its own C++ standard.
-export CXXFLAGS="$(printf '%s' "$CFLAGS" | sed -E 's/(^| )-std=[^ ]+//g')"
+# cflags.sh's C++ variant carries no C-only -std=gnu17 (ICU picks its own C++
+# standard) and adds the libstdc++ assertions.
+export CXXFLAGS="$(bash "${HERE}/../php/cflags.sh" "${UARCH:-baseline}" cxx)"
 export LDFLAGS="$(bash "${HERE}/../php/ldflags.sh" "$PREFIX")"
 export PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig"
 mkdir -p "$PREFIX"

@@ -8,8 +8,9 @@
  * executable) and constructors with priority below 101 run earlier.
  *
  * It does not rely on the loader: glibc's ld.so can refuse a binary through a
- * GNU property note, but gold and lld emit no PT_GNU_PROPERTY program header and
- * glibc 2.44 no longer reads the legacy PT_NOTE, so the note enforces nothing.
+ * GNU property note, but gold emits no PT_GNU_PROPERTY program header, lld emits
+ * one yet drops the ISA-needed property from it, and glibc 2.44 no longer reads
+ * the legacy PT_NOTE, so the note enforces nothing.
  *
  * This file is compiled with the baseline (x86-64-v2) flags (php/build.sh passes
  * cflags.sh baseline), so the code that runs before the check is itself baseline code.
