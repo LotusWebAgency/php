@@ -741,10 +741,18 @@ fcgi_lint=$(drun --rm "$IMAGE" php -l /usr/local/bin/php-fcgi 2>&1) \
 echo "ok: php-fcgi is installed and passes php -l on PHP $EXPECT"
 
 # No setuid or setgid file anywhere in the image (find exits non-zero on an
-# unreadable directory, so only its output counts).
-suid_files=$(drun --rm "$IMAGE" sh -c 'find / -xdev -perm /6000 -type f 2>/dev/null; exit 0')
+# unreadable directory, so only its output counts). Run as root: the image's
+# default user (uid 33) cannot enter root-only directories, which is exactly
+# where a stray setuid binary would hide. The positive control plants a setuid
+# and a setgid file in a mode-0700 directory of a throwaway container and
+# requires the same scan to list both, or an empty result would mean nothing.
+suid_scan='find / -xdev -perm /6000 -type f 2>/dev/null; exit 0'
+suid_control=$(drun --rm --user 0 "$IMAGE" sh -c "mkdir -m 700 /suid-control && : > /suid-control/u && : > /suid-control/g && chmod 4755 /suid-control/u && chmod 2755 /suid-control/g; $suid_scan")
+{ grep -qx '/suid-control/u' <<<"$suid_control" && grep -qx '/suid-control/g' <<<"$suid_control"; } \
+  || { echo "FAIL: the setuid/setgid scan did not find the setuid and setgid files planted in a root-only directory ($(tr '\n' ' ' <<<"$suid_control")) -- its empty result below would prove nothing"; exit 1; }
+suid_files=$(drun --rm --user 0 "$IMAGE" sh -c "$suid_scan")
 [ -z "$suid_files" ] || { echo "FAIL: the image carries setuid/setgid files: $(tr '\n' ' ' <<<"$suid_files")"; exit 1; }
-echo "ok: no setuid or setgid file in the image"
+echo "ok: no setuid or setgid file in the image (scanned as root; control: planted files in a root-only directory are found)"
 
 if grep -qw snmp <<<"$SHARED_EXTS"; then
   snmp_ldd=$(image_ldd "$extdir/snmp.so" 2>&1 || true)
@@ -1078,7 +1086,45 @@ module_files=("$hard_dir/php-chmod-sanitize.so")
 [ -f "$hard_dir/php-fpm" ] && module_files+=("$hard_dir/php-fpm")
 # shellcheck disable=SC2206  # both are deliberate globs/word-splits
 module_files+=("$hard_dir"/ext/*.so $im_libs $nsnmp_libs)
-bash "$HERE/assert-elf-hardening.sh" "modules-$EXPECT" "${module_files[@]}" || exit 1
+
+# Every ELF file under /opt, picked by magic number rather than by name: the
+# vendored trees hold versioned libraries (*.so.1.2), plugin modules (ImageMagick's
+# coders and filters, which no *.so.* glob sees) and, on the legacy era, whatever
+# the dependency builds installed (libcurl.so.4 on 7.0-7.2). They are dlopened
+# into the same process as php, so they are held to everything the extensions
+# are. The legacy tree may be empty of ELF files (static-only openssl/icu, .a
+# files deleted) -- that is fine, but the ImageMagick libraries are in every
+# image, so zero ELF files means the extraction or the magic test is broken.
+opt_elf_files=()
+while IFS= read -r -d '' f; do
+  [ "$(head -c4 "$f" | od -An -c | tr -d ' ')" = '177ELF' ] || continue
+  opt_elf_files+=("$f")
+done < <(find "$hard_dir/opt" -type f -print0 | sort -z)
+[ "${#opt_elf_files[@]}" -ge 1 ] || { echo "FAIL: no ELF file found under the extracted /opt -- the hardening and RPATH scans of vendored libraries saw nothing"; exit 1; }
+# Control: the walk must contain every library the narrower globs above found,
+# or it is not the superset it replaces.
+for lib in $im_libs $nsnmp_libs; do
+  # the im/ and nsnmp/ copies are the /opt/<name>/lib directories
+  rel=${lib#"$hard_dir"/}
+  case "$rel" in
+    im/*)    want="$hard_dir/opt/imagemagick/lib/${rel#im/}" ;;
+    nsnmp/*) want="$hard_dir/opt/net-snmp/lib/${rel#nsnmp/}" ;;
+  esac
+  printf '%s\0' "${opt_elf_files[@]}" | grep -zqxF "$want" \
+    || { echo "FAIL: the /opt ELF walk missed $rel, which the library glob found"; exit 1; }
+done
+
+# Code-level hardening (--code) on every shipped ELF: the chmod shim, php-fpm,
+# the shared extensions and everything under /opt (which includes the libraries
+# in im_libs/nsnmp_libs). Each file is held to the canary, _FORTIFY_SOURCE and
+# the CET/branch-protection landing pads only where it can show them (the rule
+# is documented in assert-elf-hardening.sh). The php binary gets the stricter
+# whole-binary version above.
+hard_files=("$hard_dir/php-chmod-sanitize.so")
+[ -f "$hard_dir/php-fpm" ] && hard_files+=("$hard_dir/php-fpm")
+hard_files+=("$hard_dir"/ext/*.so "${opt_elf_files[@]}")
+bash "$HERE/assert-elf-hardening.sh" --code "modules-$EXPECT" "${hard_files[@]}" || exit 1
+echo "ok: code-level hardening holds on ${#hard_files[@]} shipped ELF files (${#opt_elf_files[@]} of them under /opt)"
 
 # Packed relative relocations (DT_RELR): php/ldflags.sh passes -z pack-relative-relocs
 # to every linker that accepts it. gold, which links the gcc era's php, rejects the
@@ -1112,20 +1158,12 @@ scan_rpath() {  # scan_rpath <label> <file>: append "<label> <dir>" per RPATH/RU
 for f in "${module_files[@]}" "$hard_dir/php"; do
   scan_rpath "$(basename "$f")" "$f"
 done
-# Every ELF under /opt, picked by magic number rather than by name: the vendored
-# trees hold versioned libraries (*.so.1.2), plugin modules and, on the legacy
-# era, whatever the dependency builds installed. Labeled by path so a hit in
-# a plugin does not read as one of php's own extensions. The legacy tree may be
-# empty of ELF files (static-only openssl/icu, .a files deleted) -- that is fine,
-# but the ImageMagick libraries are in every image, so zero ELF files means the
-# extraction or the magic test is broken.
-opt_elf=0
-while IFS= read -r -d '' f; do
-  [ "$(head -c4 "$f" | od -An -c | tr -d ' ')" = '177ELF' ] || continue
-  opt_elf=$((opt_elf + 1))
+# Every ELF under /opt (opt_elf_files, collected above). Labeled by path so a hit
+# in a plugin does not read as one of php's own extensions.
+for f in "${opt_elf_files[@]}"; do
   scan_rpath "opt/${f#"$hard_dir"/opt/}" "$f"
-done < <(find "$hard_dir/opt" -type f -print0)
-[ "$opt_elf" -ge 1 ] || { echo "FAIL: no ELF file found under the extracted /opt -- the RPATH scan of vendored libraries saw nothing"; exit 1; }
+done
+opt_elf=${#opt_elf_files[@]}
 # Positive controls: php carries /opt/imagemagick/lib on purpose (ldflags.sh), so
 # a parser that found nothing would pass the check below by being blind.
 grep -qx 'php /opt/imagemagick/lib' "$rpath_hits" \
