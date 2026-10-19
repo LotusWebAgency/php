@@ -1326,7 +1326,9 @@ for ($attempt = 1; $attempt <= 4; $attempt++) {
     }
     $msgs = [];
     set_error_handler(function ($n, $s) use (&$msgs) { $msgs[] = $s; return true; });
-    $b = file_get_contents($url);
+    // Any HTTP status means the handshake and the peer verification succeeded,
+    // as with curl above: an upstream 5xx says nothing about the CA store.
+    $b = file_get_contents($url, false, stream_context_create(["http" => ["ignore_errors" => true]]));
     restore_error_handler();
     $reason = $msgs ? implode(" | ", $msgs) : "no error reported";
     if ($b !== false) { echo "OK:" . strlen($b); exit; }
