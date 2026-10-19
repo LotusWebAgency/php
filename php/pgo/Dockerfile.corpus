@@ -37,13 +37,13 @@ ARG TIER=8.2
 # 8.4, 8.2, 8.1 and 7.2 share one image on purpose: PrestaShop 8.2.8 trains all
 # four, and its release tree does not depend on the php of the image it ships in.
 # 8.5 is PrestaShop 9.2.0.
-FROM prestashop/prestashop@sha256:bad534d47aa2365b3ec2ea136736a530592b8e62582607fb4129d3e8127e8756 AS ps-8.5
-FROM prestashop/prestashop@sha256:0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66 AS ps-8.4
-FROM prestashop/prestashop@sha256:0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66 AS ps-8.2
-FROM prestashop/prestashop@sha256:0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66 AS ps-8.1
-FROM prestashop/prestashop@sha256:0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66 AS ps-7.2
-FROM prestashop/prestashop@sha256:25a4fa68ab0529a5886f45ea9aad04d2626f7c1b861c62cbe643d2574a8e6473 AS ps-7.1
-FROM prestashop/prestashop@sha256:fd757ab1a4847abc053f19dfbf0f4885ffbf4fc06b02bce04035f30c952e234f AS ps-7.0
+FROM prestashop/prestashop@sha256:2b8f90176b3fad68f8f5c7fbdeaa137f2f05578d2ccff92ab581efa6b317c1d8 AS ps-8.5
+FROM prestashop/prestashop@sha256:2b8f90176b3fad68f8f5c7fbdeaa137f2f05578d2ccff92ab581efa6b317c1d8 AS ps-8.4
+FROM prestashop/prestashop@sha256:2b8f90176b3fad68f8f5c7fbdeaa137f2f05578d2ccff92ab581efa6b317c1d8 AS ps-8.2
+FROM prestashop/prestashop@sha256:2b8f90176b3fad68f8f5c7fbdeaa137f2f05578d2ccff92ab581efa6b317c1d8 AS ps-8.1
+FROM prestashop/prestashop@sha256:2b8f90176b3fad68f8f5c7fbdeaa137f2f05578d2ccff92ab581efa6b317c1d8 AS ps-7.2
+FROM prestashop/prestashop@sha256:2b8f90176b3fad68f8f5c7fbdeaa137f2f05578d2ccff92ab581efa6b317c1d8 AS ps-7.1
+FROM prestashop/prestashop@sha256:46bd0a942c862aced62a18d87c560f632557b38cc788218a33984a733db4cdef AS ps-7.0
 
 # Alias stage: `COPY --from` and `RUN --mount from=` do not expand ARGs when they
 # name a build stage, only FROM does. The per-tier stage is picked here and
