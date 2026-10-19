@@ -28,15 +28,16 @@ args=()
 [ "$sub" != pull ] || args+=(--sha "${EXT_SHA:?EXT_SHA is not set}")
 
 # tests/test-uarch.sh runs the -v3 image's binaries on an emulated CPU without
-# AVX2 and needs a statically linked qemu-x86_64. It is installed here, not in
-# extended.yml: workflow_run takes the workflow file from the default branch, so
-# a step there lags the tree under test. The package manager is the Ubuntu
+# AVX2 and needs a statically linked qemu-x86_64. Ubuntu 26.04's qemu-user is
+# static (qemu-user-static is only a virtual package there). It is installed
+# here, not in extended.yml: workflow_run takes the workflow file from the
+# default branch, so a step there lags the tree under test. The package manager is the Ubuntu
 # runner's, not the image's; its own retries cover a flaky mirror, ci/retry.sh a
 # dropped connection.
 if [ "$sub" = uarch ] && [ -n "${GITHUB_ACTIONS:-}" ] && [ "$(uname -m)" = x86_64 ] \
   && ! command -v qemu-x86_64-static >/dev/null; then
-  RETRY_KIND=net ci/retry.sh sudo sh -c 'apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends qemu-user-static' \
-    || { echo "uarch: installing qemu-user-static failed" >&2; exit 1; }
+  RETRY_KIND=net ci/retry.sh sudo sh -c 'apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends qemu-user' \
+    || { echo "uarch: installing qemu-user failed" >&2; exit 1; }
 fi
 
 if [ "$sub" = apps-prepare ]; then

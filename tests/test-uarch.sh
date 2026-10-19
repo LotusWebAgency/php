@@ -39,7 +39,7 @@ for candidate in qemu-x86_64-static qemu-x86_64; do
 done
 if [ -z "$qemu_bin" ] && [ "${UARCH_ALLOW_NO_QEMU:-0}" != 1 ] \
    && [ "$(docker image inspect --format '{{.Architecture}}' "$V3")" = amd64 ]; then
-  fail "no statically linked qemu-x86_64 (qemu-x86_64-static) on this host, so the -v3 refusal cannot be tested. Install qemu-user-static, or set UARCH_ALLOW_NO_QEMU=1 to skip this proof knowingly"
+  fail "no statically linked qemu-x86_64 (qemu-x86_64-static) on this host, so the -v3 refusal cannot be tested. Install qemu-user (static on Debian 13 and Ubuntu 26.04) or qemu-user-static, or set UARCH_ALLOW_NO_QEMU=1 to skip this proof knowingly"
 fi
 
 # readelf/objdump don't exist inside the runtime image -- pull the binary out
