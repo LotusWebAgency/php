@@ -350,9 +350,12 @@ COPY deps/patches/ /build/patches/
 # `COPY php/` tree above.
 COPY deps/fetch-verified.sh /build/deps/fetch-verified.sh
 # The runtime opcache settings. php/pgo/train.sh replays them onto the
-# instrumented binary so the profile is taken with the JIT, interned-string
+# instrumented binaries so the profile is taken with the JIT, interned-string
 # buffer and accelerated-file count deployments use, with no second copy to drift.
 COPY conf/opcache.ini /build/conf/opcache.ini
+# php/pgo/train.sh feeds the instrumented php-fpm through this FastCGI client, run by
+# the instrumented php.
+COPY --chmod=0755 rootfs/usr/local/bin/php-fcgi /build/bin/php-fcgi
 
 # php.net tarballs are GPG-signed. The release keys are vendored in
 # php/release-keys.asc and imported offline: a keyserver fetch per build is flaky
@@ -514,7 +517,14 @@ RUN set -eux; \
 # Baseline opcache settings, shared unmodified by every flavor. The numeric prefix
 # sorts before the entrypoint-written 90-opcache-env.ini and 99-env.ini, which
 # win. FPM pool tuning is ${VAR}-driven in www.conf; no file is written for it.
-COPY conf/opcache.ini /stage/usr/local/etc/php/conf.d/15-opcache.ini
+# php/pgo/shipped-opcache-ini.sh applies the per-version adjustment; php/pgo/train.sh
+# renders the ini it trains under with the same script.
+COPY conf/opcache.ini /tmp/opcache.ini.src
+COPY php/pgo/shipped-opcache-ini.sh /tmp/shipped-opcache-ini.sh
+RUN set -eux; \
+    install -d /stage/usr/local/etc/php/conf.d; \
+    sh /tmp/shipped-opcache-ini.sh "$PHP_VERSION" /tmp/opcache.ini.src /stage/usr/local/etc/php/conf.d/15-opcache.ini; \
+    rm -f /tmp/opcache.ini.src /tmp/shipped-opcache-ini.sh
 # PHP 8.5 folded opcache into the engine (configure-args.sh omits --enable-opcache
 # from 8.5), so conf/opcache.ini suffices there. On 7.0-8.4 a statically compiled
 # opcache still needs zend_extension= to register as a Zend extension (php -m
@@ -525,25 +535,6 @@ COPY conf/opcache.ini /stage/usr/local/etc/php/conf.d/15-opcache.ini
 # "Failed loading .../opcache: cannot open shared object file". The suffixed form
 # works on every version, so it is not gated.
 RUN [ "$PHP_VERSION" = "8.5" ] || echo "zend_extension=opcache.so" >> /stage/usr/local/etc/php/conf.d/15-opcache.ini
-
-# PHP before 7.3 cannot allocate the 32MB interned strings buffer that
-# conf/opcache.ini asks for: there it is carved from opcache's shared segment with
-# a 16MB ceiling, and exceeding it is a fatal "Zend OPcache cannot allocate buffer
-# for interned strings" at startup. 7.0-7.2 images exited 254 before accepting a
-# connection. 16 is still twice opcache's default of 8.
-#
-# Guarded on both sides: `sed -i` exits 0 whether or not it matched, so a reworded
-# conf/opcache.ini would silently turn this into a no-op.
-RUN set -eux; \
-    case "$PHP_VERSION" in \
-      7.0|7.1|7.2) \
-        grep -qx 'opcache.interned_strings_buffer = 32' /stage/usr/local/etc/php/conf.d/15-opcache.ini \
-          || { echo "FATAL: conf/opcache.ini no longer sets interned_strings_buffer = 32; the <7.3 clamp below is dead" >&2; exit 1; }; \
-        sed -i 's/^opcache.interned_strings_buffer = 32$/opcache.interned_strings_buffer = 16/' /stage/usr/local/etc/php/conf.d/15-opcache.ini; \
-        grep -qx 'opcache.interned_strings_buffer = 16' /stage/usr/local/etc/php/conf.d/15-opcache.ini \
-          || { echo "FATAL: interned strings clamp did not apply" >&2; exit 1; }; \
-        echo "ok: clamped interned_strings_buffer to 16 for php $PHP_VERSION" ;; \
-    esac
 
 # Snuffleupagus rulesets: present in every flavor but inert until
 # PHP_SNUFFLEUPAGUS names one. The module is a dormant shared .so and no baked ini
