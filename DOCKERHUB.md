@@ -384,8 +384,9 @@ semantic-release, HIGH) and CVE-2026-15534 (perl 5.44.0 in `ext-builder`, MEDIUM
 [Accepted findings](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md#accepted-findings).
 They are suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan
 without that file shows them. Trivy reads the apk database, so it cannot see libraries built from source and
-linked statically or kept under `/opt`: ImageMagick (with static libheif, libde265 and dav1d) and
-net-snmp in every image, OpenSSL 1.1.1w, ICU,
+linked statically or kept under `/opt`: ImageMagick (with static libheif, libde265 and dav1d),
+net-snmp and libssh2 (an upstream master commit linked into `ssh2.so`, because no release and no
+Wolfi package carries the fixes for six HIGH CVEs) in every image, OpenSSL 1.1.1w, ICU,
 libxml2 and libxslt in the 7.0-8.0 builds (the last two are Debian trixie's 2.9.14 and 1.1.35 with
 Debian's security patches), curl in 7.0-7.2. Those are tracked by hand through `deps/versions.lock`, as are the
 `mariadb-dump`, `mariadb-admin` and `mariadb-check` binaries copied into the image. Reporting

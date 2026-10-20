@@ -133,6 +133,21 @@ COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
 RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
     bash /build/deps/build-netsnmp.sh /opt/net-snmp
 
+# --- libssh2 ---
+# libssh2 for ext-ssh2, vendored from an upstream master commit (the fixes for six
+# HIGH CVEs are unreleased) and installed as a static archive that ssh2.so absorbs, so
+# neither the distro's libssh2 package nor a libssh2.so ships. Its own stage, shared by
+# both eras. It links the system OpenSSL (openssl-4.0-dev below), never the legacy
+# vendored one. The deps stages COPY the prefix (ext-ssh2 needs the header and the
+# archive); nothing of it reaches the runtime image except what ssh2.so holds.
+FROM toolchain AS libssh2
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    apk add --cache-dir /var/cache/apk -U openssl-4.0-dev zlib-dev
+COPY deps/build-libssh2.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
+COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
+RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
+    bash /build/deps/build-libssh2.sh /opt/libssh2
+
 # --- deps: modern ---
 # PHP 8.1+ links against what Wolfi ships. The system OpenSSL is 4.0: curl-dev
 # requires openssl-4.0-dev, which conflicts with openssl-dev (3.6), so ext/openssl
@@ -150,10 +165,12 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # on PHP < 8.0. imap is absent: Wolfi has no c-client. pcre2-dev is
 # snuffleupagus's build dependency (its config.m4 calls pcre2-config).
       rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
-      libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
+      libmcrypt-dev tidy-html5-dev util-linux-dev \
       yaml-dev libevent-dev pcre2-dev
 # ext-snmp links this instead of the distro's net-snmp-dev.
 COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
+# ext-ssh2 links this instead of the distro's libssh2-dev.
+COPY --from=libssh2 /opt/libssh2 /opt/libssh2
 ENV PHP_DEPS_PREFIX=""
 
 # --- deps: legacy ---
@@ -197,7 +214,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
       brotli-dev \
       libsodium-dev argon2-dev gmp-dev readline-dev libmemcached-dev \
       rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
-      libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
+      libmcrypt-dev tidy-html5-dev util-linux-dev \
       yaml-dev libevent-dev pcre2-dev
 COPY deps/build-deps.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
 COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
@@ -237,6 +254,8 @@ RUN set -eu; \
     esac
 # ext-snmp links this instead of the distro's net-snmp-dev.
 COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
+# ext-ssh2 links this instead of the distro's libssh2-dev.
+COPY --from=libssh2 /opt/libssh2 /opt/libssh2
 # PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR (the latter set in php/build.sh) is what makes
 # PHP's ./configure find the vendored openssl and icu: PHP_SETUP_OPENSSL and
 # PHP_SETUP_ICU are PKG_CHECK_MODULES-based and ignore a DIR value. For OpenSSL

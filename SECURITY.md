@@ -37,8 +37,10 @@ generated from `vex/php.openvex.json`, so a scan without that file shows them.
 Trivy cannot see what is outside the apk database. Libraries built from source and linked statically
 or kept under `/opt` are tracked by hand through the pins in `deps/versions.lock`:
 
-- ImageMagick (with the libheif, libde265 and dav1d it links statically) and net-snmp in every
-  image.
+- ImageMagick (with the libheif, libde265 and dav1d it links statically), net-snmp and libssh2 in
+  every image. libssh2 is a pinned upstream master commit linked statically into `ssh2.so`, because
+  no release and no Wolfi package carries the fixes for CVE-2026-58050, CVE-2026-58051 and
+  CVE-2026-66032 to CVE-2026-66035.
 - OpenSSL 1.1.1w (static, with a private openssldir `/etc/ssl/openssl-1.1`), ICU 67.1 or 70.1,
   libxml2 2.9.14 and libxslt 1.1.35 in the 7.0-8.0 images, and curl on 7.0-7.2. libxml2 and libxslt
   are Debian trixie's source packages with Debian's security patches applied.
