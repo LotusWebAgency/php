@@ -3,7 +3,9 @@
 PHP 7.0 through 8.5, compiled from source on Wolfi (`cgr.dev/chainguard/wolfi-base`, pinned by
 digest) with profile-guided optimization (PGO) trained on real PrestaShop, WordPress, Laravel,
 Symfony and Drupal applications. Binaries are hardened at the ELF level, Snuffleupagus virtual
-patching is available, and a read-only root filesystem is supported.
+patching is available, and a read-only root filesystem is supported. A complete hardened setup is in
+[Hardened deployment](#hardened-deployment); the [Image contract](#image-contract) lists the facts a
+deployment script or agent needs.
 
 Docker Hub: [`lotuswebagency/php`](https://hub.docker.com/r/lotuswebagency/php).
 Source: [github.com/LotusWebAgency/php](https://github.com/LotusWebAgency/php).
@@ -132,6 +134,29 @@ FROM lotuswebagency/php:8.5-fpm
 COPY --from=build /app /app
 ```
 
+## Image contract
+
+The facts a deployment script, CI job or coding agent needs, in one place. Everything here holds for
+every tag unless the row says otherwise.
+
+| Item | Value |
+|---|---|
+| Entrypoint | `/usr/bin/tini -- docker-php-entrypoint`. tini is already PID 1: do not add `--init` / `init: true`, or tini warns that it is not PID 1. |
+| Default command | `fpm`: `php-fpm -F`. `cli`: `php -a`. `cli-builder`, `ext-builder`: `bash`. |
+| User | `www-data`, UID and GID 33. `ext-builder` runs as root. |
+| Working directory | `/app`, owned by `www-data`. |
+| Port | `fpm`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
+| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed). |
+| Stop signal | `fpm`: `SIGQUIT` (graceful). |
+| Logs | stderr only; no log files. |
+| Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |
+| Configuration | `PHP_*` environment variables, applied at start. Drop-in ini files go in `/usr/local/etc/php/conf.d/` and must sort after `10-php.ini`. |
+| Extensions | 53 compiled in; 21 shared, loaded with `PHP_EXT_ENABLE`. List: `php -m`. |
+| Snuffleupagus | Off by default. `PHP_SNUFFLEUPAGUS=<ruleset>`; rulesets in `/usr/local/etc/php/snuffleupagus/`. PHP 7.2+. |
+| `docker exec` | `docker exec <c> docker-php-entrypoint php ...` sees the env-driven ini; plain `docker exec <c> php ...` does not. |
+| Package manager | `apk` (Wolfi). No apt, `pecl` or `docker-php-ext-install`. |
+| Pinning | Tags move with patch releases and weekly rebuilds. Pin `@sha256:...` for reproducible deploys. |
+
 ## Configuration
 
 `docker-php-entrypoint` turns environment variables into ini files and FPM pool settings once, then
@@ -223,6 +248,114 @@ own writes (PrestaShop `var/cache`, Laravel `storage`, WordPress uploads) need t
 FastCGI unix socket needs a writable directory, so keep the TCP default for `PHP_FPM_LISTEN` or mount
 one. In Kubernetes use `readOnlyRootFilesystem: true` with an `emptyDir` at `/tmp`; that mapping is
 not covered by the tests.
+
+## Hardened deployment
+
+The image is already non-root, with setuid bits stripped, ELF-hardened binaries and a baked
+`disable_functions` list. A production `fpm` container adds the controls below. Together they leave
+the worker processes with an empty capability set and `NoNewPrivs`, while the container still starts
+healthy and serves requests.
+
+```yaml
+services:
+  php:
+    image: registry.example.com/myapp:1.0     # built from lotuswebagency/php, see below
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 1g                             # also sizes the FPM pool and opcache
+    environment:
+      PHP_SNUFFLEUPAGUS: laravel              # default | wordpress | prestashop | laravel | your own
+      PHP_OPCACHE_JIT: disable                # Snuffleupagus turns the JIT off; this drops the warning
+      PHP_OPCACHE_VALIDATE_TIMESTAMPS: "0"    # the code never changes inside the container
+    volumes:
+      - storage:/app/storage                  # only the application's own writable paths
+    networks: [backend]                       # reachable by the web server only
+volumes:
+  storage:
+networks:
+  backend:
+    internal: true
+```
+
+The same with `docker run`:
+
+```sh
+docker run -d --name php \
+  --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m \
+  --cap-drop ALL --security-opt no-new-privileges:true \
+  --pids-limit 256 --memory 1g \
+  -e PHP_SNUFFLEUPAGUS=default -e PHP_OPCACHE_JIT=disable -e PHP_OPCACHE_VALIDATE_TIMESTAMPS=0 \
+  -v storage:/app/storage \
+  registry.example.com/myapp:1.0
+```
+
+Bake the code into the image and make it root-owned, so `www-data` can read but not modify it.
+`COPY --from` keeps the build stage's owner (UID 33 here), hence `--chown=root:root`:
+
+```dockerfile
+FROM lotuswebagency/php:8.5-cli-builder AS build
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-scripts --no-autoloader --prefer-dist --no-interaction
+COPY . .
+RUN composer dump-autoload --no-dev --classmap-authoritative
+
+FROM lotuswebagency/php:8.5-fpm@sha256:...
+COPY --from=build --chown=root:root /app /app
+USER root
+RUN mkdir -p /app/storage /app/bootstrap/cache \
+ && chown -R www-data:www-data /app/storage /app/bootstrap/cache
+USER www-data
+```
+
+A named volume mounted at `/app/storage` starts with the image's contents and owner. A bind mount of
+the code (`./:/app:ro`) works too, with `:ro`.
+
+What each setting needs to know:
+
+- **`read_only` and `/tmp`.** `/tmp` is the only path the image writes. `noexec` is fine for `fpm`
+  and `cli`; `cli-builder` needs `exec` for `npx`. Without a writable `/tmp`, `PHP_SNUFFLEUPAGUS` and
+  `PHP_EXT_ENABLE` refuse to start. See [Read-only root filesystem](#read-only-root-filesystem).
+- **`cap_drop: [ALL]`.** Nothing in `fpm` or `cli` needs a capability. The FPM master already runs as
+  `www-data`, so the log notes that the pool's `user` and `group` lines are ignored; that is expected.
+  Keep `PHP_FPM_LISTEN` on a port above 1024.
+- **`no-new-privileges`.** No setuid binary is left to gain privileges with; this closes the path for
+  anything added later.
+- **Snuffleupagus.** Pick the ruleset that matches the application, or start a custom one from
+  `default` (see [Hardening](#hardening)). Rulesets are for serving: run Composer and other build
+  steps in `cli-builder` without one. Snuffleupagus hooks the executor, so PHP turns the JIT off
+  while it is loaded and logs a startup warning. `PHP_OPCACHE_JIT=disable` says so up front and
+  removes the warning; `off` does not, because it keeps the JIT buffer.
+- **`PHP_DISABLE_FUNCTIONS`.** Adds names to the baked list, for example `proc_open` when the
+  application never starts processes. Laravel queues, Symfony Process and Composer need `proc_open`.
+  The entrypoint refuses to start if a listed name does not end up disabled.
+- **Limits.** `pids_limit` bounds runaway forks; the memory limit bounds the container and drives FPM
+  and opcache autotuning (512 MB is assumed without one).
+- **Network.** `fpm` speaks FastCGI on 9000 and should only be reachable by the web server. Never
+  publish 9000 to the host.
+- **Errors.** `PHP_DISPLAY_ERRORS` stays `Off` (the default); errors go to stderr.
+
+Kubernetes, the same controls on the container (not covered by the tests):
+
+```yaml
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 33
+  runAsGroup: 33
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
+volumeMounts:
+  - { name: tmp, mountPath: /tmp }
+# pod spec: volumes: [{ name: tmp, emptyDir: { medium: Memory, sizeLimit: 256Mi } }]
+```
 
 ## Extensions
 
@@ -443,8 +576,8 @@ tag:
   Trivy verdict.
 - **OpenVEX.** Findings accepted instead of fixed, each with a reason and a review date. Source:
   [`vex/php.openvex.json`](vex/php.openvex.json). Only images a statement applies to carry it.
-  Currently that is `cli-builder`, for `braces` in semantic-release's dependency tree, which has
-  no fixed release.
+  Currently that is `cli-builder`, for `braces` in semantic-release's dependency tree, and
+  `ext-builder`, for perl, which autoconf needs. Neither has a fixed release.
 
 ```sh
 cosign verify-attestation --type openvex \
@@ -468,10 +601,10 @@ docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --raw \
 ```
 
 **What Trivy sees.** The CI gate scans every flavor for fixable CRITICAL and HIGH findings and
-reports none. The only accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s
-semantic-release, HIGH, no upstream fix; see [Accepted findings](SECURITY.md#accepted-findings)). It is
-suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan without that
-file shows it. Trivy reads the apk database, so it does not see what is outside it:
+reports none. Two findings are accepted, both without an upstream fix: CVE-2026-93687 (braces
+3.0.3 in `cli-builder`'s semantic-release, HIGH) and CVE-2026-15534 (perl 5.44.0 in `ext-builder`,
+MEDIUM); see [Accepted findings](SECURITY.md#accepted-findings). They are suppressed through the
+`.trivyignore` generated from `vex/php.openvex.json`, so a scan without that file shows them. Trivy reads the apk database, so it does not see what is outside it:
 
 - libraries built from source and linked statically or kept under `/opt`: ImageMagick (with static
   libheif, libde265 and dav1d) and net-snmp in every image; OpenSSL 1.1.1w, ICU, libxml2 and libxslt in the 7.0-8.0 images; curl in 7.0-7.2.

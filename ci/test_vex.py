@@ -55,7 +55,7 @@ class TestVexFile(unittest.TestCase):
         for st in self.doc["statements"]:
             for p in st["products"]:
                 for sub in p["subcomponents"]:
-                    self.assertRegex(sub["@id"], r"^pkg:npm/[^@]+@\d+\.\d+\.\d+$")
+                    self.assertRegex(sub["@id"], r"^pkg:(npm/[^@]+@\d+\.\d+\.\d+|apk/wolfi/[^@]+@\d+(\.\d+)*-r\d+)$")
 
 
 class TestValidate(unittest.TestCase):
@@ -115,18 +115,26 @@ class TestEmit(unittest.TestCase):
     def emit(self, flavor, digest=DIGEST):
         return vex.emit(self.doc, "lotuswebagency/php", digest, flavor, "2026-10-03T12:00:00Z")
 
-    def test_cli_builder_gets_every_statement_scoped_to_the_digest(self):
-        out = self.emit("cli-builder")
+    def scoped_to(self, flavor):
+        return [st for st in self.doc["statements"]
+                if any(vex.applies(p, flavor) for p in st["products"])]
+
+    def test_builders_get_their_statements_scoped_to_the_digest(self):
         purl = f"pkg:oci/php@{DIGEST}?repository_url=index.docker.io/lotuswebagency/php"
-        self.assertEqual(len(out["statements"]), len(self.doc["statements"]))
-        for st in out["statements"]:
-            self.assertEqual([p["@id"] for p in st["products"]], [purl])
-            self.assertEqual(st["products"][0]["hashes"], {"sha-256": "ab" * 32})
-            self.assertNotIn("flavor=", json.dumps(st))
-        self.assertEqual(out["timestamp"], "2026-10-03T12:00:00Z")
+        for flavor in ("cli-builder", "ext-builder"):
+            want = self.scoped_to(flavor)
+            self.assertTrue(want, f"no statement applies to {flavor} -- this test proves nothing")
+            out = self.emit(flavor)
+            self.assertEqual([st["vulnerability"]["name"] for st in out["statements"]],
+                             [st["vulnerability"]["name"] for st in want])
+            for st in out["statements"]:
+                self.assertEqual([p["@id"] for p in st["products"]], [purl])
+                self.assertEqual(st["products"][0]["hashes"], {"sha-256": "ab" * 32})
+                self.assertNotIn("flavor=", json.dumps(st))
+            self.assertEqual(out["timestamp"], "2026-10-03T12:00:00Z")
 
     def test_other_flavors_get_nothing(self):
-        for flavor in ("fpm", "cli", "ext-builder"):
+        for flavor in ("fpm", "cli"):
             self.assertIsNone(self.emit(flavor), flavor)
 
     def test_the_emitted_document_passes_the_same_validation(self):

@@ -28,10 +28,11 @@ rebuild cadence: [SUPPORT.md](SUPPORT.md).
 Every build (pull request, push to `develop`, merge to `main`, weekly rebuild) runs a Trivy scan and
 fails on any fixable CRITICAL or HIGH finding before an image can be published.
 
-The gate scans every flavor for fixable CRITICAL and HIGH findings and reports none. The only
-accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s semantic-release, HIGH, no upstream
-fix; see [Accepted findings](#accepted-findings)). It is suppressed through the `.trivyignore`
-generated from `vex/php.openvex.json`, so a scan without that file shows it.
+The gate scans every flavor for fixable CRITICAL and HIGH findings and reports none. Two findings
+are accepted, both without an upstream fix: CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s
+semantic-release, HIGH) and CVE-2026-15534 (perl 5.44.0 in `ext-builder`, where autoconf needs it,
+MEDIUM); see [Accepted findings](#accepted-findings). They are suppressed through the `.trivyignore`
+generated from `vex/php.openvex.json`, so a scan without that file shows them.
 
 Trivy cannot see what is outside the apk database. Libraries built from source and linked statically
 or kept under `/opt` are tracked by hand through the pins in `deps/versions.lock`:
