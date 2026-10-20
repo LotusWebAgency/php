@@ -149,7 +149,10 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # php/ext.json for each linkage:"shared" extension. libmcrypt-dev is for mcrypt
 # on PHP < 8.0. imap is absent: Wolfi has no c-client. pcre2-dev is
 # snuffleupagus's build dependency (its config.m4 calls pcre2-config).
-      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
+# cyrus-sasl-mit-dev: openldap-2.7-dev needs a cyrus-sasl-dev, and apk otherwise
+# picks the heimdal variant, whose libsasl2 drags a second Kerberos stack
+# (heimdal-libs) into the runtime beside the MIT krb5 libpq and curl already link.
+      cyrus-sasl-mit-dev rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
       libmcrypt-dev tidy-html5-dev util-linux-dev \
       yaml-dev libevent-dev pcre2-dev
 # ext-snmp links this instead of the distro's net-snmp-dev.
@@ -196,7 +199,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
       oniguruma-dev libzip-dev sqlite-dev postgresql-18-dev zlib-dev zstd-dev \
       brotli-dev \
       libsodium-dev argon2-dev gmp-dev readline-dev libmemcached-dev \
-      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
+      cyrus-sasl-mit-dev rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
       libmcrypt-dev tidy-html5-dev util-linux-dev \
       yaml-dev libevent-dev pcre2-dev
 COPY deps/build-deps.sh deps/versions.lock deps/fetch-verified.sh /build/deps/

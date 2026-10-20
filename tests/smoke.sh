@@ -644,6 +644,15 @@ heif_pkgs=$(grep -E '^(libheif|libde265|libsdl2|gdk-pixbuf|libdav1d|aom-libs|rav
 [ -z "$heif_pkgs" ] || { echo "FAIL: the image carries the distro libheif stack ($heif_pkgs) -- HEIC/AVIF decode is meant to be static in libMagickCore"; exit 1; }
 echo "ok: no libheif, libde265, SDL, gdk-pixbuf or AV1/HEVC codec packages in the image"
 
+# libldap's libsasl2 comes from cyrus-sasl-mit-libs (Dockerfile deps stages), so
+# the only Kerberos stack is MIT krb5, which libpq and curl link anyway. The
+# heimdal variant would add heimdal-libs, a second Kerberos implementation.
+grep -qx 'cyrus-sasl-mit-libs' <<<"$apk_installed" \
+  || { echo "FAIL: cyrus-sasl-mit-libs is not installed -- libldap's libsasl2 comes from another provider: $(grep -E '^cyrus-sasl' <<<"$apk_installed" | tr '\n' ' ')"; exit 1; }
+krb_pkgs=$(grep -E '^(heimdal.*|cyrus-sasl-heimdal.*)$' <<<"$apk_installed" | tr '\n' ' ' || true)
+[ -z "$krb_pkgs" ] || { echo "FAIL: the image carries heimdal packages ($krb_pkgs) beside MIT krb5"; exit 1; }
+echo "ok: libsasl2 is cyrus-sasl-mit-libs and no heimdal package ships"
+
 # Busybox's network applets (raw-socket and interface tools) are pruned from the
 # image; curl is the one network client that stays. The control proves the query
 # can see busybox applets at all.
