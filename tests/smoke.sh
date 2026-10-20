@@ -314,10 +314,8 @@ direct_needed=$(grep -i NEEDED <<<"$dyn" | grep -iE 'libssl|libcrypto' || true)
 rm -f "$tmp_php"
 
 # A shared *extension* is held to a narrower bar than php itself. On 7.4-8.0,
-# event.so NEEDs libssl.so.4/libcrypto.so.4 directly, and snmp.so reaches them
-# too (directly on clang builds, transitively through the vendored libnetsnmp on
-# gcc builds): the system OpenSSL 4, which libevent and libnetsnmp link and bind
-# to cleanly (LD_DEBUG=bindings shows SSL_CTX_new et al. resolving to the system
+# event.so NEEDs libssl.so.4/libcrypto.so.4 directly: the system OpenSSL 4,
+# which libevent links and binds to cleanly (LD_DEBUG=bindings shows SSL_CTX_new et al. resolving to the system
 # libssl.so.4, never to php's static 1.1). That is two independent OpenSSL
 # stacks in one process, not the EOL vendored one escaping. What must never
 # happen is the vendored 1.1.1 (built --no-shared) becoming loadable, which
@@ -375,8 +373,8 @@ echo "ok: inspected the php binary and $n_ext_files shared extension .so file(s)
 # The other half: a stray libssl/libcrypto file can sit in the image without
 # being a NEEDED entry of anything php loads (a leftover from a build stage, a
 # vendored copy nothing links against yet). The system OpenSSL 4 is the only one
-# the image carries (curl, psql, the mariadb client, libpq, libldap and the
-# vendored libnetsnmp all link it), so what must never exist is a file that
+# the image carries (curl, psql, the mariadb client, libpq and libldap all
+# link it), so what must never exist is a file that
 # could be another build: a libssl.so.1*/libcrypto.so.1* or
 # libssl.so.3*/libcrypto.so.3* file anywhere, or a libssl.so*/libcrypto.so* file
 # under a vendored prefix (/opt/php-deps, or anywhere under /opt). Scoped to
@@ -613,30 +611,24 @@ root_err=$(drun --rm -u 0 "$IMAGE" php -r 'echo 1;' 2>&1 >/dev/null | grep -v '^
 [ -z "$root_err" ] || { echo "FAIL: php -r as root wrote to stderr: $root_err"; exit 1; }
 echo "ok: php starts silent as root"
 
-# net-snmp (deps/build-netsnmp.sh): ext-snmp links a vendored client-only build
-# under /opt/net-snmp, so no distro net-snmp package and no perl ship. These
-# assertions keep that true: a regression to net-snmp-dev would bring a second
-# libnetsnmp back silently, with every functional check still green.
-#
-# `apk info` lists every installed package name (glibc is versioned, glibc-2.44). The control proves the query can
-# see an installed package at all -- an empty result is otherwise
-# indistinguishable from an apk database that cannot be read.
+# No perl in the runtime image: a distro package that depends on it would bring a
+# whole interpreter along. `apk info` lists every installed package name (glibc is
+# versioned, glibc-2.44). The control proves the query can see an installed package
+# at all -- an empty result is otherwise indistinguishable from an apk database
+# that cannot be read.
 apk_installed=$(drun --rm "$IMAGE" apk info 2>/dev/null || true)
 grep -qE '^glibc-[0-9]' <<<"$apk_installed" \
-  || { echo "FAIL: apk info could not see glibc as installed -- the perl/snmp absence checks below would prove nothing"; exit 1; }
+  || { echo "FAIL: apk info could not see glibc as installed -- the perl absence check below would prove nothing"; exit 1; }
 # cli-builder and ext-builder bring perl in on purpose (git's perl scripts,
-# autoconf and automake are perl programs). Every flavor is
-# still held to the snmp half: no distro net-snmp package, which is what would
-# put a second net-snmp in the image.
-stray_regex='^(libsnmp.*|libnetsnmp.*|net-snmp.*)$'
-perl_note="perl*, "
+# autoconf and automake are perl programs).
 case "$FLAVOR" in
-  cli-builder|ext-builder) perl_note="" ;;
-  *) stray_regex='^(libsnmp.*|libnetsnmp.*|net-snmp.*|perl|perl-.*|libperl.*)$' ;;
+  cli-builder|ext-builder) echo "skip: perl is part of the $FLAVOR toolchain" ;;
+  *)
+    stray_pkgs=$(grep -E '^(perl|perl-.*|libperl.*)$' <<<"$apk_installed" | tr '\n' ' ' || true)
+    [ -z "$stray_pkgs" ] || { echo "FAIL: the runtime image carries perl packages ($stray_pkgs)"; exit 1; }
+    echo "ok: no perl* package in the image (control: glibc is visible to the same query)"
+    ;;
 esac
-stray_pkgs=$(grep -E "$stray_regex" <<<"$apk_installed" | tr '\n' ' ' || true)
-[ -z "$stray_pkgs" ] || { echo "FAIL: the runtime image carries perl/snmp library packages ($stray_pkgs) -- ext-snmp is meant to link the vendored /opt/net-snmp"; exit 1; }
-echo "ok: no ${perl_note}net-snmp* or libsnmp* package in the image (control: glibc is visible to the same query)"
 
 # HEIC/AVIF are decoded by static libraries inside libMagickCore, so the distro
 # libheif and the SDL/gdk-pixbuf/codec closure it pulls in must not be installed.
@@ -762,104 +754,6 @@ suid_control=$(drun --rm --user 0 "$IMAGE" sh -c "mkdir -m 700 /suid-control && 
 suid_files=$(drun --rm --user 0 "$IMAGE" sh -c "$suid_scan")
 [ -z "$suid_files" ] || { echo "FAIL: the image carries setuid/setgid files: $(tr '\n' ' ' <<<"$suid_files")"; exit 1; }
 echo "ok: no setuid or setgid file in the image (scanned as root; control: planted files in a root-only directory are found)"
-
-if grep -qw snmp <<<"$SHARED_EXTS"; then
-  snmp_ldd=$(image_ldd "$extdir/snmp.so" 2>&1 || true)
-  grep -qE '^[[:space:]]*libnetsnmp\.so\.[0-9]+ => /opt/net-snmp/lib/libnetsnmp\.so\.[0-9]+' <<<"$snmp_ldd" \
-    || { echo "FAIL: snmp.so does not resolve libnetsnmp from /opt/net-snmp/lib: $snmp_ldd"; exit 1; }
-  ! grep -q 'not found' <<<"$snmp_ldd" || { echo "FAIL: snmp.so has an unresolved NEEDED entry: $snmp_ldd"; exit 1; }
-  nsnmp_lib=$(drun --rm "$IMAGE" sh -c 'ls /opt/net-snmp/lib/libnetsnmp.so.*[0-9] | head -1')
-  nsnmp_ldd=$(image_ldd "$nsnmp_lib" 2>&1 || true)
-  # USM auth/priv crypto goes through the system OpenSSL 4, from the system
-  # path -- not a vendored copy, never an EOL one.
-  grep -qE 'libcrypto\.so\.4 => /(usr/)?lib/' <<<"$nsnmp_ldd" \
-    || { echo "FAIL: libnetsnmp does not link the system libcrypto.so.4: $nsnmp_ldd"; exit 1; }
-  ! grep -qE 'libperl|libwrap|libsensors|libpci|not found' <<<"$nsnmp_ldd" \
-    || { echo "FAIL: libnetsnmp links something it is built without, or has an unresolved entry: $nsnmp_ldd"; exit 1; }
-  echo "ok: snmp.so resolves libnetsnmp from /opt/net-snmp/lib, which links only the system libssl 4 (no perl/wrap/sensors/pci)"
-
-  # Only the library and the MIB files ship; the prefix's bin/include/pkgconfig
-  # were build-time inputs for ext-snmp. Control: the same find sees the library.
-  nsnmp_files=$(drun --rm "$IMAGE" find /opt/net-snmp \( -type f -o -type l \))
-  grep -q '/lib/libnetsnmp\.so\.' <<<"$nsnmp_files" \
-    || { echo "FAIL: find /opt/net-snmp did not list the library -- the dev-file absence check below would prove nothing"; exit 1; }
-  nsnmp_dev=$(grep -E '\.(a|la|pc|h)$|/(bin|include)/' <<<"$nsnmp_files" || true)
-  [ -z "$nsnmp_dev" ] || { echo "FAIL: build-time files shipped under /opt/net-snmp: $nsnmp_dev"; exit 1; }
-  echo "ok: /opt/net-snmp ships the library and MIB files only"
-
-  # Works with no network. Output is compared exactly, stderr included: a wrong
-  # compiled-in MIB directory or an unresolvable libnetsnmp prints noise on load
-  # (the fpm entrypoint's own memory-limit notice is the one line filtered out).
-  #   - snmp_read_mib on a shipped MIB succeeds; on a missing file it fails (control).
-  #   - SNMPv3 authPriv key generation (SHA + AES) is local, so success means the
-  #     OpenSSL-backed USM crypto is really there.
-  #   - A MIB-qualified name resolves from the compiled-in MIB directory with no
-  #     MIBS set: the request then fails on the network, not on the name. The
-  #     control name, from a module that does not exist, must fail on the name --
-  #     otherwise the resolution check cannot tell the two failures apart.
-  snmp_out=$(drun --rm -i "$IMAGE" sh -c 'php-ext-enable snmp >/dev/null && php' 2>&1 <<'PHP' | grep -v '^docker-php-entrypoint:' || true
-<?php
-$fail = function ($m) { echo "FAIL: $m\n"; exit(1); };
-(extension_loaded("snmp") && class_exists("SNMP")) || $fail("snmp extension or SNMP class missing");
-is_int(snmp_get_valueretrieval()) || $fail("snmp_get_valueretrieval() did not return an int");
-snmp_read_mib("/opt/net-snmp/share/snmp/mibs/SNMPv2-MIB.txt") === true || $fail("snmp_read_mib failed on a shipped MIB");
-@snmp_read_mib("/nonexistent/NO-SUCH-MIB.txt") === false || $fail("snmp_read_mib accepted a missing file");
-$s = new SNMP(SNMP::VERSION_3, "127.0.0.1", "smokeuser");
-$s->setSecurity("authPriv", "SHA", "12345678", "AES", "12345678") === true || $fail("USM authPriv SHA/AES setup failed");
-$last = "";
-set_error_handler(function ($no, $str) use (&$last) { $last = $str; return true; });
-snmpget("127.0.0.1:1", "public", "SNMPv2-MIB::sysDescr.0", 100000, 0);
-stripos($last, "Invalid object identifier") === false || $fail("SNMPv2-MIB::sysDescr.0 did not resolve from the default MIB directory: $last");
-$last = "";
-snmpget("127.0.0.1:1", "public", "NO-SUCH-MIB::nothing.0", 100000, 0);
-stripos($last, "Invalid object identifier") !== false || $fail("control: an unknown MIB name did not fail on the name ($last), so the resolution check above proves nothing");
-echo "snmp-ok\n";
-PHP
-)
-  [ "$snmp_out" = "snmp-ok" ] || { echo "FAIL: ext-snmp functional check printed: $snmp_out"; exit 1; }
-  echo "ok: ext-snmp loads clean and works offline (snmp_read_mib, USM SHA/AES keys, MIB name resolution, negative controls)"
-
-  # net-snmp creates /var/lib/snmp and /var/lib/snmp/cert_indexes the first time
-  # the extension loads and logs "Created directory: ..." to stderr when it does;
-  # runtime-base pre-creates both, owned by www-data, so neither root nor www-data
-  # prints anything. The control removes them and requires the notice to come
-  # back, otherwise a clean stderr below would only prove the notice is gone from
-  # this net-snmp build, not that the directories are what silenced it. -d
-  # extension=snmp.so rather than php-ext-enable: the entrypoint is bypassed so
-  # stderr holds php's and net-snmp's output only.
-  for snmp_uid in 0 33; do
-    snmp_err=$(drun --rm -u "$snmp_uid" --entrypoint php "$IMAGE" -d extension=snmp.so -r 'echo extension_loaded("snmp") ? "" : "snmp not loaded";' 2>&1 >/dev/null || true)
-    [ -z "$snmp_err" ] || { echo "FAIL: loading snmp.so as uid $snmp_uid wrote to stderr: $snmp_err"; exit 1; }
-  done
-  snmp_ctl=$(drun --rm -u 0 --entrypoint sh "$IMAGE" -c 'rm -rf /var/lib/snmp; exec php -d extension=snmp.so -r "echo 1;"' 2>&1 >/dev/null || true)
-  grep -q 'Created directory: /var/lib/snmp' <<<"$snmp_ctl" \
-    || { echo "FAIL: control: with /var/lib/snmp removed, loading snmp.so as root did not log its directory creation ($snmp_ctl), so the clean-stderr check above proves nothing"; exit 1; }
-  echo "ok: loading snmp.so is silent as root and as uid 33 (control: without /var/lib/snmp net-snmp logs 'Created directory')"
-
-  # MIBs mounted where a distro host keeps them are found without MIBDIRS: the
-  # compiled-in search path is the conventional one plus /opt/net-snmp's. A renamed copy of
-  # IF-MIB in /usr/share/snmp/mibs/ietf (a directory net-snmp does not search
-  # recursively, so it has to be named in the path) resolves a qualified name;
-  # the same name before the copy exists must fail on the name (control).
-  # shellcheck disable=SC2016  # the script is for the container's shell
-  snmp_mibdir=$(drun --rm -u 0 -i --entrypoint sh "$IMAGE" -c '
-    set -eu
-    cat > /tmp/probe.php <<"PHP"
-<?php
-$last = "";
-set_error_handler(function ($no, $str) use (&$last) { $last = $str; return true; });
-snmpget("127.0.0.1:1", "public", "ZZ-SMOKE-MIB::ifNumber.0", 100000, 0);
-echo stripos($last, "Invalid object identifier") === false ? "resolved" : "unresolved";
-PHP
-    before=$(php -d extension=snmp.so /tmp/probe.php)
-    mkdir -p /usr/share/snmp/mibs/ietf
-    sed s/IF-MIB/ZZ-SMOKE-MIB/g /opt/net-snmp/share/snmp/mibs/IF-MIB.txt > /usr/share/snmp/mibs/ietf/ZZ-SMOKE-MIB.txt
-    after=$(php -d extension=snmp.so /tmp/probe.php)
-    echo "$before $after"' 2>&1 || true)
-  [ "$snmp_mibdir" = "unresolved resolved" ] \
-    || { echo "FAIL: MIB lookup in the conventional directories: expected 'unresolved resolved' (before/after a MIB appears in /usr/share/snmp/mibs/ietf), got: $snmp_mibdir"; exit 1; }
-  echo "ok: a MIB placed in /usr/share/snmp/mibs/ietf is found without MIBDIRS (control: unknown before it exists)"
-fi
 
 # Baseline php.ini: expose_php/display_errors/allow_url_include off.
 for pair in "expose_php:" "display_errors:" "allow_url_include:"; do
@@ -1020,9 +914,6 @@ docker cp "$hcid:$extdir/." "$hard_dir/ext" >/dev/null
 # they are covered here too.
 mkdir -p "$hard_dir/im"
 docker cp "$hcid:/opt/imagemagick/lib/." "$hard_dir/im" >/dev/null 2>&1 || true
-# Same for the vendored net-snmp client library.
-mkdir -p "$hard_dir/nsnmp"
-docker cp "$hcid:/opt/net-snmp/lib/." "$hard_dir/nsnmp" >/dev/null 2>&1 || true
 # Everything under /opt, for the RPATH scan below: the vendored libraries'
 # plugins (ImageMagick's coder modules) and the legacy era's vendored tree are
 # ELF files nothing above names. docker cp keeps symlinks as symlinks, so each
@@ -1088,13 +979,10 @@ assert_compiler_comment "php-$EXPECT" "$hard_dir/php"
 # shellcheck disable=SC2046  # the .so list is meant to word-split
 im_libs=$(find "$hard_dir/im" -maxdepth 1 -type f -name '*.so.*' 2>/dev/null | tr '\n' ' ')
 [ -n "$im_libs" ] || { echo "FAIL: no ImageMagick libraries extracted -- they ship in every flavor, so an empty set means the copy failed"; exit 1; }
-# shellcheck disable=SC2046  # the .so list is meant to word-split
-nsnmp_libs=$(find "$hard_dir/nsnmp" -maxdepth 1 -type f -name '*.so.*' 2>/dev/null | tr '\n' ' ')
-[ -n "$nsnmp_libs" ] || { echo "FAIL: no net-snmp library extracted -- it ships in every flavor, so an empty set means the copy failed"; exit 1; }
 module_files=("$hard_dir/php-chmod-sanitize.so")
 [ -f "$hard_dir/php-fpm" ] && module_files+=("$hard_dir/php-fpm")
 # shellcheck disable=SC2206  # both are deliberate globs/word-splits
-module_files+=("$hard_dir"/ext/*.so $im_libs $nsnmp_libs)
+module_files+=("$hard_dir"/ext/*.so $im_libs)
 
 # Every ELF file under /opt, picked by magic number rather than by name: the
 # vendored trees hold versioned libraries (*.so.1.2), plugin modules (ImageMagick's
@@ -1112,20 +1000,17 @@ done < <(find "$hard_dir/opt" -type f -print0 | sort -z)
 [ "${#opt_elf_files[@]}" -ge 1 ] || { echo "FAIL: no ELF file found under the extracted /opt -- the hardening and RPATH scans of vendored libraries saw nothing"; exit 1; }
 # Control: the walk must contain every library the narrower globs above found,
 # or it is not the superset it replaces.
-for lib in $im_libs $nsnmp_libs; do
-  # the im/ and nsnmp/ copies are the /opt/<name>/lib directories
+for lib in $im_libs; do
+  # the im/ copy is the /opt/imagemagick/lib directory
   rel=${lib#"$hard_dir"/}
-  case "$rel" in
-    im/*)    want="$hard_dir/opt/imagemagick/lib/${rel#im/}" ;;
-    nsnmp/*) want="$hard_dir/opt/net-snmp/lib/${rel#nsnmp/}" ;;
-  esac
+  want="$hard_dir/opt/imagemagick/lib/${rel#im/}"
   printf '%s\0' "${opt_elf_files[@]}" | grep -zqxF "$want" \
     || { echo "FAIL: the /opt ELF walk missed $rel, which the library glob found"; exit 1; }
 done
 
 # Code-level hardening (--code) on every shipped ELF: the chmod shim, php-fpm,
 # the shared extensions and everything under /opt (which includes the libraries
-# in im_libs/nsnmp_libs). Each file is held to the canary, _FORTIFY_SOURCE and
+# in im_libs). Each file is held to the canary, _FORTIFY_SOURCE and
 # the CET/branch-protection landing pads only where it can show them (the rule
 # is documented in assert-elf-hardening.sh). The php binary gets the stricter
 # whole-binary version above.
@@ -1140,8 +1025,8 @@ echo "ok: code-level hardening holds on ${#hard_files[@]} shipped ELF files (${#
 # flag, so php itself is only held to it on the clang era; the vendored libraries are
 # linked by lld or GNU ld in every era.
 has_relr() { readelf -dW "$1" | grep -q '(RELRSZ)'; }
-# shellcheck disable=SC2206  # both lists are deliberate word-splits
-relr_files=($im_libs $nsnmp_libs)
+# shellcheck disable=SC2206  # the list is a deliberate word-split
+relr_files=($im_libs)
 case "$VM_COMPILER" in
   clang*) relr_files+=("$hard_dir/php" "$hard_dir"/ext/*.so); [ -f "$hard_dir/php-fpm" ] && relr_files+=("$hard_dir/php-fpm") ;;
 esac
@@ -1177,16 +1062,6 @@ opt_elf=${#opt_elf_files[@]}
 # a parser that found nothing would pass the check below by being blind.
 grep -qx 'php /opt/imagemagick/lib' "$rpath_hits" \
   || { echo "FAIL: the RPATH scan did not see php's /opt/imagemagick/lib entry -- it would not see a bad one either: $(cat "$rpath_hits")"; exit 1; }
-if grep -qw snmp <<<"$SHARED_EXTS"; then
-  # snmp.so is the one shared extension that names /opt/net-snmp/lib (from its own
-  # link line), and it has to: nothing else tells the loader where libnetsnmp is.
-  grep -qx 'snmp.so /opt/net-snmp/lib' "$rpath_hits" \
-    || { echo "FAIL: snmp.so has no /opt/net-snmp/lib RUNPATH, so libnetsnmp cannot be found: $(grep '^snmp.so ' "$rpath_hits" || echo 'no entries at all')"; exit 1; }
-  # ... and no other extension should: that prefix on ldflags.sh also switches on
-  # --exclude-libs=ALL, which has no business in twenty unrelated modules.
-  stray_nsnmp=$(grep -E '^[^/ ]+\.so /opt/net-snmp/lib$' "$rpath_hits" | grep -v '^snmp\.so ' || true)
-  [ -z "$stray_nsnmp" ] || { echo "FAIL: shared extensions other than snmp.so carry the net-snmp RUNPATH: $stray_nsnmp"; exit 1; }
-fi
 # $ORIGIN-relative entries resolve per file and are not a fixed directory.
 rpath_dirs=$(awk '{ print $2 }' "$rpath_hits" | grep -v '^\$ORIGIN' | sort -u)
 # shellcheck disable=SC2086  # the dir list is meant to word-split into arguments

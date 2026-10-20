@@ -352,15 +352,6 @@ stage_runtime_deps() {
     mkdir -p /deps-stage/opt/imagemagick
     cp -a /opt/imagemagick/lib /deps-stage/opt/imagemagick/
   fi
-  # net-snmp's client library and MIB files only: bin, include and pkgconfig are
-  # build-time inputs for ext-snmp, which php/build-shared-ext.sh compiles after
-  # this runs, against the prefix still present in this stage. share/snmp/mibs is
-  # where the library's compiled-in MIB directory points.
-  if [ -d /opt/net-snmp/lib ]; then
-    mkdir -p /deps-stage/opt/net-snmp/lib /deps-stage/opt/net-snmp/share/snmp
-    cp -a /opt/net-snmp/lib/libnetsnmp.so.* /deps-stage/opt/net-snmp/lib/
-    cp -a /opt/net-snmp/share/snmp/mibs /deps-stage/opt/net-snmp/share/snmp/
-  fi
 }
 
 # --------------------------------------------------------------- ThinLTO, PGO

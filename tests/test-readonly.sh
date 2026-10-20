@@ -11,10 +11,9 @@
 # Where an assertion depends on /tmp being writable it has a control that proves
 # the same check fails without it: PHP_EXT_ENABLE's refusal, the cli session and
 # temp file program, the cli-builder project directory, the fpm request, and
-# npx's need for an exec /tmp. Two checks have no such control and say so:
-# opcache (shared memory, needs no path at all) and net-snmp (its state
-# directory is pre-created in the image), so they show only that nothing there
-# writes to the read-only rootfs, not that the check could have caught it.
+# npx's need for an exec /tmp. One check has no such control and says so:
+# opcache (shared memory, needs no path at all), so it shows only that nothing
+# there writes to the read-only rootfs, not that the check could have caught it.
 #
 # Every container command runs under `timeout` inside the container (a host-side
 # timeout would only kill the docker client). The two detached fpm containers
@@ -37,9 +36,9 @@ RO=(--read-only --tmpfs /tmp -m 512m)
 # /tmp mounted exec: cli-builder's npx unpacks packages to /tmp/npm/_npx and runs
 # them from there; the Docker default (noexec) makes that fail with EACCES.
 RO_EXEC=(--read-only --tmpfs /tmp:exec -m 512m)
-# What a failed write under a read-only rootfs looks like in PHP, net-snmp,
-# npm and composer output alike.
-WRITE_ERR='read-only file system|permission denied|failed to open stream|unable to (create|write|open)|cannot (create|open|write)|EROFS|Created directory'
+# What a failed write under a read-only rootfs looks like in PHP, npm and
+# composer output alike.
+WRITE_ERR='read-only file system|permission denied|failed to open stream|unable to (create|write|open)|cannot (create|open|write)|EROFS'
 
 EXTDIR=$(drun --rm "$IMAGE" timeout 20 php -r 'echo ini_get("extension_dir");')
 has_ext() { drun --rm "$IMAGE" timeout 20 test -f "${EXTDIR}/$1.so"; }
@@ -98,18 +97,6 @@ EOF
     || fail "$FLAVOR: the opcache probe did not run under --read-only: $out"
   grep -qE '^OPCACHE=on CACHED=[1-9]' <<<"$out" || fail "$FLAVOR: opcache is not caching scripts under --read-only: $out"
   echo "ok: $FLAVOR -- opcache caches scripts under --read-only"
-
-  if has_ext snmp; then
-    out=$(drun --rm "${RO[@]}" -e PHP_EXT_ENABLE=snmp "$IMAGE" timeout 20 php -r '
-      $s = new SNMP(SNMP::VERSION_3, "127.0.0.1", "u");
-      $s->setSecurity("authPriv", "SHA", "authpass12345", "AES", "privpass12345");
-      $s->timeout = 100000; $s->retries = 0;
-      @$s->get("1.3.6.1.2.1.1.1.0");
-      echo "SNMP_DONE\n";' 2>&1)
-    grep -qx "SNMP_DONE" <<<"$out" || fail "$FLAVOR: net-snmp v3 session did not run under --read-only: $out"
-    ! grep -qiE "$WRITE_ERR" <<<"$out" || fail "$FLAVOR: net-snmp complained about its state directory under --read-only: $out"
-    echo "ok: $FLAVOR -- net-snmp (/var/lib/snmp is pre-created, no tmpfs needed) is silent under --read-only"
-  fi
 fi
 
 if [ "$FLAVOR" = cli-builder ]; then

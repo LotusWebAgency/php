@@ -14,7 +14,7 @@
 #   php/php-src.lock    php.net tarball and its .asc, per PHP release (Dockerfile)
 #   php/pecl.lock       every PECL row incl. name@X.Y overrides (fetch-pecl.sh, build-shared-ext.sh);
 #                       source=github rows take their URL from php/ext.json
-#   deps/versions.lock  vendored libraries (build-deps.sh, build-imagemagick.sh, build-netsnmp.sh)
+#   deps/versions.lock  vendored libraries (build-deps.sh, build-imagemagick.sh)
 #   php/pgo/corpus.lock PGO corpus sources (php/pgo/corpus/fetch.sh)
 # Not listed: `latest` rows (prestashop-lang, not sha-pinned) and docker:// rows (images).
 #

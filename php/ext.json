@@ -630,15 +630,6 @@
       "why": "gRPC clients used by Laravel microservice integrations -- the pinned release's package.xml declares an 8.2.0 floor; on 8.0 it fails mid-compile on arginfo stubs (arginfo_offsetGet/current/key) that 8.0's Zend headers do not declare"
     },
     {
-      "name": "snmp",
-      "source": "core",
-      "linkage": "shared",
-      "php": ">=7.0",
-      "configure": "--with-snmp=/opt/net-snmp",
-      "libs": [],
-      "why": "Legacy PrestaShop server-monitoring modules polling network devices. Links the vendored client-only net-snmp (deps/build-netsnmp.sh), not a packaged libsnmp, which hard-depends on libperl"
-    },
-    {
       "name": "swoole",
       "source": "pecl",
       "linkage": "shared",

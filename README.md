@@ -65,7 +65,7 @@ use generic tuning (`-mtune=generic`), so the code is not tied to one core. amd6
 generic; arm64 `-v3` tunes for `neoverse-v2`, under both compilers. Only the amd64 `-v3` tags check
 the CPU at startup.
 
-The vendored ImageMagick, the heif stack (libheif, libde265, dav1d) and net-snmp are built for the
+The vendored ImageMagick and the heif stack (libheif, libde265, dav1d) are built for the
 baseline in every image, `-v3` included. Their code runs on any CPU the baseline tag supports.
 
 A tag names the PHP minor, so `8.4-fpm` moves with each 8.4 patch release. Pin the digest for
@@ -151,7 +151,7 @@ every tag unless the row says otherwise.
 | Logs | stderr only; no log files. |
 | Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |
 | Configuration | `PHP_*` environment variables, applied at start. Drop-in ini files go in `/usr/local/etc/php/conf.d/` and must sort after `10-php.ini`. |
-| Extensions | 53 compiled in; 20 shared, loaded with `PHP_EXT_ENABLE`. List: `php -m`. |
+| Extensions | 53 compiled in; 19 shared, loaded with `PHP_EXT_ENABLE`. List: `php -m`. |
 | Snuffleupagus | Off by default. `PHP_SNUFFLEUPAGUS=<ruleset>`; rulesets in `/usr/local/etc/php/snuffleupagus/`. PHP 7.2+. |
 | `docker exec` | `docker exec <c> docker-php-entrypoint php ...` sees the env-driven ini; plain `docker exec <c> php ...` does not. |
 | Package manager | `apk` (Wolfi). No apt, `pecl` or `docker-php-ext-install`. |
@@ -359,23 +359,21 @@ volumeMounts:
 
 ## Extensions
 
-74 extensions, defined in [`php/ext.json`](php/ext.json); 73 are built (`imap` is registered but not
+73 extensions, defined in [`php/ext.json`](php/ext.json); 72 are built (`imap` is registered but not
 built: Wolfi has no c-client library). The registry drives configure flags, the build and
 the smoke test's assertions, and lists each extension's source, linkage, PHP range and purpose.
 
 - **53 are compiled in** and need nothing to use: the usual core set plus `igbinary`, `redis`,
   `imagick`, `memcached`, `apcu` and `zstd`. `imagick` reads HEIC and AVIF (static libheif,
   libde265 and dav1d inside ImageMagick) but does not write them.
-- **20 are shared modules**, built but not loaded. Load them with `PHP_EXT_ENABLE: "ldap,uuid"`:
+- **19 are shared modules**, built but not loaded. Load them with `PHP_EXT_ENABLE: "ldap,uuid"`:
   `amqp`, `brotli`, `bz2`, `event`, `ffi` (7.4+), `ldap`, `lz4`, `mcrypt` (7.x),
-  `mongodb` (8.1+), `msgpack`, `pcov` (7.1+), `protobuf` (8.2+), `snmp`, `snuffleupagus` (7.2+),
+  `mongodb` (8.1+), `msgpack`, `pcov` (7.1+), `protobuf` (8.2+), `snuffleupagus` (7.2+),
   `swoole` (8.2+), `tidy`, `uuid`, `xdebug`, `xmlrpc` (7.x), `yaml`.
 
 `php-ext-enable` refuses an unknown or unavailable name and lists what the image has. `xdebug` and
 `snuffleupagus` load as Zend extensions automatically. `ffi` is shipped disabled because it bypasses
-PHP-level sandboxing. `snmp` links a vendored client-only net-snmp in `/opt/net-snmp`, built against
-the image's OpenSSL, instead of a distro net-snmp package; MIBs are shipped but not loaded (set
-`MIBS=ALL` in the environment or `mibs +ALL` in `/etc/snmp/snmp.conf`).
+PHP-level sandboxing.
 
 There is no `ssh2` extension. For SSH and SFTP from PHP use [phpseclib](https://phpseclib.com/),
 which is pure PHP and is what Laravel's and Flysystem's SFTP adapters use. Code that calls
@@ -513,7 +511,7 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
   `/etc/ssl/openssl-1.1`), ICU (67.1 on 7.0-7.3, 70.1 on 7.4-8.0), and libxml2 2.9.14 and libxslt
   1.1.35 from Debian trixie's source
   packages with Debian's security patches. No end-of-life `libssl.so` ships. PHP 7.0-7.2 also get a
-  vendored curl. ImageMagick and net-snmp are built from source in every image; ImageMagick carries
+  vendored curl. ImageMagick is built from source in every image and carries
   static libheif, libde265 and dav1d, which Trivy cannot see either.
 - **PGO on real applications.** Each tier replays PrestaShop, WordPress, Laravel and Symfony (plus
   Drupal on 8.4 and 8.5) through an instrumented `php-fpm` (one static pool per app, requests sent
@@ -612,7 +610,7 @@ MEDIUM); see [Accepted findings](SECURITY.md#accepted-findings). They are suppre
 `.trivyignore` generated from `vex/php.openvex.json`, so a scan without that file shows them. Trivy reads the apk database, so it does not see what is outside it:
 
 - libraries built from source and linked statically or kept under `/opt`: ImageMagick (with static
-  libheif, libde265 and dav1d) and net-snmp in every image; OpenSSL 1.1.1w, ICU, libxml2 and libxslt in the 7.0-8.0 images; curl in 7.0-7.2.
+  libheif, libde265 and dav1d) in every image; OpenSSL 1.1.1w, ICU, libxml2 and libxslt in the 7.0-8.0 images; curl in 7.0-7.2.
   libxml2 and libxslt are Debian trixie's 2.9.14 and 1.1.35 with Debian's security patches. These are
   tracked by hand through the pins in `deps/versions.lock`.
 - `mariadb-dump`, `mariadb-admin` and `mariadb-check`, which are copied into the image.

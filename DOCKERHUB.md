@@ -59,8 +59,8 @@ not Graviton2/3, Ampere Altra or Apple silicon. Use the baseline tag on a Mac.
 The amd64 baseline is `x86-64-v2` (SSE4.2 and POPCNT; Intel Nehalem and newer, AMD Bulldozer and
 newer), not plain `x86-64`, because Wolfi's packages are built for it. Both baselines use generic
 tuning. amd64 `-v3` also tunes generic; arm64 `-v3` tunes for `neoverse-v2`. Only the amd64 `-v3`
-tags check the CPU at startup. The vendored ImageMagick, heif stack (libheif, libde265, dav1d) and
-net-snmp are built for the baseline in every image, `-v3` included.
+tags check the CPU at startup. The vendored ImageMagick, heif stack (libheif, libde265, dav1d) are
+built for the baseline in every image, `-v3` included.
 
 `8.4-fpm` moves with each 8.4 patch release. Pin the digest for reproducible builds.
 
@@ -130,7 +130,7 @@ every tag unless the row says otherwise.
 | Logs | stderr only; no log files. |
 | Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |
 | Configuration | `PHP_*` environment variables, applied at start. Drop-in ini files go in `/usr/local/etc/php/conf.d/` and must sort after `10-php.ini`. |
-| Extensions | 53 compiled in; 20 shared, loaded with `PHP_EXT_ENABLE`. List: `php -m`. |
+| Extensions | 53 compiled in; 19 shared, loaded with `PHP_EXT_ENABLE`. List: `php -m`. |
 | Snuffleupagus | Off by default. `PHP_SNUFFLEUPAGUS=<ruleset>`; rulesets in `/usr/local/etc/php/snuffleupagus/`. PHP 7.2+. |
 | `docker exec` | `docker exec <c> docker-php-entrypoint php ...` sees the env-driven ini; plain `docker exec <c> php ...` does not. |
 | Package manager | `apk` (Wolfi). No apt, `pecl` or `docker-php-ext-install`. |
@@ -280,14 +280,14 @@ The `docker run` flags and the Kubernetes `securityContext` for the same setup a
 
 ## Extensions
 
-74 extensions, defined in
-[`php/ext.json`](https://github.com/LotusWebAgency/php/blob/main/php/ext.json); 73 are built (`imap`
+73 extensions, defined in
+[`php/ext.json`](https://github.com/LotusWebAgency/php/blob/main/php/ext.json); 72 are built (`imap`
 is registered but not built: Wolfi has no c-client library).
 
 **53 are compiled in**: the usual core set plus `igbinary`, `redis`, `imagick`, `memcached`, `apcu`
-and `zstd`. **20 are shared modules**, loaded with `PHP_EXT_ENABLE`: `amqp`, `brotli`, `bz2`,
+and `zstd`. **19 are shared modules**, loaded with `PHP_EXT_ENABLE`: `amqp`, `brotli`, `bz2`,
 `event`, `ffi` (7.4+), `ldap`, `lz4`, `mcrypt` (7.x), `mongodb` (8.1+), `msgpack`,
-`pcov` (7.1+), `protobuf` (8.2+), `snmp`, `snuffleupagus` (7.2+), `swoole` (8.2+), `tidy`,
+`pcov` (7.1+), `protobuf` (8.2+), `snuffleupagus` (7.2+), `swoole` (8.2+), `tidy`,
 `uuid`, `xdebug`, `xmlrpc` (7.x), `yaml`. An unknown or unavailable name is refused with a list of
 what the image has.
 
@@ -385,8 +385,8 @@ semantic-release, HIGH) and CVE-2026-15534 (perl 5.44.0 in `ext-builder`, MEDIUM
 [Accepted findings](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md#accepted-findings).
 They are suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan
 without that file shows them. Trivy reads the apk database, so it cannot see libraries built from source and
-linked statically or kept under `/opt`: ImageMagick (with static libheif, libde265 and dav1d) and
-net-snmp in every image, OpenSSL 1.1.1w, ICU,
+linked statically or kept under `/opt`: ImageMagick (with static libheif, libde265 and dav1d) in
+every image, OpenSSL 1.1.1w, ICU,
 libxml2 and libxslt in the 7.0-8.0 builds (the last two are Debian trixie's 2.9.14 and 1.1.35 with
 Debian's security patches), curl in 7.0-7.2. Those are tracked by hand through `deps/versions.lock`, as are the
 `mariadb-dump`, `mariadb-admin` and `mariadb-check` binaries copied into the image. Reporting
