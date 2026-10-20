@@ -818,8 +818,11 @@ CMD ["php", "-a"]
 # so the apk-managed Node (nodejs-26, /usr/bin/node) carries no npm of its own and
 # the pinned npm is the only one outside semantic-release's tree.
 #
-# The pin is the latest npm release; Wolfi's npm package (12.0.x) lags it. The apk
-# npm is only the bootstrap that installs it and never ships. semantic-release is not run
+# The pin is npm 12.2.1, the newest release and the first 12.x whose bundled
+# brace-expansion, undici, ip-address, http-cache-semantics and
+# postcss-selector-parser carry their fixes (12.2.0, still npm's `latest` tag, does
+# not). Wolfi's npm package lags it. The apk npm is only the bootstrap that installs
+# it and never ships. semantic-release is not run
 # here (it refuses to start without git); tests/smoke.sh runs
 # `semantic-release --version` in the finished image. The readme/changelog markdown
 # in the packages is 2.5MB nothing reads.
@@ -832,8 +835,8 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk upgrade --cache-dir /var/cache/apk -U; \
     apk add --cache-dir /var/cache/apk nodejs-26 npm; \
     node -v; \
-    npm install -g --prefix /usr/local npm@12.2.0; \
-    [ "$(/usr/local/bin/npm -v)" = "12.2.0" ]; \
+    npm install -g --prefix /usr/local npm@12.2.1; \
+    [ "$(/usr/local/bin/npm -v)" = "12.2.1" ]; \
     /usr/local/bin/npm install -g --prefix /usr/local semantic-release; \
     /usr/local/bin/npm cache clean --force; \
     test -x /usr/local/bin/semantic-release; \
