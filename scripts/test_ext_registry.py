@@ -43,7 +43,7 @@ STATIC_REQUIRED = {
 
 SHARED_REQUIRED = {
     "amqp", "bz2", "ffi", "imap", "ldap", "lz4", "mcrypt", "mongodb", "msgpack",
-    "pcov", "protobuf", "snmp", "ssh2", "swoole", "tidy",
+    "pcov", "protobuf", "snmp", "swoole", "tidy",
     "uuid", "xdebug", "xmlrpc", "yaml", "brotli", "event", "snuffleupagus",
 }
 

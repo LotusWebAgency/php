@@ -150,7 +150,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # on PHP < 8.0. imap is absent: Wolfi has no c-client. pcre2-dev is
 # snuffleupagus's build dependency (its config.m4 calls pcre2-config).
       rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
-      libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
+      libmcrypt-dev tidy-html5-dev util-linux-dev \
       yaml-dev libevent-dev pcre2-dev
 # ext-snmp links this instead of the distro's net-snmp-dev.
 COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
@@ -197,7 +197,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
       brotli-dev \
       libsodium-dev argon2-dev gmp-dev readline-dev libmemcached-dev \
       rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
-      libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
+      libmcrypt-dev tidy-html5-dev util-linux-dev \
       yaml-dev libevent-dev pcre2-dev
 COPY deps/build-deps.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
 COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/

@@ -130,7 +130,7 @@ every tag unless the row says otherwise.
 | Logs | stderr only; no log files. |
 | Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |
 | Configuration | `PHP_*` environment variables, applied at start. Drop-in ini files go in `/usr/local/etc/php/conf.d/` and must sort after `10-php.ini`. |
-| Extensions | 53 compiled in; 21 shared, loaded with `PHP_EXT_ENABLE`. List: `php -m`. |
+| Extensions | 53 compiled in; 20 shared, loaded with `PHP_EXT_ENABLE`. List: `php -m`. |
 | Snuffleupagus | Off by default. `PHP_SNUFFLEUPAGUS=<ruleset>`; rulesets in `/usr/local/etc/php/snuffleupagus/`. PHP 7.2+. |
 | `docker exec` | `docker exec <c> docker-php-entrypoint php ...` sees the env-driven ini; plain `docker exec <c> php ...` does not. |
 | Package manager | `apk` (Wolfi). No apt, `pecl` or `docker-php-ext-install`. |
@@ -280,19 +280,20 @@ The `docker run` flags and the Kubernetes `securityContext` for the same setup a
 
 ## Extensions
 
-75 extensions, defined in
-[`php/ext.json`](https://github.com/LotusWebAgency/php/blob/main/php/ext.json); 74 are built (`imap`
+74 extensions, defined in
+[`php/ext.json`](https://github.com/LotusWebAgency/php/blob/main/php/ext.json); 73 are built (`imap`
 is registered but not built: Wolfi has no c-client library).
 
 **53 are compiled in**: the usual core set plus `igbinary`, `redis`, `imagick`, `memcached`, `apcu`
-and `zstd`. **21 are shared modules**, loaded with `PHP_EXT_ENABLE`: `amqp`, `brotli`, `bz2`,
+and `zstd`. **20 are shared modules**, loaded with `PHP_EXT_ENABLE`: `amqp`, `brotli`, `bz2`,
 `event`, `ffi` (7.4+), `ldap`, `lz4`, `mcrypt` (7.x), `mongodb` (8.1+), `msgpack`,
-`pcov` (7.1+), `protobuf` (8.2+), `snmp`, `snuffleupagus` (7.2+), `ssh2`, `swoole` (8.2+), `tidy`,
+`pcov` (7.1+), `protobuf` (8.2+), `snmp`, `snuffleupagus` (7.2+), `swoole` (8.2+), `tidy`,
 `uuid`, `xdebug`, `xmlrpc` (7.x), `yaml`. An unknown or unavailable name is refused with a list of
 what the image has.
 
 `imagick` reads HEIC and AVIF (static libheif, libde265 and dav1d inside ImageMagick) but does not
-write them.
+write them. There is no `ssh2` extension: use [phpseclib](https://phpseclib.com/) for SSH and SFTP,
+or compile `ssh2` in an `ext-builder` stage.
 
 ### Adding your own extension
 
