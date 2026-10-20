@@ -17,6 +17,8 @@ patch -p1 --batch --forward --fuzz=0 < <each *.patch, in filename order>
 - **A missing directory is normal.** The build prints how many patches it applied, so "applied
   nothing" is visible in the log.
 - **net-snmp** patches are applied the same way by `deps/build-netsnmp.sh` before it configures.
+- **libssh2** has no patch directory. `deps/build-libssh2.sh` builds an upstream master commit
+  unmodified.
 
 ## Policy
 
@@ -56,6 +58,16 @@ reconsidered for the matrix.
 | Patch | Problem | Upstream |
 |---|---|---|
 | `net-snmp-5.9.5.2/010-openssl-4-asn1-accessors` | `snmplib/snmp_openssl.c` reads `ASN1_STRING` fields (`type`, `length`, `data`) directly. OpenSSL 4.0 made the struct opaque, so the file does not compile. The patch uses the public accessors, which every supported OpenSSL version has. | Local compatibility change. Remove it when a net-snmp release builds against OpenSSL 4, or when net-snmp stops being vendored. |
+
+### libssh2: pinned past the release instead of patched
+
+`ssh2.so` links a static libssh2 built from the upstream `master` commit pinned in
+`deps/versions.lock` (`3209951d`, a GitHub commit archive), not from 1.11.1. The release and Wolfi's
+`libssh2` package lack upstream's fixes for CVE-2026-58050, CVE-2026-58051 and CVE-2026-66032 to
+CVE-2026-66035, which have been committed but not released. The pinned commit contains the
+`publickey.c` bounds and initialization fixes, the AES-GCM bounds fix in `openssl.c` (`a2ed82d`),
+the ETM heap-overflow fix in `transport.c` (`42e33d8`) and the dangling-pointer fix (`5e47761`).
+Move the row to the next release tarball once one ships and contains them.
 
 ### Extension patches
 
