@@ -28,15 +28,16 @@ rebuild cadence: [SUPPORT.md](SUPPORT.md).
 Every build (pull request, push to `develop`, merge to `main`, weekly rebuild) runs a Trivy scan and
 fails on any fixable CRITICAL or HIGH finding before an image can be published.
 
-The gate scans every flavor for fixable CRITICAL and HIGH findings and reports none. The only
-accepted finding is CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s semantic-release, HIGH, no upstream
-fix; see [Accepted findings](#accepted-findings)). It is suppressed through the `.trivyignore`
-generated from `vex/php.openvex.json`, so a scan without that file shows it.
+The gate scans every flavor for fixable CRITICAL and HIGH findings and reports none. Two findings
+are accepted, both without an upstream fix: CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s
+semantic-release, HIGH) and CVE-2026-15534 (perl 5.44.0 in `ext-builder`, where autoconf needs it,
+MEDIUM); see [Accepted findings](#accepted-findings). They are suppressed through the `.trivyignore`
+generated from `vex/php.openvex.json`, so a scan without that file shows them.
 
 Trivy cannot see what is outside the apk database. Libraries built from source and linked statically
 or kept under `/opt` are tracked by hand through the pins in `deps/versions.lock`:
 
-- ImageMagick (with the libheif, libde265 and dav1d it links statically) and net-snmp in every
+- ImageMagick (with the libheif, libde265 and dav1d it links statically) in every
   image.
 - OpenSSL 1.1.1w (static, with a private openssldir `/etc/ssl/openssl-1.1`), ICU 67.1 or 70.1,
   libxml2 2.9.14 and libxslt 1.1.35 in the 7.0-8.0 images, and curl on 7.0-7.2. libxml2 and libxslt

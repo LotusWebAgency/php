@@ -116,23 +116,6 @@ RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
 # UndefinedVar lint.
 ENV PKG_CONFIG_PATH=/opt/imagemagick/lib/pkgconfig
 
-# --- net-snmp ---
-# net-snmp's client library, vendored so the runtime needs neither the distro's
-# net-snmp packages nor perl. Its own stage so it neither invalidates nor waits for
-# ImageMagick; both eras share the result. It links the system OpenSSL
-# (openssl-4.0-dev below), never the legacy vendored one; OpenSSL 4 made ASN1_STRING
-# opaque, which deps/patches/net-snmp-5.9.5.2 accounts for.
-# The deps stages COPY the whole prefix (ext-snmp needs net-snmp-config and the
-# headers); php/build.sh's stage_runtime_deps ships only the library and MIBs.
-FROM toolchain AS net-snmp
-RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    apk add --cache-dir /var/cache/apk -U openssl-4.0-dev
-COPY deps/build-netsnmp.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
-COPY deps/patches/net-snmp-5.9.5.2 /build/deps/patches/net-snmp-5.9.5.2
-COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
-RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked \
-    bash /build/deps/build-netsnmp.sh /opt/net-snmp
-
 # --- deps: modern ---
 # PHP 8.1+ links against what Wolfi ships. The system OpenSSL is 4.0: curl-dev
 # requires openssl-4.0-dev, which conflicts with openssl-dev (3.6), so ext/openssl
@@ -149,11 +132,12 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # php/ext.json for each linkage:"shared" extension. libmcrypt-dev is for mcrypt
 # on PHP < 8.0. imap is absent: Wolfi has no c-client. pcre2-dev is
 # snuffleupagus's build dependency (its config.m4 calls pcre2-config).
-      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
-      libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
+# cyrus-sasl-mit-dev: openldap-2.7-dev needs a cyrus-sasl-dev, and apk otherwise
+# picks the heimdal variant, whose libsasl2 drags a second Kerberos stack
+# (heimdal-libs) into the runtime beside the MIT krb5 libpq and curl already link.
+      cyrus-sasl-mit-dev rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
+      libmcrypt-dev tidy-html5-dev util-linux-dev \
       yaml-dev libevent-dev pcre2-dev
-# ext-snmp links this instead of the distro's net-snmp-dev.
-COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 ENV PHP_DEPS_PREFIX=""
 
 # --- deps: legacy ---
@@ -185,10 +169,10 @@ ARG PHP_VERSION
 # The image libraries come from the imagemagick stage, as in deps-modern. ICU,
 # libxml2 and libxslt are vendored, so no icu-dev, libxml2-dev or libxslt-dev
 # (php/build.sh points every PHP version at the vendored copies); pkgconf-dev
-# ships pkg.m4, which their autoreconf needs. openssl-4.0-dev is for ext-snmp only: net-snmp-config
-# adds -lssl -lcrypto, which needs the system libssl.so symlink. PHP itself is
-# pointed at the vendored OpenSSL by --with-openssl=/opt/php-deps (php/build.sh
-# asserts the substitution). No libavif-dev: GD has no AVIF before 8.1.
+# ships pkg.m4, which their autoreconf needs. openssl-4.0-dev stays because
+# curl-dev requires it; PHP itself is pointed at the vendored OpenSSL by
+# --with-openssl=/opt/php-deps (php/build.sh asserts the substitution). No
+# libavif-dev: GD has no AVIF before 8.1.
 # Otherwise the package set mirrors deps-modern and must be kept in sync by hand.
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk add --cache-dir /var/cache/apk -U \
@@ -196,8 +180,8 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
       oniguruma-dev libzip-dev sqlite-dev postgresql-18-dev zlib-dev zstd-dev \
       brotli-dev \
       libsodium-dev argon2-dev gmp-dev readline-dev libmemcached-dev \
-      rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
-      libmcrypt-dev libssh2-dev tidy-html5-dev util-linux-dev \
+      cyrus-sasl-mit-dev rabbitmq-c-dev bzip2-dev libffi-dev openldap-2.7-dev libldap-2.7 lz4-dev \
+      libmcrypt-dev tidy-html5-dev util-linux-dev \
       yaml-dev libevent-dev pcre2-dev
 COPY deps/build-deps.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
 COPY php/arch.sh php/cflags.sh php/ldflags.sh /build/php/
@@ -235,8 +219,6 @@ RUN set -eu; \
         ;; \
       *) : ;; \
     esac
-# ext-snmp links this instead of the distro's net-snmp-dev.
-COPY --from=net-snmp /opt/net-snmp /opt/net-snmp
 # PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR (the latter set in php/build.sh) is what makes
 # PHP's ./configure find the vendored openssl and icu: PHP_SETUP_OPENSSL and
 # PHP_SETUP_ICU are PKG_CHECK_MODULES-based and ignore a DIR value. For OpenSSL
@@ -428,11 +410,6 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # never enabled. Must run before runtime-libs.sh, whose single scan of
 # /usr/local/lib has to see these .so files to pull in their runtime libraries.
 #
-# No deps prefix on ldflags.sh: it would add /opt/net-snmp's rpath and
-# --exclude-libs=ALL to every shared extension, and only snmp.so needs them.
-# snmp.so's RUNPATH comes from what ext-snmp's configure links via
-# net-snmp-config; tests/smoke.sh asserts it.
-#
 # PHP_ERA is exported explicitly: build-shared-ext.sh requires it to pick the
 # configure/make flag split (php/flag-split.sh) and must fail when unset, since a
 # default would drop the demotions that keep autoconf's probes answerable on the
@@ -547,7 +524,7 @@ COPY conf/snuffleupagus/ /stage/usr/local/etc/php/snuffleupagus/
 # the next the few KB of config, so an ini, rootfs script or ruleset edit re-ships
 # only the small layer.
 FROM scratch AS runtime-payload
-# Vendored libraries (ImageMagick and net-snmp in every era, plus the legacy
+# Vendored libraries (ImageMagick in every era, plus the legacy
 # era's openssl/icu/curl) at the absolute path their binaries' rpath names
 # (php/build.sh stages them). One COPY covers both eras.
 COPY --from=php-build /deps-stage/ /
@@ -664,11 +641,6 @@ RUN set -eux; \
 # ownership made every invocation fail with EACCES. PHP_CONF_DIR is the
 # counterpart for a read-only rootfs.
     chown www-data:www-data /usr/local/etc/php/conf.d; \
-# net-snmp keeps state in /var/lib/snmp (cert_indexes below it), creating both on
-# first use and logging "Created directory: ..." to stderr. Creating them up front
-# owned by www-data keeps that silent; a non-root user cannot create them under a
-# root-owned /var/lib.
-    install -d -o www-data -g www-data /var/lib/snmp /var/lib/snmp/cert_indexes; \
     find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 
 WORKDIR /app
@@ -796,12 +768,14 @@ USER www-data
 CMD ["php", "-a"]
 
 # npm and semantic-release as one tree for cli-builder, installed under /usr/local
-# so the apk-managed Node (nodejs-24, /usr/bin/node) carries no npm of its own and
+# so the apk-managed Node (nodejs-26, /usr/bin/node) carries no npm of its own and
 # the pinned npm is the only one outside semantic-release's tree.
 #
-# Wolfi's npm package is 12.x; the pin is npm 11.21.1, the first release whose
-# bundled brace-expansion, undici and ip-address carry their fixes. The apk npm is
-# only the bootstrap that installs it and never ships. semantic-release is not run
+# The pin is npm 12.2.1, the newest release and the first 12.x whose bundled
+# brace-expansion, undici, ip-address, http-cache-semantics and
+# postcss-selector-parser carry their fixes (12.2.0, still npm's `latest` tag, does
+# not). Wolfi's npm package lags it. The apk npm is only the bootstrap that installs
+# it and never ships. semantic-release is not run
 # here (it refuses to start without git); tests/smoke.sh runs
 # `semantic-release --version` in the finished image. The readme/changelog markdown
 # in the packages is 2.5MB nothing reads.
@@ -812,10 +786,10 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}"; \
     echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories; \
     apk upgrade --cache-dir /var/cache/apk -U; \
-    apk add --cache-dir /var/cache/apk nodejs-24 npm; \
+    apk add --cache-dir /var/cache/apk nodejs-26 npm; \
     node -v; \
-    npm install -g --prefix /usr/local npm@11.21.1; \
-    [ "$(/usr/local/bin/npm -v)" = "11.21.1" ]; \
+    npm install -g --prefix /usr/local npm@12.2.1; \
+    [ "$(/usr/local/bin/npm -v)" = "12.2.1" ]; \
     /usr/local/bin/npm install -g --prefix /usr/local semantic-release; \
     /usr/local/bin/npm cache clean --force; \
     test -x /usr/local/bin/semantic-release; \
@@ -839,7 +813,7 @@ COPY --from=node-tools /out/ /usr/local/
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     set -eux; \
     apk add --cache-dir /var/cache/apk -U \
-      nodejs-24 corepack git rsync patch make brotli sqlite jq; \
+      nodejs-26 corepack git rsync patch make brotli sqlite jq; \
     for applet in $BUSYBOX_NET_APPLETS; do \
       for dir in /bin /sbin /usr/bin /usr/sbin; do \
         case "$(readlink "$dir/$applet" 2>/dev/null)" in */busybox) rm -f "$dir/$applet" ;; esac; \

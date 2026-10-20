@@ -630,31 +630,6 @@
       "why": "gRPC clients used by Laravel microservice integrations -- the pinned release's package.xml declares an 8.2.0 floor; on 8.0 it fails mid-compile on arginfo stubs (arginfo_offsetGet/current/key) that 8.0's Zend headers do not declare"
     },
     {
-      "name": "snmp",
-      "source": "core",
-      "linkage": "shared",
-      "php": ">=7.0",
-      "configure": "--with-snmp=/opt/net-snmp",
-      "libs": [],
-      "why": "Legacy PrestaShop server-monitoring modules polling network devices. Links the vendored client-only net-snmp (deps/build-netsnmp.sh), not a packaged libsnmp, which hard-depends on libperl"
-    },
-    {
-      "name": "ssh2",
-      "source": "pecl",
-      "linkage": "shared",
-      "php": ">=7.0",
-      "configure": "--with-ssh2",
-      "libs": ["libssh2-dev"],
-      "why": "Laravel deployment tooling SSH/SFTP automation. Default pin 1.5.0 declares an 8.0.0 floor, so 7.0-7.4 pin 1.4.1 (declares 7.0.0, no max)",
-      "overrides": {
-        "7.0": {"version": "1.4.1"},
-        "7.1": {"version": "1.4.1"},
-        "7.2": {"version": "1.4.1"},
-        "7.3": {"version": "1.4.1"},
-        "7.4": {"version": "1.4.1"}
-      }
-    },
-    {
       "name": "swoole",
       "source": "pecl",
       "linkage": "shared",

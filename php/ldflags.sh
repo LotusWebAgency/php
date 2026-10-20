@@ -6,8 +6,7 @@
 # instead of a global LD_LIBRARY_PATH: a global env var made a vendored
 # libcurl.so.4 shadow the system's for every process in the image, which broke
 # the host curl binary. rpath is scoped to the linked binary, so it doesn't.
-# Three prefixes are in use: /opt/imagemagick (all eras), /opt/net-snmp (all eras;
-# its own build and, via ext-snmp's configure, snmp.so) and /opt/php-deps (legacy
+# Two prefixes are in use: /opt/imagemagick (all eras) and /opt/php-deps (legacy
 # only) -- each gets its own rpath pair.
 set -euo pipefail
 FLAGS="-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,--as-needed -Wl,--build-id=sha1"

@@ -36,7 +36,6 @@ mongodb       2.5.5     0eaf84ff709f73183d80597f31ff02937f6aefde01eb895a0aa19334
 msgpack       3.0.1     e30be355ab79aaea4568692fbd6073fd7c7f50ea8d3cf12edce40fc0c921d868  7.0.0    -
 pcov          1.0.12    23255c8c9335a9636ccb743f5302436a97a582a0bbde9869485be911bbc15da8  7.1.0    -
 protobuf      5.36.2    f0a17c67de29df0fb0e5215a381df9b155125e1ace6252dd617bf16b4194dd5b  8.2.0    -
-ssh2          1.5.0     a943427fae39a5503c813179018ae6c500323c8c9fb434e1a9a665fb32a4d7b4  8.0.0    -
 swoole        6.2.3     21dfa1c4a4a09f4d1cb4b154f7defdc91fbabafc8d44a77f8f618b9742c67304  8.2.0    8.5.99
 uuid          1.3.0     b7af055e2c409622f8c5e6242d1c526c00e011a93c39b10ca28040b908da3f37  7.0.0    -
 xdebug        3.5.3     f073de91bea046106abf4d6071c963ea71e58571df6ce58948ceca89d121cb2d  8.0.0    8.5.99
@@ -60,11 +59,6 @@ amqp@7.0      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f
 amqp@7.1      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f331c2f08  5.6.0    -
 amqp@7.2      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f331c2f08  5.6.0    -
 amqp@7.3      1.11.0    dc5212b4785f59955118a219bbfbcedb7aa6ab2a91e8038a0ad1898f331c2f08  5.6.0    -
-ssh2@7.0      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95da4d8764  7.0.0    -
-ssh2@7.1      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95da4d8764  7.0.0    -
-ssh2@7.2      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95da4d8764  7.0.0    -
-ssh2@7.3      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95da4d8764  7.0.0    -
-ssh2@7.4      1.4.1     7bca5b23f731db9d8ed0aea5db9bb15da8ff133b0fbba96102b82e95da4d8764  7.0.0    -
 # source=github entries. No pecl.php.net version here -- the tag is pinned in
 # ext.json's url, and this row carries only the sha256 of that exact tarball
 # (computed locally against the fetched tarball, as above).

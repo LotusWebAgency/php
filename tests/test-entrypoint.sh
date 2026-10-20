@@ -1054,7 +1054,7 @@ fi
 # prefix.
 
 # On a writable conf.d, a name baked into the default but not requested (dl) must
-# stay disabled alongside the requested one; otherwise dl("ssh2.so") could load a
+# stay disabled alongside the requested one; otherwise dl("yaml.so") could load a
 # shared extension. cli-builder bakes no default (conf/php-builder.ini), so this is
 # meaningless there.
 if [ "$FLAVOR" != cli-builder ]; then
@@ -1180,7 +1180,7 @@ group = www-data
 listen = 127.0.0.1:9212
 pm = static
 pm.max_children = 1
-php_admin_value[extension] = ssh2
+php_admin_value[extension] = yaml
 CONF
 set +e
 out=$(drun --rm --read-only -m 512m \

@@ -2,8 +2,8 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://github.com/LotusWebAgency/php/blob/main/vex/php.openvex.json",
   "author": "Lotus Web Agency",
-  "timestamp": "2026-10-16T00:00:00Z",
-  "version": 2,
+  "timestamp": "2026-10-20T00:00:00Z",
+  "version": 3,
   "statements": [
     {
       "vulnerability": {
@@ -24,6 +24,26 @@
       "status": "affected",
       "status_notes": "review-by: 2026-11-30. Found in cli-builder only, in semantic-release's dependency tree (/usr/local/lib/node_modules/semantic-release/node_modules/braces). braces 3.0.3 is the latest release and upstream has not published a fix. Accepted as a denial of service in a build-time tool, not shown unreachable: semantic-release's micromatch globs expand brace patterns from its configuration.",
       "action_statement": "Move to a braces release with depth guards in its AST walkers (directly or through micromatch) and drop this statement. Re-checked on the review-by date."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-15534",
+        "description": "perl: out-of-bounds heap read and write in the regex engine's superlinear cache (S_regmatch); no fixed stable release"
+      },
+      "timestamp": "2026-10-20T00:00:00Z",
+      "products": [
+        {
+          "@id": "pkg:oci/php?repository_url=index.docker.io/lotuswebagency/php&flavor=ext-builder",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/perl@5.44.0-r1"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "status_notes": "review-by: 2026-11-30. Found in ext-builder only, where perl is a dependency of autoconf and automake (phpize). Upstream lists every release through 5.45.1 as affected; 5.44.0 is the latest stable release and Wolfi's 5.44.0-r1 carries no patch. Accepted for a build-stage image that runs perl only on the extension sources its user chooses to compile; fpm, cli and cli-builder carry no perl.",
+      "action_statement": "Rebuild on the first perl release or Wolfi revision that fixes it and drop this statement. Re-checked on the review-by date."
     }
   ]
 }
