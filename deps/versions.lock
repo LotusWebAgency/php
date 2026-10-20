@@ -31,8 +31,3 @@ both      imagemagick  7.1.2-34  all          f5163a573a1c1bff16358d0a592b2fb168
 # net-snmp's client library only (deps/build-netsnmp.sh), built against the image's OpenSSL
 # and patched for OpenSSL 4 (deps/patches/net-snmp-5.9.5.2).
 both      net-snmp     5.9.5.2   all          16707719f833184a4b72835dac359ae188123b06b5e42817c00790d7dc1384bf   https://downloads.sourceforge.net/project/net-snmp/net-snmp/5.9.5.2/net-snmp-5.9.5.2.tar.gz
-# libssh2 for ext-ssh2 (deps/build-libssh2.sh), static into ssh2.so, built against the image's OpenSSL.
-# Pinned to a master commit, not a release: the newest release (1.11.1, 2024-10) and Wolfi's
-# package lack the upstream fixes for CVE-2026-58050, CVE-2026-58051 and CVE-2026-66032 to
-# CVE-2026-66035. Move to the next release once one ships and contains them.
-both      libssh2      master-3209951d   all          fe5bc1939d7dae5b35441084b88793e84d33ad23899bfa6113f1e51468fe76cc   https://github.com/libssh2/libssh2/archive/3209951db4e47ef902db047d12f9f464f835c27e.tar.gz

@@ -375,9 +375,7 @@ the smoke test's assertions, and lists each extension's source, linkage, PHP ran
 `snuffleupagus` load as Zend extensions automatically. `ffi` is shipped disabled because it bypasses
 PHP-level sandboxing. `snmp` links a vendored client-only net-snmp in `/opt/net-snmp`, built against
 the image's OpenSSL, instead of a distro net-snmp package; MIBs are shipped but not loaded (set
-`MIBS=ALL` in the environment or `mibs +ALL` in `/etc/snmp/snmp.conf`). `ssh2` carries a vendored
-libssh2 linked statically into `ssh2.so`: no `libssh2` package or `libssh2.so` ships, and `php --ri
-ssh2` reports the vendored build.
+`MIBS=ALL` in the environment or `mibs +ALL` in `/etc/snmp/snmp.conf`).
 
 ### Adding your own extension
 
@@ -510,11 +508,8 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
   `/etc/ssl/openssl-1.1`), ICU (67.1 on 7.0-7.3, 70.1 on 7.4-8.0), and libxml2 2.9.14 and libxslt
   1.1.35 from Debian trixie's source
   packages with Debian's security patches. No end-of-life `libssl.so` ships. PHP 7.0-7.2 also get a
-  vendored curl. ImageMagick, net-snmp and libssh2 are built from source in every image; ImageMagick
-  carries static libheif, libde265 and dav1d, which Trivy cannot see either. libssh2 is pinned to an
-  upstream master commit and linked statically into `ssh2.so`, because libssh2's newest release
-  (1.11.1) and Wolfi's package lack the fixes for six HIGH CVEs (CVE-2026-58050, CVE-2026-58051 and
-  CVE-2026-66032 to CVE-2026-66035).
+  vendored curl. ImageMagick and net-snmp are built from source in every image; ImageMagick carries
+  static libheif, libde265 and dav1d, which Trivy cannot see either.
 - **PGO on real applications.** Each tier replays PrestaShop, WordPress, Laravel and Symfony (plus
   Drupal on 8.4 and 8.5) through an instrumented `php-fpm` (one static pool per app, requests sent
   over FastCGI with `php-fcgi`, pool stopped with SIGQUIT and a `process_control_timeout` long
@@ -543,9 +538,7 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
   PrestaShop's en-US translation packs, fetched as `latest` because upstream re-exports them in
   place; the fetch scripts check the archive's shape instead. Two installs are not tarball-pinned:
   `cli-builder` runs an unpinned `npm install -g semantic-release`, and Composer's installer is
-  verified against a signature fetched live from getcomposer.org. libssh2 is the one library pinned to
-  a git commit archive rather than a release tarball (see `deps/versions.lock`); the sha256 still
-  covers the archive. Source patches: [deps/patches/README.md](deps/patches/README.md).
+  verified against a signature fetched live from getcomposer.org. Source patches: [deps/patches/README.md](deps/patches/README.md).
 - **Build inputs.** Each image carries `com.lotuswebagency.inputs-hash`, a hash of its build inputs
   (`scripts/inputs-hash.sh`).
 
@@ -614,7 +607,7 @@ MEDIUM); see [Accepted findings](SECURITY.md#accepted-findings). They are suppre
 `.trivyignore` generated from `vex/php.openvex.json`, so a scan without that file shows them. Trivy reads the apk database, so it does not see what is outside it:
 
 - libraries built from source and linked statically or kept under `/opt`: ImageMagick (with static
-  libheif, libde265 and dav1d), net-snmp and libssh2 (a libssh2 master commit, inside `ssh2.so`) in every image; OpenSSL 1.1.1w, ICU, libxml2 and libxslt in the 7.0-8.0 images; curl in 7.0-7.2.
+  libheif, libde265 and dav1d) and net-snmp in every image; OpenSSL 1.1.1w, ICU, libxml2 and libxslt in the 7.0-8.0 images; curl in 7.0-7.2.
   libxml2 and libxslt are Debian trixie's 2.9.14 and 1.1.35 with Debian's security patches. These are
   tracked by hand through the pins in `deps/versions.lock`.
 - `mariadb-dump`, `mariadb-admin` and `mariadb-check`, which are copied into the image.

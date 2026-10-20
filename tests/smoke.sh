@@ -644,34 +644,6 @@ heif_pkgs=$(grep -E '^(libheif|libde265|libsdl2|gdk-pixbuf|libdav1d|aom-libs|rav
 [ -z "$heif_pkgs" ] || { echo "FAIL: the image carries the distro libheif stack ($heif_pkgs) -- HEIC/AVIF decode is meant to be static in libMagickCore"; exit 1; }
 echo "ok: no libheif, libde265, SDL, gdk-pixbuf or AV1/HEVC codec packages in the image"
 
-# libssh2 (deps/build-libssh2.sh): ssh2.so holds a vendored static build of an
-# upstream master commit, because no release and no Wolfi package carries the fixes
-# for six HIGH CVEs. The distro libssh2 package or any libssh2.so would bring the
-# unfixed 1.11.1 back silently, with every functional check still green.
-if grep -qw ssh2 <<<"$SHARED_EXTS"; then
-  ! grep -qE '^libssh2($|-)' <<<"$apk_installed" \
-    || { echo "FAIL: the image carries a libssh2 apk package ($(grep -E '^libssh2($|-)' <<<"$apk_installed" | tr '\n' ' ')) -- ssh2.so is meant to hold a static vendored libssh2"; exit 1; }
-  # Control: the same find sees the system libcrypto.so.4 that ssh2.so links.
-  ssh2_find=$(drun --rm "$IMAGE" find / -xdev \( -name 'libssh2.so*' -o -name 'libcrypto.so.4' \) 2>/dev/null || true)
-  grep -q 'libcrypto\.so\.4$' <<<"$ssh2_find" \
-    || { echo "FAIL: find did not list libcrypto.so.4 -- the libssh2.so absence check below would prove nothing"; exit 1; }
-  ! grep -q 'libssh2\.so' <<<"$ssh2_find" \
-    || { echo "FAIL: a libssh2 shared library ships in the image: $(grep 'libssh2\.so' <<<"$ssh2_find" | tr '\n' ' ')"; exit 1; }
-  ssh2_ldd=$(image_ldd "$extdir/ssh2.so" 2>&1 || true)
-  grep -qE '^[[:space:]]*libcrypto\.so\.4 => /(usr/)?lib/' <<<"$ssh2_ldd" \
-    || { echo "FAIL: ssh2.so does not link the system libcrypto.so.4 its static libssh2 needs: $ssh2_ldd"; exit 1; }
-  ! grep -qE 'libssh2|not found' <<<"$ssh2_ldd" \
-    || { echo "FAIL: ssh2.so has a libssh2 or unresolved NEEDED entry: $ssh2_ldd"; exit 1; }
-  ssh2_probe=$(drun --rm -e PHP_EXT_ENABLE=ssh2 "$IMAGE" timeout 20 php -r 'var_dump(function_exists("ssh2_connect"));' 2>&1 | grep -E '^bool\(' || true)
-  [ "$ssh2_probe" = "bool(true)" ] \
-    || { echo "FAIL: PHP_EXT_ENABLE=ssh2 did not load the extension: $ssh2_probe"; exit 1; }
-  ssh2_ri=$(drun --rm -e PHP_EXT_ENABLE=ssh2 "$IMAGE" timeout 20 php --ri ssh2 2>&1 || true)
-  ssh2_version=$(sed -n 's/^libssh2 version => //p' <<<"$ssh2_ri")
-  { [ -n "$ssh2_version" ] && [ "$ssh2_version" != "1.11.1" ]; } \
-    || { echo "FAIL: php --ri ssh2 reports libssh2 '${ssh2_version:-nothing}', not the vendored master build: $ssh2_ri"; exit 1; }
-  echo "ok: ssh2.so loads with the vendored static libssh2 $ssh2_version (no libssh2 package or .so in the image, no libssh2 NEEDED entry)"
-fi
-
 # Busybox's network applets (raw-socket and interface tools) are pruned from the
 # image; curl is the one network client that stays. The control proves the query
 # can see busybox applets at all.
