@@ -1475,7 +1475,7 @@ case "$FLAVOR" in
       drun --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
         || { echo "FAIL: cli-builder is missing $tool (Dockerfile's cli-builder stage should provide it)"; exit 1; }
     done
-    for pkg in nodejs-24 corepack git; do
+    for pkg in nodejs-26 corepack git; do
       drun --rm "$IMAGE" apk info -e "$pkg" | grep -qx "$pkg" \
         || { echo "FAIL: cli-builder: the apk package $pkg is not installed"; exit 1; }
     done
@@ -1487,9 +1487,9 @@ case "$FLAVOR" in
     if drun --rm "$IMAGE" apk audit --system 2>/dev/null | grep -q .; then
       echo "FAIL: cli-builder: apk audit --system reports modified package files"; exit 1
     fi
-    echo "ok: cli-builder's node, corepack and git are apk packages (nodejs-24, corepack, git); the apk npm package is absent; apk audit --system is clean"
+    echo "ok: cli-builder's node, corepack and git are apk packages (nodejs-26, corepack, git); the apk npm package is absent; apk audit --system is clean"
     node_major=$(drun --rm "$IMAGE" node -p 'process.versions.node.split(".")[0]')
-    [ "$node_major" = "24" ] || { echo "FAIL: cli-builder's node major is '$node_major', expected 24 (apk nodejs-24)"; exit 1; }
+    [ "$node_major" = "26" ] || { echo "FAIL: cli-builder's node major is '$node_major', expected 26 (apk nodejs-26)"; exit 1; }
     for cmd in "npm --version" "npx --version" "corepack --version" "composer --version" "semantic-release --version"; do
       drun --rm "$IMAGE" sh -c "$cmd" >/dev/null 2>&1 \
         || { echo "FAIL: cli-builder: '$cmd' does not run as the image user"; exit 1; }
@@ -1506,23 +1506,23 @@ case "$FLAVOR" in
         || { echo "FAIL: cli-builder: $cache_dir ('$probe') is not writable as the image user (uid $(drun --rm "$IMAGE" id -u))"; exit 1; }
     done
     echo "ok: cli-builder's npm and corepack caches are writable as the image user"
-    # Node is the apk nodejs-24 package; npm is not an apk package here. The
-    # node-tools stage installs npm 11.21.1 under /usr/local (Wolfi's npm package
-    # is 12.x and only bootstraps that install). The finished tree must hold
+    # Node is the apk nodejs-26 package; npm is not an apk package here. The
+    # node-tools stage installs npm 12.2.0 under /usr/local (Wolfi's npm package
+    # lags it and only bootstraps that install). The finished tree must hold
     # exactly one npm of its own; the copy semantic-release carries for
     # @semantic-release/npm is a dependency of that package and expected. The
     # pattern is the exact node_modules/npm path, so
     # @semantic-release/npm/package.json is not a match.
     npm_version=$(drun --rm "$IMAGE" npm --version)
-    [ "$npm_version" = "11.21.1" ] || { echo "FAIL: cli-builder: npm --version is '$npm_version', expected 11.21.1"; exit 1; }
+    [ "$npm_version" = "12.2.0" ] || { echo "FAIL: cli-builder: npm --version is '$npm_version', expected 12.2.0"; exit 1; }
     npm_pkgs=$(drun --rm "$IMAGE" find /usr/local/lib/node_modules -path '*/node_modules/npm/package.json' -not -path '/usr/local/lib/node_modules/semantic-release/*')
     [ "$npm_pkgs" = "/usr/local/lib/node_modules/npm/package.json" ] \
       || { echo "FAIL: cli-builder: expected exactly one npm outside semantic-release's own tree, found: $npm_pkgs"; exit 1; }
     npm_pkg_version=$(drun --rm "$IMAGE" node -p 'require("/usr/local/lib/node_modules/npm/package.json").version')
-    [ "$npm_pkg_version" = "11.21.1" ] || { echo "FAIL: cli-builder: the installed npm package.json says $npm_pkg_version, expected 11.21.1"; exit 1; }
+    [ "$npm_pkg_version" = "12.2.0" ] || { echo "FAIL: cli-builder: the installed npm package.json says $npm_pkg_version, expected 12.2.0"; exit 1; }
     sr_npm=$(drun --rm "$IMAGE" find /usr/local/lib/node_modules/semantic-release -path '*/node_modules/npm/package.json')
     [ -n "$sr_npm" ] || { echo "FAIL: cli-builder: the control find saw no npm inside semantic-release's tree -- the exclusion above is untested, so its result proves nothing"; exit 1; }
-    echo "ok: cli-builder's npm is 11.21.1 and the only npm outside semantic-release's tree (control: its own nested copy is found)"
+    echo "ok: cli-builder's npm is 12.2.0 and the only npm outside semantic-release's tree (control: its own nested copy is found)"
     # VEX drift: vex/php.openvex.json names the bundled npm packages we accepted a
     # finding in, by exact version (purl). When an npm or semantic-release bump
     # moves them, the statement describes a package that is gone or a version

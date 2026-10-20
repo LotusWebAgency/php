@@ -796,12 +796,11 @@ USER www-data
 CMD ["php", "-a"]
 
 # npm and semantic-release as one tree for cli-builder, installed under /usr/local
-# so the apk-managed Node (nodejs-24, /usr/bin/node) carries no npm of its own and
+# so the apk-managed Node (nodejs-26, /usr/bin/node) carries no npm of its own and
 # the pinned npm is the only one outside semantic-release's tree.
 #
-# Wolfi's npm package is 12.x; the pin is npm 11.21.1, the first release whose
-# bundled brace-expansion, undici and ip-address carry their fixes. The apk npm is
-# only the bootstrap that installs it and never ships. semantic-release is not run
+# The pin is the latest npm release; Wolfi's npm package (12.0.x) lags it. The apk
+# npm is only the bootstrap that installs it and never ships. semantic-release is not run
 # here (it refuses to start without git); tests/smoke.sh runs
 # `semantic-release --version` in the finished image. The readme/changelog markdown
 # in the packages is 2.5MB nothing reads.
@@ -812,10 +811,10 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}"; \
     echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories; \
     apk upgrade --cache-dir /var/cache/apk -U; \
-    apk add --cache-dir /var/cache/apk nodejs-24 npm; \
+    apk add --cache-dir /var/cache/apk nodejs-26 npm; \
     node -v; \
-    npm install -g --prefix /usr/local npm@11.21.1; \
-    [ "$(/usr/local/bin/npm -v)" = "11.21.1" ]; \
+    npm install -g --prefix /usr/local npm@12.2.0; \
+    [ "$(/usr/local/bin/npm -v)" = "12.2.0" ]; \
     /usr/local/bin/npm install -g --prefix /usr/local semantic-release; \
     /usr/local/bin/npm cache clean --force; \
     test -x /usr/local/bin/semantic-release; \
@@ -839,7 +838,7 @@ COPY --from=node-tools /out/ /usr/local/
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     set -eux; \
     apk add --cache-dir /var/cache/apk -U \
-      nodejs-24 corepack git rsync patch make brotli sqlite jq; \
+      nodejs-26 corepack git rsync patch make brotli sqlite jq; \
     for applet in $BUSYBOX_NET_APPLETS; do \
       for dir in /bin /sbin /usr/bin /usr/sbin; do \
         case "$(readlink "$dir/$applet" 2>/dev/null)" in */busybox) rm -f "$dir/$applet" ;; esac; \
