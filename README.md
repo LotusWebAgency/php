@@ -36,10 +36,10 @@ come from `matrix.json` and are carried on every image as the `com.lotuswebagenc
 | `7.4` | 7.4.33 | gcc | no | end-of-life | 2022-11-28 |
 | `8.0` | 8.0.30 | gcc | no | end-of-life | 2023-11-26 |
 | `8.1` | 8.1.34 | gcc | no | end-of-life | 2025-12-31 |
-| `8.2` | 8.2.34 | gcc | no | security | 2026-12-31 |
-| `8.3` | 8.3.35 | gcc | no | security | 2027-12-31 |
-| `8.4` | 8.4.26 | gcc | yes | active | 2028-12-31 |
-| `8.5` | 8.5.11 | clang | yes | active | 2029-12-31 |
+| `8.2` | 8.2.35 | gcc | no | security | 2026-12-31 |
+| `8.3` | 8.3.36 | gcc | no | security | 2027-12-31 |
+| `8.4` | 8.4.27 | gcc | yes | active | 2028-12-31 |
+| `8.5` | 8.5.12 | clang | yes | active | 2029-12-31 |
 
 End-of-life tags are still published and rebuilt weekly for base-image and package updates. The PHP
 interpreter in them gets no upstream fixes. See [SUPPORT.md](SUPPORT.md).
@@ -49,7 +49,7 @@ interpreter in them gets no upstream fixes. See [SUPPORT.md](SUPPORT.md).
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
 | `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64-v2` / `armv8-a` baseline. 8.4 and 8.5 only, not for `ext-builder`. |
 | `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image (`default_version` in `matrix.json`, currently 8.5). |
-| `{release}-{flavor}[-v3]` | `8.5.11-fpm` | Full patch version. Read from the built image (`PHP_VERSION`) after tests and the Trivy gate, so a tag cannot name a version the image does not contain. |
+| `{release}-{flavor}[-v3]` | `8.5.12-fpm` | Full patch version. Read from the built image (`PHP_VERSION`) after tests and the Trivy gate, so a tag cannot name a version the image does not contain. |
 
 `-v3` images need a newer CPU. On amd64 older than Haswell/Excavator they refuse to start: a startup
 check in the `php` and `php-fpm` binaries exits 127 with

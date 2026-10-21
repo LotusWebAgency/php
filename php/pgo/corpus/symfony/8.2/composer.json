@@ -24,7 +24,7 @@
         },
         "optimize-autoloader": true,
         "platform": {
-            "php": "8.2.34"
+            "php": "8.2.35"
         },
         "preferred-install": {
             "*": "dist"

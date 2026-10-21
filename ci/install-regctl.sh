@@ -10,10 +10,10 @@
 # all three lines together. The download runs under ci/retry.sh (curl transfer
 # errors, DNS failures, HTTP 5xx), which curl's own --retry does not cover.
 set -euo pipefail
-version=v0.11.6
+version=v0.11.7
 case "$(uname -m)" in
-  x86_64) arch=amd64 sha=8e0e62a497fcdb8048d18aa927a139613176ba0531f412bc541044e28f9856bd ;;
-  aarch64|arm64) arch=arm64 sha=a9b71a3ee79b2d1dbbd7d51fd5e8fa214722c192864235d3d8764463c751a1ff ;;
+  x86_64) arch=amd64 sha=3737fbbdd791e04e7a831640b681f3397a376498e80e2ad9b1b2d27296f239bc ;;
+  aarch64|arm64) arch=arm64 sha=9f349bab5c407ac04f3dabf99c7c7a6b0f9e9723c23f2775380e804d02c6dbb9 ;;
   *) echo "FAIL: no pinned regctl for $(uname -m)" >&2; exit 1 ;;
 esac
 dir="${RUNNER_TEMP:?RUNNER_TEMP is not set}/bin"

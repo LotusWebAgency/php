@@ -22,10 +22,10 @@
 #   8.5  PrestaShop 9.2.0 trains this tier alone. Laravel 12, Symfony 7 and
 #        WordPress are the 8.2 tier's pins (same releases, same locks); only the
 #        root php constraint and config.platform.php in their composer.json move
-#        to the floor (^8.5 / 8.5.11). Drupal 11.4.8 and drush 13 resolve against
+#        to the floor (^8.5 / 8.5.12). Drupal 11.4.8 and drush 13 resolve against
 #        the same platform.
 #   8.4  PrestaShop 8.2.8 and the same pins for the rest, plus Drupal 11.4.8
-#        resolved against 8.4.26. The 8.4/8.5 split is not a framework limit; the
+#        resolved against 8.4.27. The 8.4/8.5 split is not a framework limit; the
 #        composer.json floor constraint keeps the corpus from also running one
 #        version down, which tests/test-corpus-tiers.sh's below-floor control
 #        relies on.

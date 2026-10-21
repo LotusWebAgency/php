@@ -64,7 +64,7 @@ export COSIGN REGCTL
 REGISTRY_IMAGE="mirror.gcr.io/library/registry:3.1.2@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8"
 ZOT_IMAGE="ghcr.io/project-zot/zot-minimal:v2.1.22@sha256:6704abd9c4c988398d77915549d79c5daa2a2c5731964833e31ca039c9ac4ed3"
 HTPASSWD_IMAGE="mirror.gcr.io/library/httpd:2.4.69-alpine@sha256:3440c39d8d6f54fa9ad2549e5a60c19ddd435faadc29c1ad28aa795f71888889"
-BUILDKIT_IMAGE="${BUILDKIT_IMAGE:-docker.io/moby/buildkit:v0.34.0@sha256:b059f8d7226d0b326bc871af489a5dddf65e36af4d20d14251b072974d9ee87c}"
+BUILDKIT_IMAGE="${BUILDKIT_IMAGE:-docker.io/moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c}"
 
 PORT="${ATTEST_TEST_PORT:-5077}"
 REPO="localhost:${PORT}/lotuswebagency/php/release"
