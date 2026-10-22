@@ -518,6 +518,15 @@ RUN [ "$PHP_VERSION" = "8.5" ] || echo "zend_extension=opcache.so" >> /stage/usr
 # references it.
 COPY conf/snuffleupagus/ /stage/usr/local/etc/php/snuffleupagus/
 
+# MariaDB client defaults: TLS when the server offers it, plaintext otherwise.
+# install, not COPY --chmod: that mode would also land on the /stage/etc it
+# creates, and from there on the image's /etc.
+COPY conf/my.cnf /tmp/my.cnf
+RUN set -eux; \
+    install -d -m 0755 /stage/etc; \
+    install -m 0644 /tmp/my.cnf /stage/etc/my.cnf; \
+    rm -f /tmp/my.cnf
+
 # --- runtime-payload ---
 # Build-only, in two halves so runtime-base needs two COPYs (two layers), split by
 # change rate: this one holds the tens of MB (php, extensions, vendored libraries),
@@ -592,7 +601,8 @@ COPY --from=php-build /tmp/runtime-packages.txt /tmp/runtime-packages.txt
 # this layer the day Wolfi publishes a fix, instead of replaying the cached one.
 #
 # The package list is the tools every flavor keeps, the MariaDB shell and the
-# PostgreSQL client tools, and the libraries php and its extensions link
+# PostgreSQL client tools, the client-side auth plugins the MariaDB shell and
+# tools load at login (see below), and the libraries php and its extensions link
 # (scripts/runtime-libs.sh, resolved in php-build). libldap-2.7 is named so that
 # libpq's `so:libldap.so.2` cannot resolve to libldap-2.6 (OpenSSL 3). tar and
 # gzip are busybox applets, so they are not packages here. No shadow, no perl,
@@ -605,7 +615,7 @@ RUN set -eux; \
     apk add --no-cache \
       bash ca-certificates curl tzdata tini less nano procps glibc-iconv \
       bzip2 zip unzip zstd xz \
-      mariadb-13.1-client "postgresql-${PG_MAJOR}-client" libldap-2.7 \
+      mariadb-13.1-client mariadb-connector-c "postgresql-${PG_MAJOR}-client" libldap-2.7 \
       $(tr '\n' ' ' < /tmp/runtime-packages.txt); \
     rm -f /tmp/runtime-packages.txt
 ARG BUSYBOX_NET_APPLETS
@@ -623,6 +633,16 @@ RUN set -eux; \
     for pair in mysql:mariadb mysqldump:mariadb-dump mysqladmin:mariadb-admin mysqlcheck:mariadb-check; do \
       printf '#!/bin/sh\nexec %s "$@"\n' "${pair#*:}" > "/usr/bin/${pair%%:*}"; \
       chmod 755 "/usr/bin/${pair%%:*}"; \
+    done
+# The MariaDB tools build only mysql_native_password in and dlopen every other
+# auth plugin (caching_sha2_password, MySQL 8's default; sha256_password,
+# client_ed25519, parsec) from /usr/lib/mariadb-13.1/plugin, which no Wolfi
+# package fills. mariadb-connector-c ships them in /usr/lib/mariadb/plugin.
+RUN set -eux; \
+    mkdir -p /usr/lib/mariadb-13.1; \
+    ln -s ../mariadb/plugin /usr/lib/mariadb-13.1/plugin; \
+    for p in caching_sha2_password sha256_password client_ed25519 parsec dialog mysql_clear_password; do \
+      test -f "/usr/lib/mariadb-13.1/plugin/$p.so"; \
     done
 
 # php-build's output, then the baked config, as two layers (see runtime-payload).

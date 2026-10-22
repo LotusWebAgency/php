@@ -92,6 +92,15 @@ MariaDB 13.1 client. The MariaDB client is `mariadb`. `mysql`, `mysqldump`, `mys
 `mariadb-check`. The last three are copied from the MariaDB server package in a build stage, so the
 server and its perl dependency stay out of the image; they are not in apk's database.
 
+The MariaDB tools log in to MySQL 5.7 and later, Percona Server and MariaDB with any of their
+password plugins: `caching_sha2_password` (the MySQL 8 default), `sha256_password`,
+`mysql_native_password`, `client_ed25519` and `parsec`. The plugins come from Wolfi's
+`mariadb-connector-c`. `/etc/my.cnf` sets `ssl-verify-server-cert = 0` for them, so they use TLS when
+the server offers it and plaintext when it does not, like MySQL's `--ssl-mode=PREFERRED`. Pass
+`--ssl-verify-server-cert` to require a verified certificate. OpenSSL 4 has no DHE key exchange, and
+a MySQL 5.7 built against OpenSSL 1.0.x (the official `mysql:5.7` image) offers nothing else, so TLS
+to it fails with a handshake error: connect with `--skip-ssl`.
+
 `php-fcgi` is a small FastCGI client, written in PHP, that sends one request to a pool and prints the
 body. The fpm healthcheck uses it, since Wolfi has no `cgi-fcgi`. Usage is in the header of
 [`rootfs/usr/local/bin/php-fcgi`](rootfs/usr/local/bin/php-fcgi).
@@ -732,7 +741,13 @@ of the same tag. Configuration and tag differences for `php-fpm-with-ext` are in
 - **OpenSSL:** PHP 8.1 to 8.5 use OpenSSL 4 (Debian-based images ship OpenSSL 3). An extension
   compiled against `libssl.so.3` must be rebuilt in an `ext-builder` stage of the same tag.
 - **MySQL and MariaDB tools:** the client is MariaDB 13.1. `mysql`, `mysqldump`, `mysqladmin` and
-  `mysqlcheck` are wrapper scripts that run the `mariadb*` tool of the same role.
+  `mysqlcheck` are wrapper scripts that run the `mariadb*` tool of the same role. They prefer TLS
+  but do not verify the server certificate unless given `--ssl-verify-server-cert`.
+- **PHP's MySQL driver:** mysqli and pdo_mysql (mysqlnd) support `caching_sha2_password` from PHP
+  7.4. PHP 7.1 to 7.3 log in to MySQL 8 only with `mysql_native_password` accounts. PHP 7.0 fails
+  against any server whose default plugin is `caching_sha2_password` (MySQL 8 and Percona 8 out of
+  the box), whatever plugin the account uses. No PHP version supports MariaDB's `ed25519` or
+  `parsec` accounts.
 - **Paths:** there is no multiarch directory. Libraries are in `/usr/lib`, not
   `/usr/lib/x86_64-linux-gnu`.
 - **Missing tools:** `ldd`, `getent`, `useradd` and `groupadd` are absent. List a binary's libraries

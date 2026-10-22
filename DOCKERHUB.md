@@ -81,7 +81,9 @@ The base is Wolfi, a glibc distribution, with `packages.wolfi.dev/os` as the onl
 Every flavor has `apk`, bash, curl, nano, less, procps, tzdata, ca-certificates, zip, unzip, zstd, xz,
 bzip2, the PostgreSQL 18 client (`psql`, `pg_dump`, `pg_restore`) and the MariaDB 13.1 client.
 `mysql`, `mysqldump`, `mysqladmin` and `mysqlcheck` are wrapper scripts that `exec` `mariadb`,
-`mariadb-dump`, `mariadb-admin` and `mariadb-check`. The fpm healthcheck uses `php-fcgi`, a small
+`mariadb-dump`, `mariadb-admin` and `mariadb-check`. They log in with every MySQL, Percona and
+MariaDB password plugin, including `caching_sha2_password`, and use TLS when the server offers it
+(`/etc/my.cnf`; `--ssl-verify-server-cert` to verify). The fpm healthcheck uses `php-fcgi`, a small
 FastCGI client shipped in every flavor, since Wolfi has no `cgi-fcgi`.
 
 There is no apt, dpkg, `ldd`, `getent`, `useradd` or other shadow tool. `fpm` and `cli` have no perl;
@@ -407,6 +409,8 @@ to glibc, so rebuild every compiled extension in an `ext-builder` stage of the s
 - PHP 8.1 to 8.5 use OpenSSL 4 (Debian-based images ship OpenSSL 3). Rebuild extensions compiled
   against `libssl.so.3` in an `ext-builder` stage of the same tag.
 - `mysql*` names are wrappers around the MariaDB 13.1 `mariadb*` tools.
+- mysqlnd supports `caching_sha2_password` from PHP 7.4. 7.1 to 7.3 need `mysql_native_password`
+  accounts on MySQL 8; 7.0 cannot log in to a stock MySQL 8 at all.
 - Libraries are in `/usr/lib`, not `/usr/lib/x86_64-linux-gnu`. `ldd`, `getent`, `useradd` and
   `groupadd` are absent; list a binary's libraries with the loader
   (`/lib64/ld-linux-x86-64.so.2 --list <file>`, `/lib/ld-linux-aarch64.so.1` on arm64).

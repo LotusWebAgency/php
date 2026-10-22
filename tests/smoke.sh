@@ -717,6 +717,29 @@ for tool in mariadb-dump mariadb-admin mariadb-check; do
     || { echo "FAIL: $tool reports server version '$tool_version', mariadb reports '$shell_version'"; exit 1; }
 done
 echo "ok: mysql, mysqldump, mysqladmin and mysqlcheck wrap mariadb, mariadb-dump, mariadb-admin and mariadb-check; all eight print a version with empty stderr, one server version ($shell_version)"
+
+# The MariaDB tools dlopen every auth plugin except mysql_native_password from
+# their compiled-in plugin dir. Without caching_sha2_password.so they cannot log
+# in to MySQL 8+ or Percona 8+ with a default account, and without
+# client_ed25519.so/parsec.so to MariaDB accounts using those. Each plugin must
+# exist there and load with the image's own OpenSSL 4.
+# Wolfi's compiled-in plugin dir follows the server series: /usr/lib/mariadb-13.1/plugin.
+plugin_dir="/usr/lib/mariadb-${shell_version%.*}/plugin"
+for p in caching_sha2_password sha256_password client_ed25519 parsec dialog mysql_clear_password; do
+  so="$plugin_dir/$p.so"
+  drun --rm "$IMAGE" test -f "$so" || { echo "FAIL: the MariaDB client auth plugin $so is missing"; exit 1; }
+  so_ldd=$(image_ldd "$so" 2>&1 || true)
+  [ -n "$so_ldd" ] || { echo "FAIL: the loader listed nothing for $so"; exit 1; }
+  ! grep -q 'not found' <<<"$so_ldd" || { echo "FAIL: $so has an unresolved NEEDED entry: $so_ldd"; exit 1; }
+  ssl_load_violations=""
+  scan_ssl_resolution "$so" "$so_ldd"
+  [ -z "$ssl_load_violations" ] || { printf 'FAIL: %s\n' "$ssl_load_violations"; exit 1; }
+done
+echo "ok: the MariaDB client auth plugins (caching_sha2_password, sha256_password, client_ed25519, parsec, dialog, mysql_clear_password) are in $plugin_dir and resolve against OpenSSL 4"
+mycnf=$(drun --rm "$IMAGE" sh -c 'sed -e "/^#/d" -e "/^$/d" /etc/my.cnf')
+[ "$mycnf" = "$(printf '[client-mariadb]\nssl-verify-server-cert = 0')" ] \
+  || { echo "FAIL: /etc/my.cnf is not the shipped TLS-preferred client config: $mycnf"; exit 1; }
+echo "ok: /etc/my.cnf makes the MariaDB client prefer TLS and fall back to plaintext"
 case "$FLAVOR" in
   fpm|cli)
     if drun --rm "$IMAGE" sh -c 'command -v perl' >/dev/null 2>&1; then
