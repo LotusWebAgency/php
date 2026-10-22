@@ -44,6 +44,18 @@ End-of-life tags are still published and rebuilt weekly for base-image and packa
 interpreter in them gets no upstream fixes. Policy:
 [SUPPORT.md](https://github.com/LotusWebAgency/php/blob/main/SUPPORT.md).
 
+### Older PHP versions
+
+- 8.1 and below get no upstream security fixes. 7.0-8.0 link a vendored OpenSSL 1.1.1w, ICU,
+  libxml2 and libxslt statically.
+- mysqli/PDO support `caching_sha2_password` from 7.4. 7.1-7.3 need `mysql_native_password`
+  accounts on MySQL 8 and cannot reach MySQL 9. 7.0 also needs the server's default plugin set to
+  `mysql_native_password`. 7.0 and 7.1 speak TLS 1.0 only, which MySQL 8.4 and MariaDB 11 refuse.
+- No JIT below 8.0 (8.0: amd64 only). `-v3` tags are 8.4 and 8.5 only.
+
+Every caveat, with workarounds:
+[Older PHP versions](https://github.com/LotusWebAgency/php/blob/main/README.md#older-php-versions).
+
 | Tag shape | Example | Meaning |
 |---|---|---|
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
@@ -409,8 +421,6 @@ to glibc, so rebuild every compiled extension in an `ext-builder` stage of the s
 - PHP 8.1 to 8.5 use OpenSSL 4 (Debian-based images ship OpenSSL 3). Rebuild extensions compiled
   against `libssl.so.3` in an `ext-builder` stage of the same tag.
 - `mysql*` names are wrappers around the MariaDB 13.1 `mariadb*` tools.
-- mysqlnd supports `caching_sha2_password` from PHP 7.4. 7.1 to 7.3 need `mysql_native_password`
-  accounts on MySQL 8; 7.0 cannot log in to a stock MySQL 8 at all.
 - Libraries are in `/usr/lib`, not `/usr/lib/x86_64-linux-gnu`. `ldd`, `getent`, `useradd` and
   `groupadd` are absent; list a binary's libraries with the loader
   (`/lib64/ld-linux-x86-64.so.2 --list <file>`, `/lib/ld-linux-aarch64.so.1` on arm64).
