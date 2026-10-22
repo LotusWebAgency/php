@@ -42,7 +42,8 @@ come from `matrix.json` and are carried on every image as the `com.lotuswebagenc
 | `8.5` | 8.5.12 | clang | yes | active | 2029-12-31 |
 
 End-of-life tags are still published and rebuilt weekly for base-image and package updates. The PHP
-interpreter in them gets no upstream fixes. See [SUPPORT.md](SUPPORT.md).
+interpreter in them gets no upstream fixes. See [SUPPORT.md](SUPPORT.md) and
+[Older PHP versions](#older-php-versions).
 
 | Tag shape | Example | Meaning |
 |---|---|---|
@@ -71,6 +72,50 @@ baseline in every image, `-v3` included. Their code runs on any CPU the baseline
 A tag names the PHP minor, so `8.4-fpm` moves with each 8.4 patch release. Pin the digest for
 reproducible builds: `FROM lotuswebagency/php:8.4-fpm@sha256:...`.
 
+## Older PHP versions
+
+These caveats apply to the end-of-life tags. PHP 8.2 and later have none of them.
+
+- **No security fixes.** PHP 8.1 and below get no upstream fixes. The weekly rebuild updates the
+  Wolfi packages, not the interpreter's source. See [SUPPORT.md](SUPPORT.md).
+- **Vendored libraries on 7.0 to 8.0.** OpenSSL 1.1.1w, ICU (67.1 on 7.0-7.3, 70.1 on 7.4-8.0),
+  libxml2 2.9.14 and libxslt 1.1.35 are linked statically, and curl too on 7.0-7.2. OpenSSL 1.1.1 is
+  end-of-life upstream. PHP's own TLS (the openssl extension, streams, mysqlnd) uses that copy and
+  reads `/etc/ssl/openssl-1.1/openssl.cnf`, not `/etc/ssl/openssl.cnf`. Trivy cannot see these
+  libraries, so they are tracked by hand.
+- **MySQL through mysqli and PDO.** PHP's driver (mysqlnd) is older than MySQL 8's defaults:
+
+  | PHP | `caching_sha2_password` accounts | `mysql_native_password` accounts on stock MySQL 8 / Percona 8 | MySQL 9 | TLS to MySQL 8.4 / MariaDB 11 |
+  |---|---|---|---|---|
+  | 7.0 | no | no | no | no |
+  | 7.1 | no | yes | no | no |
+  | 7.2, 7.3 | no | yes | no | yes |
+  | 7.4, 8.0 | yes | yes | yes | yes |
+
+  - PHP 7.0 refuses any server whose default plugin is `caching_sha2_password`, whatever plugin the
+    account uses. On MySQL or Percona 8.4, start the server with `--mysql-native-password=ON
+    --authentication-policy=mysql_native_password` and create the account `IDENTIFIED WITH
+    mysql_native_password`. On 8.0 to 8.3 the server option is
+    `--default-authentication-plugin=mysql_native_password`.
+  - PHP 7.1 to 7.3 need a `mysql_native_password` account. MySQL 8.4 disables that plugin unless
+    the server runs with `--mysql-native-password=ON`.
+  - MySQL 9 removed `mysql_native_password`, so PHP 7.0 to 7.3 cannot log in to it at all.
+  - PHP 7.0 and 7.1 negotiate TLS 1.0 only, which MySQL 8.4 and MariaDB 11 refuse. Connect without
+    TLS, over a private network.
+  - `sha256_password` accounts fail over TLS up to PHP 8.0. They work without TLS, through the RSA
+    key exchange.
+  - MySQL 5.7 and MariaDB work from every version.
+
+  The MariaDB command-line tools are the same in every tag and have none of these limits.
+- **Extensions.** `pcov` needs 7.1+, `sodium` and `snuffleupagus` 7.2+, `ffi` 7.4+, `mongodb`
+  8.1+, `protobuf` and `swoole` 8.2+. `mcrypt` and `xmlrpc` ship on 7.x only.
+- **JIT.** PHP 8.1+ has it on both architectures, 8.0 on amd64 only. Below 8.0 there is no JIT, so
+  `PHP_OPCACHE_JIT` and `PHP_OPCACHE_JIT_BUFFER` have no effect.
+- **Locale.** Under a non-UTF-8 `LC_CTYPE`, PHP 7.x's `basename()` and `pathinfo()` drop multibyte
+  characters, and `ZipArchive::extractTo()` mangles such names. The images set `LANG=C.UTF-8`; do
+  not override `LANG` or `LC_ALL` with `C` or `POSIX` on 7.x.
+- **CPU.** `-v3` tags exist for 8.4 and 8.5 only.
+
 ## Flavors
 
 | Flavor | Contents |
@@ -91,6 +136,15 @@ MariaDB 13.1 client. The MariaDB client is `mariadb`. `mysql`, `mysqldump`, `mys
 `mysqlcheck` are one-line wrapper scripts that `exec` `mariadb`, `mariadb-dump`, `mariadb-admin` and
 `mariadb-check`. The last three are copied from the MariaDB server package in a build stage, so the
 server and its perl dependency stay out of the image; they are not in apk's database.
+
+The MariaDB tools log in to MySQL 5.7 and later, Percona Server and MariaDB with any of their
+password plugins: `caching_sha2_password` (the MySQL 8 default), `sha256_password`,
+`mysql_native_password`, `client_ed25519` and `parsec`. The plugins come from Wolfi's
+`mariadb-connector-c`. `/etc/my.cnf` sets `ssl-verify-server-cert = 0` for them, so they use TLS when
+the server offers it and plaintext when it does not, like MySQL's `--ssl-mode=PREFERRED`. Pass
+`--ssl-verify-server-cert` to require a verified certificate. OpenSSL 4 has no DHE key exchange, and
+a MySQL 5.7 built against OpenSSL 1.0.x (the official `mysql:5.7` image) offers nothing else, so TLS
+to it fails with a handshake error: connect with `--skip-ssl`.
 
 `php-fcgi` is a small FastCGI client, written in PHP, that sends one request to a pool and prints the
 body. The fpm healthcheck uses it, since Wolfi has no `cgi-fcgi`. Usage is in the header of
@@ -732,7 +786,10 @@ of the same tag. Configuration and tag differences for `php-fpm-with-ext` are in
 - **OpenSSL:** PHP 8.1 to 8.5 use OpenSSL 4 (Debian-based images ship OpenSSL 3). An extension
   compiled against `libssl.so.3` must be rebuilt in an `ext-builder` stage of the same tag.
 - **MySQL and MariaDB tools:** the client is MariaDB 13.1. `mysql`, `mysqldump`, `mysqladmin` and
-  `mysqlcheck` are wrapper scripts that run the `mariadb*` tool of the same role.
+  `mysqlcheck` are wrapper scripts that run the `mariadb*` tool of the same role. They prefer TLS
+  but do not verify the server certificate unless given `--ssl-verify-server-cert`.
+- **PHP's MySQL driver:** no PHP version supports MariaDB's `ed25519` or `parsec` accounts. PHP 7.0
+  to 8.0 have further limits, listed in [Older PHP versions](#older-php-versions).
 - **Paths:** there is no multiarch directory. Libraries are in `/usr/lib`, not
   `/usr/lib/x86_64-linux-gnu`.
 - **Missing tools:** `ldd`, `getent`, `useradd` and `groupadd` are absent. List a binary's libraries

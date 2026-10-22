@@ -44,6 +44,18 @@ End-of-life tags are still published and rebuilt weekly for base-image and packa
 interpreter in them gets no upstream fixes. Policy:
 [SUPPORT.md](https://github.com/LotusWebAgency/php/blob/main/SUPPORT.md).
 
+### Older PHP versions
+
+- 8.1 and below get no upstream security fixes. 7.0-8.0 link a vendored OpenSSL 1.1.1w, ICU,
+  libxml2 and libxslt statically.
+- mysqli/PDO support `caching_sha2_password` from 7.4. 7.1-7.3 need `mysql_native_password`
+  accounts on MySQL 8 and cannot reach MySQL 9. 7.0 also needs the server's default plugin set to
+  `mysql_native_password`. 7.0 and 7.1 speak TLS 1.0 only, which MySQL 8.4 and MariaDB 11 refuse.
+- No JIT below 8.0 (8.0: amd64 only). `-v3` tags are 8.4 and 8.5 only.
+
+Every caveat, with workarounds:
+[Older PHP versions](https://github.com/LotusWebAgency/php/blob/main/README.md#older-php-versions).
+
 | Tag shape | Example | Meaning |
 |---|---|---|
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
@@ -81,7 +93,9 @@ The base is Wolfi, a glibc distribution, with `packages.wolfi.dev/os` as the onl
 Every flavor has `apk`, bash, curl, nano, less, procps, tzdata, ca-certificates, zip, unzip, zstd, xz,
 bzip2, the PostgreSQL 18 client (`psql`, `pg_dump`, `pg_restore`) and the MariaDB 13.1 client.
 `mysql`, `mysqldump`, `mysqladmin` and `mysqlcheck` are wrapper scripts that `exec` `mariadb`,
-`mariadb-dump`, `mariadb-admin` and `mariadb-check`. The fpm healthcheck uses `php-fcgi`, a small
+`mariadb-dump`, `mariadb-admin` and `mariadb-check`. They log in with every MySQL, Percona and
+MariaDB password plugin, including `caching_sha2_password`, and use TLS when the server offers it
+(`/etc/my.cnf`; `--ssl-verify-server-cert` to verify). The fpm healthcheck uses `php-fcgi`, a small
 FastCGI client shipped in every flavor, since Wolfi has no `cgi-fcgi`.
 
 There is no apt, dpkg, `ldd`, `getent`, `useradd` or other shadow tool. `fpm` and `cli` have no perl;
