@@ -7,3 +7,6 @@ CVE-2026-93687 exp:2026-11-30
 
 # CVE-2026-15534: pkg:apk/wolfi/perl@5.44.0-r1 in ext-builder -- affected
 CVE-2026-15534 exp:2026-11-30
+
+# CVE-2026-109869: pkg:npm/undici@6.29.0 in cli-builder -- affected
+CVE-2026-109869 exp:2026-11-30

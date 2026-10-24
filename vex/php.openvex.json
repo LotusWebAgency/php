@@ -44,6 +44,26 @@
       "status": "affected",
       "status_notes": "review-by: 2026-11-30. Found in ext-builder only, where perl is a dependency of autoconf and automake (phpize). Upstream lists every release through 5.45.1 as affected; 5.44.0 is the latest stable release and Wolfi's 5.44.0-r1 carries no patch. Accepted for a build-stage image that runs perl only on the extension sources its user chooses to compile; fpm, cli and cli-builder carry no perl.",
       "action_statement": "Rebuild on the first perl release or Wolfi revision that fixes it and drop this statement. Re-checked on the review-by date."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-109869",
+        "description": "undici: denial of service via unhandled stream error on excessive content (fixed in undici 6.29.1; no npm release bundles it yet)"
+      },
+      "timestamp": "2026-10-24T00:00:00Z",
+      "products": [
+        {
+          "@id": "pkg:oci/php?repository_url=index.docker.io/lotuswebagency/php&flavor=cli-builder",
+          "subcomponents": [
+            {
+              "@id": "pkg:npm/undici@6.29.0"
+            }
+          ]
+        }
+      ],
+      "status": "affected",
+      "status_notes": "review-by: 2026-11-30. Found in cli-builder only, in the undici that npm bundles (/usr/local/lib/node_modules/npm/node_modules/undici and semantic-release's own npm copy). npm 12.2.1 is the latest release and still bundles undici 6.29.0. Accepted as a denial of service in a build-time tool, not shown unreachable.",
+      "action_statement": "Move to the first npm release that bundles undici 6.29.1 or later and drop this statement. Re-checked on the review-by date."
     }
   ]
 }
