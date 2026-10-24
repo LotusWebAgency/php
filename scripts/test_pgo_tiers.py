@@ -100,7 +100,7 @@ class TestTiers(unittest.TestCase):
         self.assertIsNone(pgo_tiers.apps_of("9.9"))
 
     def test_expected_apps(self):
-        """Drupal 11.4.8 and Mage-OS 3.5.0 train the 8.4 and 8.5 tiers only.
+        """Drupal 11.4.11 and Mage-OS 3.5.0 train the 8.4 and 8.5 tiers only.
 
         Every tier trains the four base apps; the two CMS apps are on exactly
         those two tiers, not "from 8.4 up", so a new tier or a renamed floor

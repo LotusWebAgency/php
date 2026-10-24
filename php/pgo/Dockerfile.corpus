@@ -196,7 +196,7 @@ RUN --mount=type=cache,target=/var/cache/src,id=php-src-cache,sharing=locked,uid
 # network half (composer install) apart from the no-network half (site install and
 # seeding).
 #
-# Drupal comes from Packagist only: the lock pins drupal/core-recommended 11.4.8
+# Drupal comes from Packagist only: the lock pins drupal/core-recommended 11.4.11
 # and drush 13, and the scaffold plugin writes web/ at install time, so no tarball
 # or corpus.lock row is involved.
 #

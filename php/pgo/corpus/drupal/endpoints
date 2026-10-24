@@ -10,7 +10,7 @@
 # page carries the site name in its <title> and a "Log in" link in the header, so
 # an access-denied or error page would satisfy those too.
 #
-# The byte floors sit at about half of what each page weighs on 11.4.8 (34 KB front
+# The byte floors sit at about half of what each page weighs on 11.4.11 (34 KB front
 # page, 15-30 KB the rest), well above any error page (13 KB) once the expected
 # substring is also required.
 docroot web
