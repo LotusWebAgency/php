@@ -65,12 +65,12 @@
 #     not re-resolvable from a version tag like every other row here.
 #
 # tier  name          version        sha256 (image digest)                                            url (docker tag, for reference -- not what is fetched)
-8.5     prestashop    9.2.0          bad534d47aa2365b3ec2ea136736a530592b8e62582607fb4129d3e8127e8756  docker://prestashop/prestashop:9.2.0-8.2
-8.4     prestashop    8.2.8          0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66  docker://prestashop/prestashop:8.2.8-7.2-fpm
-8.2     prestashop    8.2.8          0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66  docker://prestashop/prestashop:8.2.8-7.2-fpm
-8.1     prestashop    8.2.8          0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66  docker://prestashop/prestashop:8.2.8-7.2-fpm
-7.2     prestashop    8.2.8          0c666c1dcd821d2484df553bc2250acabf5d905097ae271dbc0e1363b30d2c66  docker://prestashop/prestashop:8.2.8-7.2-fpm
-7.1     prestashop    1.7.8.11       25a4fa68ab0529a5886f45ea9aad04d2626f7c1b861c62cbe643d2574a8e6473  docker://prestashop/prestashop:1.7.8.11-7.1-fpm
+8.5     prestashop    9.2.0          49f2c5d4136234f06d5512624f7c6fc548c4cdbbd344290c93a041304cd0b09e  docker://prestashop/prestashop:9.2.0-8.2
+8.4     prestashop    8.2.8          9df2bed032c0d1e12113a6870d35aad996b30df05672915170a646e76087bfe4  docker://prestashop/prestashop:8.2.8-7.2-fpm
+8.2     prestashop    8.2.8          9df2bed032c0d1e12113a6870d35aad996b30df05672915170a646e76087bfe4  docker://prestashop/prestashop:8.2.8-7.2-fpm
+8.1     prestashop    8.2.8          9df2bed032c0d1e12113a6870d35aad996b30df05672915170a646e76087bfe4  docker://prestashop/prestashop:8.2.8-7.2-fpm
+7.2     prestashop    8.2.8          9df2bed032c0d1e12113a6870d35aad996b30df05672915170a646e76087bfe4  docker://prestashop/prestashop:8.2.8-7.2-fpm
+7.1     prestashop    1.7.8.11       35d83e335c408afe87e18f828477a72ff9fa12d220fcedb81815df5a001edbd8  docker://prestashop/prestashop:1.7.8.11-7.1-fpm
 7.0     prestashop    1.6.1.24       fd757ab1a4847abc053f19dfbf0f4885ffbf4fc06b02bce04035f30c952e234f  docker://prestashop/prestashop:1.6-7.0-fpm
 #
 # prestashop-lang: the CLI install's English language step is not

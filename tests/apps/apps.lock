@@ -24,7 +24,7 @@ composer          -     2.10.3      7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d
 # index.php and a readme; 1.6 is a flat zip with a prestashop/ directory) that build.sh
 # unpacks. 1.7 to 8.2 carry vendor/ and composer.lock (1.6 has neither); the tree is the
 # release, not an image built on top of it.
-prestashop-image     9.2  9.2.0  a862e53476bb32816780101cc333f8997045e5b0dd809c5df6e5b4d32ed7dd73  docker://prestashop/prestashop:9.2.0-8.1
+prestashop-image     9.2  9.2.0  c76d7d2ca3475654112127245064e230f544506edefdbe40d753d5398bac2494  docker://prestashop/prestashop:9.2.0-8.1
 # The installer downloads the en-US pack even for English, with no offline path.
 # Upstream re-exports these zips in place with every release, so the lang rows
 # are `latest`: fetch.sh checks the zip's shape (en-US/*.xlf only) instead of a

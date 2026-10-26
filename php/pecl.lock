@@ -36,7 +36,7 @@ mongodb       2.5.5     0eaf84ff709f73183d80597f31ff02937f6aefde01eb895a0aa19334
 msgpack       3.0.1     e30be355ab79aaea4568692fbd6073fd7c7f50ea8d3cf12edce40fc0c921d868  7.0.0    -
 pcov          1.0.12    23255c8c9335a9636ccb743f5302436a97a582a0bbde9869485be911bbc15da8  7.1.0    -
 protobuf      5.36.2    f0a17c67de29df0fb0e5215a381df9b155125e1ace6252dd617bf16b4194dd5b  8.2.0    -
-swoole        6.2.3     21dfa1c4a4a09f4d1cb4b154f7defdc91fbabafc8d44a77f8f618b9742c67304  8.2.0    8.5.99
+swoole        6.2.4     cb41348708cb3a360672cd4ffe84b9a6b4efee61773be7d76a11c39949b95334  8.2.0    8.5.99
 uuid          1.3.0     b7af055e2c409622f8c5e6242d1c526c00e011a93c39b10ca28040b908da3f37  7.0.0    -
 xdebug        3.5.3     f073de91bea046106abf4d6071c963ea71e58571df6ce58948ceca89d121cb2d  8.0.0    8.5.99
 yaml          2.3.0     bc8404807a3a4dc896b310af21a7f8063aa238424ff77f27eb6ffa88b5874b8a  7.1.0    -
