@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The tests CI does not run, against the images develop CI already tested and
 # pushed to GHCR (ghcr.io/lotuswebagency/php/dev), instead of a from-source
-# rebuild of all 50 targets on this machine.
+# rebuild of all 52 targets on this machine.
 #
 #   tests/extended.sh pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--no-corpus]
 #   tests/extended.sh uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
@@ -564,7 +564,7 @@ cmd_uarch() {
 }
 
 cmd_ext_builder() {
-  local v e="" versions
+  local v versions
   mapfile -t versions < <(matrix_ext_versions)
   if [ "${#versions[@]}" -eq 0 ]; then
     record ext-builder "-" SKIP 0 "no version has ext-builder, fpm and cli all selected"
@@ -572,8 +572,7 @@ cmd_ext_builder() {
     return 0
   fi
   for v in "${versions[@]}"; do
-    e="php-${v//./_}"
-    gate ext-builder "$v" "${TAG_OF[$e-ext-builder]}" "${TAG_OF[$e-fpm]}" "${TAG_OF[$e-cli]}" || continue
+    gate ext-builder "$v" "${TAG_OF[$(matrix_ext_target "$v" ext-builder)]}" "${TAG_OF[$(matrix_ext_target "$v" fpm)]}" "${TAG_OF[$(matrix_ext_target "$v" cli)]}" || continue
     run_step ext-builder "$v" "ext-builder-$v" ./tests/test-ext-builder.sh "$v"
   done
 }

@@ -74,7 +74,7 @@
 # IPs are shared: a "toomanyrequests" failure in these jobs is that, not a test
 # result; re-run the failed jobs.
 #
-# Disk: a version job holds up to 7 images (-v3 variants on 8.4 and 8.5; the
+# Disk: a version job holds up to 8 images (-v3 variants on 8.4 and 8.5; the
 # builder flavors are the heavy ones), three fixtures (MariaDB plus an installed
 # app each) and the stack's service images; the corpus-tiers job holds every fpm
 # image and 7 corpus tiers (each carries the cli-builder toolchain). Every job

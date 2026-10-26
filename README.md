@@ -22,7 +22,7 @@ services:
 
 ## Tags
 
-All 11 PHP versions ship all four flavors for `linux/amd64` and `linux/arm64`: 50 images, 44 baseline plus 6 `-v3`. `Support` and
+All 11 PHP versions ship all four flavors for `linux/amd64` and `linux/arm64`: 52 images, 44 baseline plus 8 `-v3`. `Support` and
 `EOL date` are upstream's values from [php.net](https://www.php.net/supported-versions.php). They
 come from `matrix.json` and are carried on every image as the `com.lotuswebagency.support` and
 `com.lotuswebagency.eol-date` labels.
@@ -48,7 +48,7 @@ interpreter in them gets no upstream fixes. See [SUPPORT.md](SUPPORT.md) and
 | Tag shape | Example | Meaning |
 |---|---|---|
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
-| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64-v2` / `armv8-a` baseline. 8.4 and 8.5 only, not for `ext-builder`. |
+| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64-v2` / `armv8-a` baseline. 8.4 and 8.5 only. |
 | `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image (`default_version` in `matrix.json`, currently 8.5). |
 | `{release}-{flavor}[-v3]` | `8.5.12-fpm` | Full patch version. Read from the built image (`PHP_VERSION`) after tests and the Trivy gate, so a tag cannot name a version the image does not contain. |
 
@@ -123,7 +123,7 @@ These caveats apply to the end-of-life tags. PHP 8.2 and later have none of them
 | `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` (`php-fpm-healthcheck`) that needs no web server. |
 | `cli` | `php -a` by default. Scripts, cron jobs, queue workers. |
 | `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, Node.js 26 with npm 12.2.1 and corepack, semantic-release and [Composer](https://getcomposer.org/) (installed with signature verification). No compiler. For build stages. |
-| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize` / `php-config`. Runs as root, no Composer, no Node.js. Wolfi's openssf compiler wrappers stay on, so extensions built here get Wolfi's hardening flags. They also take Wolfi's default `-march`/`-mtune`, not the generic tuning the PHP build uses. For build stages. |
+| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize` / `php-config`. Runs as root, no Composer, no Node.js. Wolfi's openssf compiler wrappers stay on, so extensions built here get Wolfi's hardening flags. They also take Wolfi's default `-march`/`-mtune`, not the generic tuning the PHP build uses; `-v3` presets `CFLAGS` and `CXXFLAGS` with the `-v3` `-march`/`-mtune` instead. For build stages. |
 
 All images use `tini` as PID 1. All but `ext-builder` run as `www-data` (UID and GID 33).
 
@@ -483,8 +483,12 @@ ENV PHP_EXT_ENABLE=myext
   `openssl-dev` is the OpenSSL 3 package and conflicts with it.
 - `PHP_EXT_ENABLE=myext` works for any `myext.so` in the extension directory. For another
   `zend_extension`, put a `zend_extension=myext.so` file in `/usr/local/etc/php/conf.d/`.
-- `ext-builder` has no `-v3` variant: an extension built against baseline headers loads in `-v3`
-  runtimes too. `tests/test-ext-builder.sh` covers this flow with `tests/fixtures/ext-hello`.
+- Build for a `-v3` runtime in the `-v3` builder (`8.5-ext-builder-v3`, copied into `8.5-fpm-v3` or
+  `8.5-cli-v3`). It presets `CFLAGS` and `CXXFLAGS` to `-g -O2` plus the `-v3` `-march`/`-mtune`
+  (`x86-64-v3` / `armv9-a`, as in [Tags](#tags)), so a plain `./configure` compiles for the
+  runtime's instruction set. An extension from the baseline builder also loads there, without `-v3`
+  code. Setting your own `CFLAGS` replaces the preset: keep the `-march`/`-mtune` in it.
+  `tests/test-ext-builder.sh` covers both flows with `tests/fixtures/ext-hello`.
 
 ## Hardening
 
@@ -524,7 +528,10 @@ ENV PHP_EXT_ENABLE=myext
 **Snuffleupagus.** [Virtual patching](https://github.com/jvoisin/snuffleupagus) is compiled in but
 not loaded by default. Four rulesets are baked into `/usr/local/etc/php/snuffleupagus/`: `default`,
 `wordpress`, `prestashop` and `laravel`. Enable one with `PHP_SNUFFLEUPAGUS=prestashop`. Snuffleupagus is not available on PHP 7.0 and 7.1. Rulesets are
-for serving; build and deploy (Composer included) with `cli-builder` and no ruleset. No ruleset enables
+for serving; build and deploy (Composer included) with `cli-builder` and no ruleset. Laravel's scheduler
+(`php artisan schedule:run`) works under every ruleset: a narrow exemption lets Symfony Process start the exact
+command shapes Laravel builds, foreground and `runInBackground()`. Composer and any other shell string with
+metacharacters stay blocked. No ruleset enables
 `readonly_exec`; the PrestaShop and Laravel ones disable it explicitly because both frameworks rewrite their own cache
 files. `sp.xxe_protection`
 is off in all of them: it does not carry into requests, and on PHP 7 it disables the application's own
@@ -565,7 +572,8 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
   PECL sources.
 - **Instruction set.** The amd64 baseline is `-march=x86-64-v2 -mtune=generic`, arm64 is
   `-march=armv8-a -mtune=generic`. `-v3` is `-march=x86-64-v3` on amd64 and `-march=armv9-a` on
-  arm64, with a startup check on amd64 (see [Tags](#tags)). Flags: `php/cflags.sh`.
+  arm64, with a startup check on amd64 (see [Tags](#tags)). `ext-builder-v3` presets the same
+  `-march`/`-mtune` as default `CFLAGS`. Flags: `php/cflags.sh`.
 - **Dependencies by era.** PHP 8.1-8.5 link Wolfi's libraries, including its system OpenSSL 4, so one
   OpenSSL runs in the process: smoke fails an image that carries a `libssl` or `libcrypto` of major 1
   or 3. Every PHP 8.1-8.5 build carries a patch that widens the `SSL_CTX` options in `ext/openssl`
@@ -703,7 +711,7 @@ docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl php-8_5-fpm \
 
 ./tests/smoke.sh lotuswebagency/php:8.5-fpm 8.5 fpm
 ./tests/test-pgo.sh lotuswebagency/php:8.5-fpm 8.5
-./tests/test-ext-builder.sh 8.5        # needs that version's ext-builder, fpm and cli images
+./tests/test-ext-builder.sh 8.5        # needs that version's ext-builder, fpm and cli images (8.4-v3: the -v3 trio)
 ./tests/build-all.sh                   # every target, resumable; --only, --flavor, --platform, --dry-run
 ```
 
@@ -718,7 +726,7 @@ Snuffleupagus and ELF-hardening tests. Application suites (Laravel, WordPress, P
 
 `tests/extended.sh` runs the suites the main gate does not (`-v3` check, corpus-tier replay,
 application suites, and on request the benchmark) against images a `develop` run pushed to GHCR,
-instead of rebuilding all 50 targets. Log in to `ghcr.io` with a token that has `read:packages`, then:
+instead of rebuilding all 52 targets. Log in to `ghcr.io` with a token that has `read:packages`, then:
 
 ```sh
 tests/extended.sh pull && tests/extended.sh all

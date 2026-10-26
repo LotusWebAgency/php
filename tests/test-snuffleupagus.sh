@@ -142,25 +142,33 @@ echo "$out" | grep -qi "disabled_function" || fail "wrapper-include block failed
 echo "$out" | grep -q "gz-payload-executed" && fail "the wrapper-include payload actually ran: $out"
 echo "ok: default.rules blocks non-.php wrapper includes"
 
-# putenv("DYLD_LIBRARY_PATH") is exempted on its own merits: macOS-only and inert on
-# this Linux image, so upstream's LD_-substring hardening false-positives on it for no
-# protective benefit. It is not a Composer-specific carve-out (Symfony's defensive
-# env-clearing makes the same call). Composer's phar bootstrap is deliberately not
-# exempted: getting past putenv reaches the proc_open() command-injection filter
-# blocking a benign `stty -a | grep columns` pipe, which is the headline RCE
-# protection doing its job. PHP_SNUFFLEUPAGUS (runtime serving) and Composer
-# (build/deploy time) are not meant to run together.
-out=$(run_probe "$IMAGE" default '<?php putenv("DYLD_LIBRARY_PATH"); echo "DYLD_CLEARED_OK";') \
-  || fail "putenv(\"DYLD_LIBRARY_PATH\") was blocked -- the putenv exemption regressed: $out"
-echo "$out" | grep -q "DYLD_CLEARED_OK" || fail "putenv(\"DYLD_LIBRARY_PATH\") did not complete correctly: $out"
-echo "ok: putenv() exemption allows the inert-on-Linux DYLD_LIBRARY_PATH"
+# putenv() drops LD_* and GCONV_* assignments (the LD_PRELOAD / iconv gconv-module
+# injection vectors). Upstream's patterns were unanchored substrings, so any
+# assignment merely containing "LD_" fataled (BUILD_ID=1, WORLD_SIZE=2) and
+# DYLD_LIBRARY_PATH needed an exemption; the rules are anchored to the variable
+# name instead (DIVERGENCES item 5), which is where the loader and iconv look.
+# Composer's phar bootstrap is deliberately not exempted: getting past putenv reaches
+# the proc_open() command-injection filter blocking a benign `stty -a | grep columns`
+# pipe, which is the headline RCE protection doing its job. PHP_SNUFFLEUPAGUS
+# (runtime serving) and Composer (build/deploy time) are not meant to run together.
+for rs in default laravel wordpress prestashop; do
+  for assignment in 'DYLD_LIBRARY_PATH' 'BUILD_ID=1' 'WORLD_SIZE=2' 'APP_FIELD_X=y' 'MY_GCONV_X=1'; do
+    out=$(run_probe "$IMAGE" "$rs" "<?php putenv('${assignment}'); echo 'PUTENV_OK';") \
+      || fail "${rs}.rules blocked putenv('${assignment}') -- the LD_/GCONV_ rules lost their anchor: $out"
+    echo "$out" | grep -q "PUTENV_OK" || fail "putenv('${assignment}') did not complete correctly under ${rs}.rules: $out"
+  done
+done
+echo "ok: putenv() allows names that merely contain LD_/GCONV_ (DYLD_LIBRARY_PATH, BUILD_ID, WORLD_SIZE, ...) in every ruleset"
 
-# ...and does not widen past that one exact value: LD_PRELOAD and friends
-# still match the substring rule and stay blocked.
-out=$(run_probe "$IMAGE" default '<?php putenv("LD_PRELOAD=/tmp/evil.so"); echo "SHOULD_NOT_RUN";') && \
-  fail "putenv(\"LD_PRELOAD=...\") was NOT blocked -- the exemption widened past DYLD_LIBRARY_PATH: $out"
-echo "$out" | grep -qi "disabled_function" || fail "the negative putenv probe failed for the wrong reason: $out"
-echo "ok: putenv() exemption does not widen past DYLD_LIBRARY_PATH"
+# ...and the anchor loses no coverage: every real loader/iconv variable stays blocked.
+for rs in default laravel wordpress prestashop; do
+  for assignment in 'LD_PRELOAD=/tmp/evil.so' 'LD_LIBRARY_PATH=/tmp' 'LD_AUDIT=/tmp/evil.so' 'GCONV_PATH=/tmp'; do
+    out=$(run_probe "$IMAGE" "$rs" "<?php putenv('${assignment}'); echo 'SHOULD_NOT_RUN';") && \
+      fail "putenv('${assignment}') was NOT blocked under ${rs}.rules -- the anchored rule lost coverage: $out"
+    echo "$out" | grep -qi "disabled_function" || fail "the negative putenv probe for ${assignment} failed for the wrong reason under ${rs}.rules: $out"
+  done
+done
+echo "ok: putenv() still blocks LD_PRELOAD, LD_LIBRARY_PATH, LD_AUDIT and GCONV_PATH in every ruleset"
 
 # Documented boundary: `require` from Composer's own phar bootstrap stays blocked;
 # there is deliberately no exemption for it. This asserts that holds.
@@ -236,6 +244,88 @@ out=$(run_probe "$IMAGE" default '<?php $p = proc_open("id; whoami", [1=>["pipe"
   fail "removing the function_exists()/is_callable() block also weakened the real proc_open() command-injection filter: $out"
 echo "$out" | grep -qi "disabled_function" || fail "the negative proc_open probe failed for the wrong reason: $out"
 echo "ok: removing function_exists()/is_callable() blocking left the real proc_open() filter untouched"
+
+# Laravel's scheduler (project exemption 8): `schedule:run` hands proc_open() the shell
+# string CommandBuilder wrote, through Symfony Process, and its `2>&1` trips the
+# metacharacter filter. The exemption is scoped to Symfony Process's own Process.php
+# (vendor and monorepo paths) and to Laravel's two exact command shapes. The probe
+# lays down a fake Process.php (and, for the control, an unrelated file) that calls
+# proc_open() with the string in $SCHED_CMD, the way the real class does.
+sched_probe() {
+  # $1: ruleset  $2: calling file (relative to /tmp/probe)  $3: command string
+  docker run --rm -e "PHP_SNUFFLEUPAGUS=${1}" -e "SCHED_CMD=${3}" --entrypoint sh "$IMAGE" -c '
+    mkdir -p /tmp/probe/vendor/symfony/process /tmp/probe/src/Symfony/Component/Process /tmp/probe/app
+    for f in vendor/symfony/process/Process.php src/Symfony/Component/Process/Process.php app/Other.php; do
+      cat > "/tmp/probe/$f" <<\PHP
+<?php
+function run_event() {
+  $p = proc_open(getenv("SCHED_CMD"), [1 => ["pipe", "w"], 2 => ["pipe", "w"]], $pipes, "/tmp");
+  if (!is_resource($p)) { echo "PROC_FAILED"; return; }
+  stream_get_contents($pipes[1]);
+  proc_close($p);
+  echo "PROC_OK";
+}
+PHP
+    done
+    echo "<?php require \$argv[1]; run_event();" > /tmp/probe/main.php
+    docker-php-entrypoint php /tmp/probe/main.php "/tmp/probe/$0"
+  ' "$2" 2>&1
+}
+sched_expect_allowed() {
+  local out
+  out=$(sched_probe "$1" "$2" "$3") || fail "scheduler command was dropped under ${1}.rules from ${2}: ${3}: $out"
+  echo "$out" | grep -q "PROC_OK" || fail "scheduler command did not run under ${1}.rules from ${2}: ${3}: $out"
+}
+sched_expect_dropped() {
+  local out
+  out=$(sched_probe "$1" "$2" "$3") && fail "command was NOT dropped under ${1}.rules from ${2}: ${3}: $out"
+  echo "$out" | grep -qi "disabled_function" || fail "command was refused for the wrong reason under ${1}.rules from ${2}: ${3}: $out"
+}
+
+sched_php="'/usr/local/bin/php' 'artisan'"
+sched_mutex="framework/schedule-86dab0bcb3ad4012b61822aad41b041a9564d9e1"
+sched_fg="${sched_php} inspire > '/dev/null' 2>&1"
+sched_fg_append="${sched_php} inspire --no-ansi 'two words' >> '/app/storage/logs/out.log' 2>&1"
+sched_bg="(${sched_php} inspire > '/app/storage/logs/out.log' 2>&1 ; ${sched_php} schedule:finish \"${sched_mutex}\" \"\$?\") > '/dev/null' 2>&1 &"
+for rs in default laravel wordpress prestashop; do
+  sched_expect_allowed "$rs" vendor/symfony/process/Process.php "$sched_fg"
+  sched_expect_allowed "$rs" vendor/symfony/process/Process.php "$sched_fg_append"
+  sched_expect_allowed "$rs" vendor/symfony/process/Process.php "$sched_bg"
+  sched_expect_allowed "$rs" src/Symfony/Component/Process/Process.php "$sched_fg"
+done
+echo "ok: scheduler foreground, append and background commands run from Symfony Process in every ruleset"
+
+for rs in default laravel; do
+  sched_expect_dropped "$rs" app/Other.php "$sched_fg"
+  sched_expect_dropped "$rs" app/Other.php "$sched_bg"
+done
+echo "ok: the same scheduler strings are still dropped from any other file"
+
+# Inside Process.php the exemption is the exact shape, not the file: an injected
+# command in the arguments, a trailing command, another binary, the sudo wrapper and
+# a plain shell string all stay dropped.
+for rs in default laravel wordpress prestashop; do
+  for cmd in \
+    "${sched_php} inspire; id > '/dev/null' 2>&1" \
+    "${sched_php} inspire \$(id) > '/dev/null' 2>&1" \
+    "${sched_php} inspire \`id\` > '/dev/null' 2>&1" \
+    "${sched_php} inspire && id > '/dev/null' 2>&1" \
+    "${sched_php} inspire | sh > '/dev/null' 2>&1" \
+    "${sched_php} inspire 'x' ; id ; 'y' > '/dev/null' 2>&1" \
+    "${sched_php} inspire '\$(id)' > '/dev/null' 2>&1" \
+    "${sched_php} inspire > '/dev/null' 2>&1 ; id" \
+    "${sched_php} inspire > '/dev/null' 2>&1 &" \
+    "id ; ${sched_fg}" \
+    "'/usr/local/bin/php' 'evil.php' > '/dev/null' 2>&1" \
+    "sudo -u www -- sh -c '${sched_fg}'" \
+    "git status 2>&1" \
+    "(${sched_php} inspire; id > '/app/storage/logs/out.log' 2>&1 ; ${sched_php} schedule:finish \"${sched_mutex}\" \"\$?\") > '/dev/null' 2>&1 &" \
+    "(${sched_php} inspire > '/app/storage/logs/out.log' 2>&1 ; id ; ${sched_php} schedule:finish \"${sched_mutex}\" \"\$?\") > '/dev/null' 2>&1 &" \
+    "(${sched_php} inspire > '/app/storage/logs/out.log' 2>&1 ; ${sched_php} schedule:finish \"${sched_mutex}\" \"\$?\") > '/dev/null' 2>&1 & id"; do
+    sched_expect_dropped "$rs" vendor/symfony/process/Process.php "$cmd"
+  done
+done
+echo "ok: injected arguments, trailing commands, other binaries, sudo wrappers and plain shell strings stay dropped even from Process.php"
 
 # default.rules does not break an ordinary unserialize() round trip (Laravel's queue
 # worker does unserialize(serialize($job)) on every job).
@@ -339,6 +429,13 @@ SRV_LOG_FILE="/tmp/sp-srv-logs.$$"
 # Removed on exit: each srv() call overwrites the file, so the last one would leak.
 trap 'rm -f "$SRV_LOG_FILE"' EXIT
 
+# Callers that need a different form shape (array, nested or empty file fields) set
+# SRV_FORM to the curl arguments replacing the default `-F f=@$2` and SRV_QUERY to the
+# request's query string ("?mode=walk" selects up.php's recursive $_FILES walk), then
+# reset both. Unset, srv() behaves exactly as before.
+SRV_FORM=()
+SRV_QUERY=""
+
 srv() {
   # $1: PHP_SNUFFLEUPAGUS  $2: file to upload  $3: optional "allow_curl_failure" when
   # the upload request itself may legitimately get no HTTP response (PHP 7.4's dev
@@ -349,6 +446,8 @@ srv() {
   # when $3 was passed and curl got no response; writes the container's docker logs to
   # $SRV_LOG_FILE either way.
   local name port code out rc status body allow_curl_failure="${3:-}"
+  local -a form=(-F "f=@${2}")
+  if [ "${#SRV_FORM[@]}" -gt 0 ]; then form=("${SRV_FORM[@]}"); fi
   name="sp-upload-e2e-$$"
   port=$((18100 + RANDOM % 1000))
 
@@ -360,6 +459,21 @@ srv() {
   if ! docker run -d --name "$name" -e "PHP_SNUFFLEUPAGUS=${1}" -p "${port}:8099" \
     -w /tmp --entrypoint sh "$IMAGE" -c '
       printf '"'"'<?php
+function sp_leaves($v, &$out) {
+  if (is_array($v)) { foreach ($v as $x) { sp_leaves($x, $out); } } else { $out[] = $v; }
+}
+if (($_GET["mode"] ?? "") === "walk") {
+  $data = []; $empty = 0;
+  foreach ($_FILES as $field) {
+    $leaves = [];
+    sp_leaves($field["tmp_name"], $leaves);
+    foreach ($leaves as $tmp) {
+      if ($tmp === "") { $empty++; } elseif (is_uploaded_file($tmp)) { $data[] = file_get_contents($tmp); }
+    }
+  }
+  echo "ACCEPTED=" . count($data) . " EMPTY=" . $empty . " DATA=" . implode("|", $data);
+  exit;
+}
 if (!empty($_FILES["f"]["tmp_name"]) && is_uploaded_file($_FILES["f"]["tmp_name"])) {
   echo "UPLOAD_ACCEPTED";
 } else {
@@ -389,7 +503,7 @@ if (!empty($_FILES["f"]["tmp_name"]) && is_uploaded_file($_FILES["f"]["tmp_name"
   fi
 
   set +e
-  out=$(curl -s -w $'\n%{http_code}' -F "f=@${2}" "http://127.0.0.1:${port}/up.php")
+  out=$(curl -s -w $'\n%{http_code}' "${form[@]}" "http://127.0.0.1:${port}/up.php${SRV_QUERY}")
   rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then
@@ -470,6 +584,64 @@ case "$resp_status" in
     ;;
 esac
 echo "ok: sp-upload-check rejects <?= webshells, confirmed via snuffleupagus's own rejection log line (transport shape: status=$resp_status)"
+
+# Bracketed and empty file fields. $_FILES holds parallel arrays for `f[]`, `a[b]` and
+# `a[b][c]`, and tmp_name "" (UPLOAD_ERR_NO_FILE) for an empty file input. Snuffleupagus
+# v0.14.0 read both as scalars, handed the validation script a garbage path and rejected
+# every such request (deps/patches/ext-snuffleupagus-v0.14.0/020-upload-validation-array-fields).
+# up.php's walk mode counts the temp files PHP really received and echoes their contents,
+# so a leaf dropped or skipped by mistake shows up as a wrong count or payload.
+walk_assert() {
+  # $1: label  $2: "<status> <body>" from srv  $3: expected body
+  local status="${2%% *}" body="${2#* }"
+  [ "$status" = 200 ] && [ "$body" = "$3" ] \
+    || fail "$1: got status=$status body='$body', expected status=200 body='$3'. Logs were: $(cat "$SRV_LOG_FILE")"
+}
+
+multi_one="/tmp/sp-multi-one-$$.txt"; multi_two="/tmp/sp-multi-two-$$.txt"
+multi_shell="/tmp/sp-multi-shell-$$.txt"
+printf 'first' > "$multi_one"; printf 'second' > "$multi_two"
+printf '<?= system($_GET[0]); ?>' > "$multi_shell"
+SRV_QUERY="?mode=walk"
+
+SRV_FORM=(-F "f[]=@${multi_one}" -F "f[]=@${multi_two}")
+resp=$(srv default -)
+walk_assert "multi-file f[] upload of two benign files" "$resp" "ACCEPTED=2 EMPTY=0 DATA=first|second"
+echo "ok: sp-upload-check accepts a multi-file f[] upload of two benign files, both round-trip"
+
+SRV_FORM=(-F "a[b]=@${multi_one}" -F "n[x][y]=@${multi_two}")
+resp=$(srv prestashop -)
+walk_assert "nested a[b] and n[x][y] uploads under prestashop.rules" "$resp" "ACCEPTED=2 EMPTY=0 DATA=first|second"
+echo "ok: sp-upload-check accepts nested a[b] and n[x][y] uploads under prestashop.rules (upload validation stays on there)"
+
+SRV_FORM=(-F 'f=@/dev/null;filename=')
+resp=$(srv default -)
+walk_assert "form with only an empty file input" "$resp" "ACCEPTED=0 EMPTY=1 DATA="
+SRV_FORM=(-F 'f=@/dev/null;filename=' -F "g[]=@${multi_one}" -F 'g[]=@/dev/null;filename=')
+resp=$(srv default -)
+walk_assert "form with empty file inputs next to a benign g[] file" "$resp" "ACCEPTED=1 EMPTY=2 DATA=first"
+echo "ok: sp-upload-check skips empty file inputs (no temp file) and still validates the real upload beside them"
+
+# A webshell among benign files in an array field must still be rejected, with the same
+# log-line evidence as the plain-field rejection above. The benign file goes first, and
+# the rejection line must name the shell's filename and not the benign one's: that shows
+# the second array leaf was validated on its own.
+SRV_FORM=(-F "f[]=@${multi_one}" -F "f[]=@${multi_shell};filename=arr-shell.php")
+resp=$(srv prestashop - allow_curl_failure)
+SRV_FORM=(); SRV_QUERY=""
+rm -f "$multi_one" "$multi_two" "$multi_shell"
+resp_status="${resp%% *}"; resp_body="${resp#* }"
+grep -qE '\[snuffleupagus\]\[[^]]*\]\[upload_validation\]\[drop\] The upload of arr-shell\.php ' "$SRV_LOG_FILE" \
+  || fail "f[] upload with a <?= webshell as its second file got status=$resp_status body='$resp_body', but the logs show no snuffleupagus upload_validation rejection naming arr-shell.php. Logs were: $(cat "$SRV_LOG_FILE")"
+if grep -qE 'upload_validation\]\[drop\] The upload of sp-multi-one-' "$SRV_LOG_FILE"; then
+  fail "the benign first file of the f[] upload was reported as rejected. Logs were: $(cat "$SRV_LOG_FILE")"
+fi
+case "$resp_status" in
+  500) [ -z "$resp_body" ] || fail "f[] webshell rejection: HTTP 500 carried a non-empty body ('$resp_body')" ;;
+  000) ;;
+  *) fail "f[] webshell rejection: unexpected status=$resp_status (body='$resp_body') -- neither the documented 500 nor a closed connection" ;;
+esac
+echo "ok: sp-upload-check rejects a <?= webshell inside an f[] array upload, confirmed via snuffleupagus's own rejection log line naming it (transport shape: status=$resp_status)"
 
 stored_zip_dir="/tmp/sp-plugin-$$"
 mkdir -p "$stored_zip_dir/hello-dolly"

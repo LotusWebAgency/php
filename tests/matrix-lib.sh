@@ -9,7 +9,8 @@
 #   matrix_load            ALL_VERSIONS, ALL_FLAVORS, TARGETS_JSON, ALL_TARGET_COUNT
 #   matrix_validate_selection   exit 1 unless every ONLY/FLAVORS entry is in matrix.json
 #   matrix_select          ONLY_CSV, FLAVOR_CSV, FULL_RUN, SELECTED (name<TAB>flavor<TAB>php<TAB>tag)
-#   matrix_ext_versions    versions whose baseline ext-builder, fpm and cli are all SELECTED
+#   matrix_ext_versions    ext-builder end-to-end cases (8.5, 8.4-v3, ...) whose ext-builder, fpm and cli are all SELECTED
+#   matrix_ext_target      <case> <flavor> -> the target name of that case's flavor
 #   matrix_target_field    <target-name> <field> -> that field of the target, e.g. corpus
 #
 # Versions and flavors come from matrix.json, never a literal list here --
@@ -76,22 +77,34 @@ for t in data["include"]:
   [ "${#SELECTED[@]}" -gt 0 ] || { echo "FAIL: no target matched --only/--flavor"; exit 1; }
 }
 
-# matrix_ext_versions -> the versions (one per line) whose baseline
-# ext-builder, fpm and cli targets are all in SELECTED. tests/test-ext-builder.sh
-# copies an extension built in the first into the other two, so it needs all
-# three images of one version; a --flavor filter that drops one skips it.
+# matrix_ext_versions -> the cases (one per line) whose ext-builder, fpm and cli
+# targets are all in SELECTED: "8.5" for the baseline images of a version,
+# "8.4-v3" for its -v3 images. tests/test-ext-builder.sh takes a case as its
+# argument, copies an extension built in the first image into the other two, so
+# it needs all three images of one version and microarchitecture; a --flavor
+# filter that drops one skips the case.
 matrix_ext_versions() {
-  local row name flavor php tag
+  local row name flavor php tag suffix
   declare -A have=()
   for row in "${SELECTED[@]}"; do
     IFS=$'\t' read -r name flavor php tag <<<"$row"
-    case "$name" in *-v3) continue ;; esac
-    have["$php/$flavor"]=1
+    suffix=""
+    case "$name" in *-v3) suffix="-v3" ;; esac
+    have["$php$suffix/$flavor"]=1
   done
   for php in "${ALL_VERSIONS[@]}"; do
-    [ -n "${have["$php/ext-builder"]:-}" ] && [ -n "${have["$php/fpm"]:-}" ] && [ -n "${have["$php/cli"]:-}" ] && echo "$php"
+    for suffix in "" "-v3"; do
+      [ -n "${have["$php$suffix/ext-builder"]:-}" ] && [ -n "${have["$php$suffix/fpm"]:-}" ] && [ -n "${have["$php$suffix/cli"]:-}" ] && echo "$php$suffix"
+    done
   done
   return 0
+}
+
+# matrix_ext_target <case> <flavor> -> the target name, e.g. 8.4-v3 cli -> php-8_4-cli-v3
+matrix_ext_target() {
+  local php="${1%-v3}" suffix=""
+  [ "$1" = "$php" ] || suffix="-v3"
+  echo "php-${php//./_}-$2$suffix"
 }
 
 matrix_target_field() {
