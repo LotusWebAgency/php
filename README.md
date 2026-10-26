@@ -673,6 +673,8 @@ Trivy ignores `affected` VEX statements and ours are all `affected`, so scanners
 findings. The CI gate reads a `.trivyignore` generated from the same file; each line expires on its
 statement's review date. Reporting and scope: [SECURITY.md](SECURITY.md).
 
+Two further gates fail the build on any finding in CISA's Known Exploited Vulnerabilities catalog, fixed or not, and on any AGPL-licensed package.
+
 ## Building and testing locally
 
 `matrix.json` is the source of truth for versions. `scripts/gen_matrix.py` renders `matrix.gen.hcl`

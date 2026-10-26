@@ -84,6 +84,7 @@
 # retry transient HTTP and apk failures, never deterministic build errors.
 # Trivy's vulnerability DB is refreshed once per run in parallel with preflight,
 # then shared as an artifact so matrix scans use the same DB without updating it.
+# The CISA KEV catalog is fetched in the same job and shared the same way.
 name: ci
 
 on:
@@ -269,6 +270,24 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+      # CISA's Known Exploited Vulnerabilities catalog, one snapshot per run for
+      # the KEV gate in every matrix leg (ci/kev.py validates its shape).
+      - name: Download the CISA KEV catalog
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.cache/kev"
+          RETRY_KIND=http ./ci/retry.sh curl --fail --silent --show-error --location \
+            --output "$GITHUB_WORKSPACE/.cache/kev/known_exploited_vulnerabilities.json" \
+            https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+
+      - name: Upload this run's KEV catalog
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: kev-catalog
+          path: ${{ github.workspace }}/.cache/kev
+          retention-days: 1
+          if-no-files-found: error
+
   # ----------------------------------------------------------------- sources
   # Every sha-pinned source tarball the build fetches (php-src, PECL, vendored
   # libraries, the PGO corpus apps; ci/sources.sh list), downloaded once per lock
@@ -425,6 +444,12 @@ jobs:
         with:
           name: trivy-db
           path: ${{ github.workspace }}/.cache/trivy
+
+      - name: Download this run's KEV catalog
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: kev-catalog
+          path: ${{ github.workspace }}/.cache/kev
 
       # The BuildKit image is pulled by this daemon: mirror.gcr.io first, Docker
       # Hub when the mirror misses a blob.
@@ -591,10 +616,94 @@ jobs:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
 
-      # Only reached when the smoke tests and both Trivy gates above passed, so
-      # a pushed image is a tested one. Per-arch tag <tag>-<sha>-<arch>; the
-      # fpm sibling built for test-ext-builder.sh is not pushed (the fpm leg
-      # pushes its own), the ext-builder that rides on a cli leg is.
+      # Docker Scout's "no high-profile vulnerabilities" policy: no finding, of any
+      # severity and fixed or not, may be in CISA's KEV catalog. Trivy applies
+      # .trivyignore before it writes the JSON report, so an accepted risk in
+      # vex/php.openvex.json stays accepted here.
+      - name: Trivy KEV report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.TARGET_TAG }}
+          format: json
+          output: ${{ runner.temp }}/kev-target.json
+          exit-code: "0"
+          scanners: vuln
+          skip-setup-trivy: true
+          cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
+        env:
+          TRIVY_IMAGE_SRC: docker
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
+
+      - name: KEV gate
+        run: python3 ci/kev.py "$RUNNER_TEMP/kev-target.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
+
+      - name: Trivy KEV report (ext-builder)
+        if: matrix.target.rider_name != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.RIDER_TAG }}
+          format: json
+          output: ${{ runner.temp }}/kev-rider.json
+          exit-code: "0"
+          scanners: vuln
+          skip-setup-trivy: true
+          cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
+        env:
+          TRIVY_IMAGE_SRC: docker
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
+
+      - name: KEV gate (ext-builder)
+        if: matrix.target.rider_name != ''
+        run: python3 ci/kev.py "$RUNNER_TEMP/kev-rider.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
+
+      # Docker Scout's "no AGPL v3 licenses" policy. ci/trivy-license.yaml narrows
+      # Trivy's forbidden category to the AGPL ids; every other category keeps its
+      # default severity (GPL and LGPL stay restricted/HIGH, unlisted ids become
+      # UNKNOWN), so gating on CRITICAL fails on AGPL only.
+      - name: Trivy license gate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.TARGET_TAG }}
+          format: table
+          exit-code: "1"
+          scanners: license
+          severity: CRITICAL
+          skip-setup-trivy: true
+          cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
+        env:
+          TRIVY_CONFIG: ci/trivy-license.yaml
+          TRIVY_IMAGE_SRC: docker
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
+
+      - name: Trivy license gate (ext-builder)
+        if: matrix.target.rider_name != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.RIDER_TAG }}
+          format: table
+          exit-code: "1"
+          scanners: license
+          severity: CRITICAL
+          skip-setup-trivy: true
+          cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
+        env:
+          TRIVY_CONFIG: ci/trivy-license.yaml
+          TRIVY_IMAGE_SRC: docker
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
+
+      # Only reached when the smoke tests and the Trivy, KEV and license gates
+      # above passed, so a pushed image is a tested one. Per-arch tag
+      # <tag>-<sha>-<arch>; the fpm sibling built for test-ext-builder.sh is not
+      # pushed (the fpm leg pushes its own), the ext-builder that rides on a cli
+      # leg is.
       - name: Push the tested image to GHCR (develop)
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/develop'
         run: |
@@ -982,6 +1091,12 @@ jobs:
           name: trivy-db
           path: ${{ github.workspace }}/.cache/trivy
 
+      - name: Download this run's KEV catalog
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: kev-catalog
+          path: ${{ github.workspace }}/.cache/kev
+
       # matrix.json's "image" field is the one source of truth for the Docker Hub
       # repository. Nothing is pushed there from this job: it is the repository
       # the recorded test results name, while the image itself lives in
@@ -1169,6 +1284,79 @@ jobs:
           cache: false
           cache-dir: ${{ github.workspace }}/.cache/trivy
         env:
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
+
+      # The same KEV and AGPL gates as verify, on the exact digests that were
+      # pushed. ci/trivy-license.yaml narrows Trivy's forbidden licenses to AGPL.
+      - name: Trivy KEV report (pushed digest)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.STAGE_IMAGE }}@${{ env.DIGEST }}
+          format: json
+          output: ${{ runner.temp }}/kev-target.json
+          exit-code: "0"
+          scanners: vuln
+          skip-setup-trivy: true
+          cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
+
+      - name: KEV gate (pushed digest)
+        run: python3 ci/kev.py "$RUNNER_TEMP/kev-target.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
+
+      - name: Trivy KEV report (pushed ext-builder digest)
+        if: matrix.target.rider_name != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.STAGE_IMAGE }}@${{ env.RIDER_DIGEST }}
+          format: json
+          output: ${{ runner.temp }}/kev-rider.json
+          exit-code: "0"
+          scanners: vuln
+          skip-setup-trivy: true
+          cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
+        env:
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
+
+      - name: KEV gate (pushed ext-builder digest)
+        if: matrix.target.rider_name != ''
+        run: python3 ci/kev.py "$RUNNER_TEMP/kev-rider.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
+
+      - name: Trivy license gate (pushed digest)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.STAGE_IMAGE }}@${{ env.DIGEST }}
+          format: table
+          exit-code: "1"
+          scanners: license
+          severity: CRITICAL
+          skip-setup-trivy: true
+          cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
+        env:
+          TRIVY_CONFIG: ci/trivy-license.yaml
+          TRIVY_SKIP_DB_UPDATE: "true"
+          TRIVY_SKIP_VERSION_CHECK: "true"
+
+      - name: Trivy license gate (pushed ext-builder digest)
+        if: matrix.target.rider_name != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.STAGE_IMAGE }}@${{ env.RIDER_DIGEST }}
+          format: table
+          exit-code: "1"
+          scanners: license
+          severity: CRITICAL
+          skip-setup-trivy: true
+          cache: false
+          cache-dir: ${{ github.workspace }}/.cache/trivy
+        env:
+          TRIVY_CONFIG: ci/trivy-license.yaml
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
 
