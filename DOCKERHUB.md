@@ -40,8 +40,8 @@ dates are upstream's ([php.net](https://www.php.net/supported-versions.php)) and
 | `8.4` | gcc | yes | active | 2028-12-31 |
 | `8.5` | clang | yes | active | 2029-12-31 |
 
-End-of-life tags are still published and rebuilt weekly for base-image and package updates. The PHP
-interpreter in them gets no upstream fixes. Policy:
+End-of-life tags are still published and rebuilt weekly for base-image and package updates, but their PHP
+interpreter gets no upstream fixes. Policy:
 [SUPPORT.md](https://github.com/LotusWebAgency/php/blob/main/SUPPORT.md).
 
 ### Older PHP versions
@@ -53,8 +53,7 @@ interpreter in them gets no upstream fixes. Policy:
   `mysql_native_password`. 7.0 and 7.1 speak TLS 1.0 only, which MySQL 8.4 and MariaDB 11 refuse.
 - No JIT below 8.0 (8.0: amd64 only). `-v3` tags are 8.4 and 8.5 only.
 
-Every caveat, with workarounds:
-[Older PHP versions](https://github.com/LotusWebAgency/php/blob/main/README.md#older-php-versions).
+Every caveat and workaround: [Older PHP versions](https://github.com/LotusWebAgency/php/blob/main/README.md#older-php-versions).
 
 | Tag shape | Example | Meaning |
 |---|---|---|
@@ -69,10 +68,9 @@ gets SIGILL: `armv9-a` code needs Neoverse N2/V2-class cores (Graviton4, Axion, 
 not Graviton2/3, Ampere Altra or Apple silicon. Use the baseline tag on a Mac.
 
 The amd64 baseline is `x86-64-v2` (SSE4.2 and POPCNT; Intel Nehalem and newer, AMD Bulldozer and
-newer), not plain `x86-64`, because Wolfi's packages are built for it. Both baselines use generic
-tuning. amd64 `-v3` also tunes generic; arm64 `-v3` tunes for `neoverse-v2`. Only the amd64 `-v3`
-tags check the CPU at startup. The vendored ImageMagick, heif stack (libheif, libde265, dav1d) are
-built for the baseline in every image, `-v3` included.
+newer), not plain `x86-64`, because Wolfi's packages are built for it. Both baselines and amd64
+`-v3` tune generic; arm64 `-v3` tunes for `neoverse-v2`. The vendored ImageMagick and heif stack (libheif, libde265, dav1d) are
+baseline builds in every image, `-v3` included.
 
 `8.4-fpm` moves with each 8.4 patch release. Pin the digest for reproducible builds.
 
@@ -129,7 +127,7 @@ COPY --from=build /app /app
 
 ## Image contract
 
-The facts a deployment script, CI job or coding agent needs, in one place. Everything here holds for
+The facts a deployment script, CI job or coding agent needs. Everything here holds for
 every tag unless the row says otherwise.
 
 | Item | Value |
@@ -164,7 +162,7 @@ variable that is set but empty, or contains a newline, stops the container with 
 | `PHP_TIMEZONE` | unset | `date.timezone` |
 | `PHP_ERROR_REPORTING` | `E_ALL & ~E_DEPRECATED` | `error_reporting` |
 | `PHP_DISPLAY_ERRORS` | `Off` | `display_errors`. Errors go to stderr regardless. |
-| `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec`. cli, ext-builder: unset; the same list is baked into `10-php.ini`. cli-builder: none | Adds to the baked list, never replaces it. `proc_open` stays enabled for Composer and `symfony/process`. |
+| `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec`. cli, ext-builder: unset; the same list is baked into `10-php.ini`. cli-builder: none | Adds to the baked and mounted-ini lists, never replaces them. `proc_open` stays enabled for Composer. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
 | `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, 64-512 MB | `opcache.memory_consumption` |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS`, `PHP_OPCACHE_REVALIDATE_FREQ` | `1`, `2` | Set validation to `0` when deploys replace the whole tree. |
@@ -200,23 +198,23 @@ services:
 ```
 
 `/tmp` holds sessions, upload temp files and the env-driven ini (written to a private mode-0700
-directory when `conf.d` is not writable). Size it for your largest upload times concurrent uploads,
-plus sessions. It counts against the container memory limit. `cli-builder` needs
+directory when `conf.d` is not writable). Size it for the largest upload times concurrent uploads,
+plus sessions; it counts against the memory limit. `cli-builder` needs
 `/tmp:exec,size=256m` because `npx` runs packages from `/tmp`.
 
-Without a writable `/tmp`, `PHP_EXT_ENABLE` and `PHP_SNUFFLEUPAGUS` refuse to start the container,
+Without a writable `/tmp`, `PHP_EXT_ENABLE` and `PHP_SNUFFLEUPAGUS` refuse to start,
 and the other `PHP_*` ini variables are ignored with a warning naming each one. Your application's
 own writes (PrestaShop `var/cache`, Laravel `storage`, WordPress uploads) need their own volume. A
-FastCGI unix socket needs a writable directory. `docker exec <container> php ...` does not see the
-env-driven ini; use `docker exec <container> docker-php-entrypoint php ...`. Details:
+FastCGI unix socket needs a writable directory. Use `docker exec <container> docker-php-entrypoint php ...` to
+see the env-driven ini; plain `php ...` does not. Details:
 [README](https://github.com/LotusWebAgency/php#read-only-root-filesystem).
 
 ## Hardened deployment
 
 The image is already non-root, with setuid bits stripped, ELF-hardened binaries and a baked
 `disable_functions` list. A production `fpm` container adds the controls below. Together they leave
-the worker processes with an empty capability set and `NoNewPrivs`, while the container still starts
-healthy and serves requests.
+workers with an empty capability set and `NoNewPrivs`; the container still starts healthy and
+serves requests.
 
 ```yaml
 services:
@@ -263,9 +261,9 @@ USER www-data
 ```
 
 A named volume mounted at `/app/storage` starts with the image's contents and owner. A bind mount of
-the code (`./:/app:ro`) works too, with `:ro`.
+the code (`./:/app:ro`) works too.
 
-What each setting needs to know:
+What each setting needs:
 
 - **`read_only` and `/tmp`.** `/tmp` is the only path the image writes. `noexec` is fine for `fpm`
   and `cli`; `cli-builder` needs `exec` for `npx`. Without a writable `/tmp`, `PHP_SNUFFLEUPAGUS` and
@@ -280,11 +278,13 @@ What each setting needs to know:
   steps in `cli-builder` without one. Snuffleupagus hooks the executor, so PHP turns the JIT off
   while it is loaded and logs a startup warning. `PHP_OPCACHE_JIT=disable` says so up front and
   removes the warning; `off` does not, because it keeps the JIT buffer.
-- **`PHP_DISABLE_FUNCTIONS`.** Adds names to the baked list, for example `proc_open` when the
-  application never starts processes. Laravel queues, Symfony Process and Composer need `proc_open`.
-  The entrypoint refuses to start if a listed name does not end up disabled.
+- **`PHP_DISABLE_FUNCTIONS`.** Adds names to the baked list and a mounted ini's (as in PHP, only the
+  last mounted `disable_functions` counts), for example `proc_open` when the application never
+  starts processes (Laravel queues, Symfony Process and Composer need it). It refuses to
+  start if a name does not end up disabled: a later-sorting ini replaces the list, or a bare
+  `--read-only` has no writable `/tmp`. `php -n`, `-c` or `-d disable_functions=` bypasses the check.
 - **Limits.** `pids_limit` bounds runaway forks; the memory limit bounds the container and drives FPM
-  and opcache autotuning (512 MB is assumed without one).
+  and opcache autotuning (512 MB without one).
 - **Network.** `fpm` speaks FastCGI on 9000 and should only be reachable by the web server. Never
   publish 9000 to the host.
 - **Errors.** `PHP_DISPLAY_ERRORS` stays `Off` (the default); errors go to stderr.
