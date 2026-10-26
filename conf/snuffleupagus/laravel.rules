@@ -56,6 +56,25 @@
 #    varname branches are gated < 80000 and the "destination" branch is dropped;
 #    the drops still cover every version under the real argument name. Applied
 #    inline in the "File upload" and "Logging lockdown" sections.
+#
+# 5. putenv() LD_ and GCONV_ drops anchored to the variable name. Upstream's
+#    `value_r("LD_")` and `value_r("GCONV_")` are unanchored, so a putenv()
+#    assignment fatals when those letters appear anywhere in it: `BUILD_ID=1`,
+#    `WORLD_SIZE=2`, `APP_FIELD_X=y` and `MY_GCONV_X=1` all dropped (a real
+#    application hit this on `BUILD_ID`), as did `DYLD_LIBRARY_PATH`, which
+#    Composer's Platform::clearEnv() and Symfony's defensive env clearing call
+#    and which needed an exact-value exemption for that reason alone. putenv()'s
+#    argument starts with the variable name, so `^LD_` and `^GCONV_` cover every
+#    real vector (LD_PRELOAD, LD_LIBRARY_PATH, LD_AUDIT, GCONV_PATH): the dynamic
+#    loader and iconv read only variables whose names begin with those prefixes
+#    (case-sensitive), so a name merely containing the letters was never one.
+#    Both @condition branches are anchored (< 80000 `setting`, >= 80000
+#    `assignment`). The DYLD_LIBRARY_PATH exemption is gone with the unanchored
+#    match it worked around. Applied inline in the putenv section.
+#
+#    Verified on 8.5 in all four rulesets: BUILD_ID=1, WORLD_SIZE=2,
+#    APP_FIELD_X=y, MY_GCONV_X=1 and DYLD_LIBRARY_PATH now succeed; LD_PRELOAD=,
+#    LD_LIBRARY_PATH=, LD_AUDIT= and GCONV_PATH= still fatal.
 # =========== END DIVERGENCES FROM UPSTREAM v0.14.0 =======================
 #
 # ========= BEGIN project exemptions ==========================================
@@ -79,22 +98,7 @@
 # using only the 8.x name never matches on 7.x while the vendored drop rules, which
 # upstream did split, still fire there.
 #
-# 1. putenv('DYLD_LIBRARY_PATH'): Composer's Platform::clearEnv() calls it during
-#    git version-guessing (composer/src/Composer/Util/Git.php, "clean up env for
-#    OSX"), and Symfony components do the same defensive clear. Upstream blocks any
-#    putenv assignment containing the substring "LD_" to stop LD_PRELOAD and
-#    LD_LIBRARY_PATH injection; "DYLD_LIBRARY_PATH" matches but is macOS-only and
-#    inert on this Linux image, so blocking it protects nothing. Exempted by exact
-#    value, not pattern: LD_PRELOAD, LD_LIBRARY_PATH and every other real LD_
-#    vector still match the substring rule (verified both directions, and that the
-#    test has teeth: a catch-all exemption wrongly allowed LD_PRELOAD).
-@condition PHP_VERSION_ID < 80000;
-sp.disable_function.function("putenv").param("setting").value("DYLD_LIBRARY_PATH").allow();
-@condition PHP_VERSION_ID >= 80000;
-sp.disable_function.function("putenv").param("assignment").value("DYLD_LIBRARY_PATH").allow();
-@end_condition;
-
-# 2. ini_set('display_errors' | 'memory_limit', ...), both read from framework
+# 1. ini_set('display_errors' | 'memory_limit', ...), both read from framework
 #    source: Laravel's HandleExceptions.php calls ini_set('display_errors', 'Off')
 #    on every non-testing request; WordPress's wp_debug_mode()
 #    (wp-includes/load.php, every bootstrap) and wp_raise_memory_limit() (every
@@ -107,10 +111,10 @@ sp.disable_function.function("putenv").param("assignment").value("DYLD_LIBRARY_P
 #    assert.active/zend.assertions/memory_limit/include_path/open_basedir plus
 #    error_log/error_reporting/display_errors, so nothing blocks it.
 #
-#    These are full-key exemptions (any value), not value-scoped like the putenv
-#    one, because the rule grammar allows at most one param/pos selector and one
-#    value/value_r matcher per rule ("duplicate keyword 'param'", "duplicate
-#    keyword 'value_r'", "'.value' and '.value_r' are mutually exclusive"). Upstream
+#    These are full-key exemptions (any value), not value-scoped, because the
+#    rule grammar allows at most one param/pos selector and one value/value_r
+#    matcher per rule ("duplicate keyword 'param'", "duplicate keyword
+#    'value_r'", "'.value' and '.value_r' are mutually exclusive"). Upstream
 #    says the same of open_basedir: "Since we have no way of matching on two
 #    parameters at the same time, we're blocking calls to open_basedir altogether".
 #    A rule scoped to the option name necessarily allows every value for it.
@@ -144,7 +148,7 @@ sp.disable_function.function("ini_set").param("option").value("memory_limit").al
 # at runtime (ini_set("disable_functions", "") returns false). That protection
 # comes from PHP's ini scoping, not from this ruleset.
 
-# 3. function_exists() / is_callable() are removed from the recon block outright,
+# 2. function_exists() / is_callable() are removed from the recon block outright,
 #    not narrowed: introspection is not invocation. Upstream treats a
 #    function_exists()/is_callable() check on eval, exec, system, shell_exec,
 #    proc_open or passthru as suspicious, but that is what defensive code does
@@ -164,17 +168,17 @@ sp.disable_function.function("is_callable").allow();
 # above for framework compatibility generally; setting COLUMNS/LINES skips the
 # Terminal probe anyway), and finally proc_open() itself, where piped commands
 # match the command-injection filter this ruleset exists to provide
-# (`proc_open("echo hi")` is allowed, `proc_open("ls | grep x")` is not; item 8
+# (`proc_open("echo hi")` is allowed, `proc_open("ls | grep x")` is not; item 7
 # exempts only Symfony Console's terminal-width probe). That is the headline
-# protection working, not a false positive like the putenv case, and Composer's
-# git, VCS and plugin-script work would likely surface more.
+# protection working, not a false positive like the ones exempted above, and
+# Composer's git, VCS and plugin-script work would likely surface more.
 # So this is a documented property, not a bug: rulesets serve runtime request
 # handling, Composer is build-time tooling, and the intended pattern is to build
 # with `cli-builder` and no ruleset and serve with `fpm`/`cli` and one.
 # `PHP_SNUFFLEUPAGUS` and Composer are not meant to run together; do not "fix"
 # this by exempting proc_open's metacharacter class.
 
-# 4. curl_setopt($h, CURLOPT_SSL_VERIFYPEER, true). Without this exemption
+# 3. curl_setopt($h, CURLOPT_SSL_VERIFYPEER, true). Without this exemption
 #    wordpress.rules dropped the call, which breaks every outbound HTTP request of
 #    WordPress core (WP_Http_Curl::request(), used by the update checks on
 #    ordinary wp-admin loads). Upstream's allow rules below
@@ -188,7 +192,7 @@ sp.disable_function.function("is_callable").allow();
 #    false) still fatals, the one direction that must stay blocked.
 sp.disable_function.function("curl_setopt").param("value").value_r("^(1|true)$").allow();
 
-# 5. ini_get() is removed from the recon block outright, as in 3: reading a
+# 4. ini_get() is removed from the recon block outright, as in 2: reading a
 #    setting is not changing it. Upstream drops ini_get() of allow_url_fopen,
 #    open_basedir and suhosin.*, each an ordinary capability check in the
 #    applications served: PrestaShop 8's AdminController reads allow_url_fopen on
@@ -200,7 +204,7 @@ sp.disable_function.function("curl_setopt").param("value").value_r("^(1|true)$")
 #    be changed at runtime.
 sp.disable_function.function("ini_get").allow();
 
-# 6. include of a non-.php path from framework files that do it by design. Scoped
+# 5. include of a non-.php path from framework files that do it by design. Scoped
 #    by the calling file (.filename_r()), not the include target, so an include
 #    anywhere else still has to pass the extension allow-list below. Shared by all
 #    four rulesets; a path not in the app being served never matches.
@@ -219,7 +223,7 @@ sp.disable_function.function("include").filename_r("/Symfony/Component/Cache/Tra
 sp.disable_function.function("include").filename_r("/symfony/cache/Adapter/PhpFilesAdapter\\.php$").allow();
 sp.disable_function.function("include").filename_r("/laravel/serializable-closure/src/Serializers/Native\\.php$").allow();
 
-# 7. curl_setopt(CURLOPT_SSL_VERIFYHOST | CURLOPT_SSL_VERIFYPEER, 0) from
+# 6. curl_setopt(CURLOPT_SSL_VERIFYHOST | CURLOPT_SSL_VERIFYPEER, 0) from
 #    WordPress core's HTTP transport. WordPress turns verification off only when
 #    the caller passed sslverify=false, and core does so for its loopback requests
 #    to itself: the site health checks (a 500 on /wp-admin/site-health.php and its
@@ -231,7 +235,7 @@ sp.disable_function.function("include").filename_r("/laravel/serializable-closur
 sp.disable_function.function("curl_setopt").filename_r("/wp-includes/Requests/src/Transport/Curl\\.php$").param("option").value("81").allow();
 sp.disable_function.function("curl_setopt").filename_r("/wp-includes/Requests/src/Transport/Curl\\.php$").param("option").value("64").allow();
 
-# 8. proc_open('stty -a | grep columns') from Symfony Console's Terminal class:
+# 7. proc_open('stty -a | grep columns') from Symfony Console's Terminal class:
 #    that one command, byte for byte, from that one file. Symfony up to 5.x
 #    measures the terminal this way whenever COLUMNS is unset, and a web request
 #    gets there too: Laravel's Artisan::call(), PrestaShop 8's back-office "clear
@@ -307,19 +311,21 @@ sp.cookie.name("PHPSESSID").samesite("lax");
 @end_condition;
 
 # Since it's now burned, me might as well mitigate it publicly
+# Local correction (DIVERGENCES item 5): the LD_ and GCONV_ matches below are
+# anchored to the start of the assignment (the variable name), upstream's are not.
 @condition PHP_VERSION_ID < 80000;
-    sp.disable_function.function("putenv").param("setting").value_r("LD_").drop();
+    sp.disable_function.function("putenv").param("setting").value_r("^LD_").drop();
     sp.disable_function.function("putenv").param("setting").value("PATH").drop();
 @condition PHP_VERSION_ID >= 80000;
-    sp.disable_function.function("putenv").param("assignment").value_r("LD_").drop();
+    sp.disable_function.function("putenv").param("assignment").value_r("^LD_").drop();
     sp.disable_function.function("putenv").param("assignment").value("PATH").drop();
 @end_condition;
 
 # This one was burned in Nov 2019 - https://gist.github.com/LoadLow/90b60bd5535d6c3927bb24d5f9955b80
 @condition PHP_VERSION_ID < 80000;
-    sp.disable_function.function("putenv").param("setting").value_r("GCONV_").drop()
+    sp.disable_function.function("putenv").param("setting").value_r("^GCONV_").drop()
 @condition PHP_VERSION_ID >= 80000;
-    sp.disable_function.function("putenv").param("assignment").value_r("GCONV_").drop()
+    sp.disable_function.function("putenv").param("assignment").value_r("^GCONV_").drop()
 @end_condition;
 
 # https://github.com/php/php-src/issues/22035
