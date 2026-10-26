@@ -62,8 +62,8 @@
 #    assignment fatals when those letters appear anywhere in it: `BUILD_ID=1`,
 #    `WORLD_SIZE=2`, `APP_FIELD_X=y` and `MY_GCONV_X=1` all dropped, as did
 #    `DYLD_LIBRARY_PATH`, which Composer's Platform::clearEnv() and Symfony's
-#    defensive env clearing call and which needed an exact-value exemption for that reason alone. putenv()'s
-#    argument starts with the variable name, so `^LD_` and `^GCONV_` cover every
+#    defensive env clearing call and which needed an exact-value exemption
+#    for that reason alone. putenv()'s argument starts with the variable name, so `^LD_` and `^GCONV_` cover every
 #    real vector (LD_PRELOAD, LD_LIBRARY_PATH, LD_AUDIT, GCONV_PATH): the dynamic
 #    loader and iconv read only variables whose names begin with those prefixes
 #    (case-sensitive), so a name merely containing the letters was never one.
