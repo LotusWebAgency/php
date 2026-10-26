@@ -12,7 +12,17 @@ Not fixed upstream as of v0.14.0. Remove it once a release handles array-valued 
 
 --- a/src/sp_upload_validation.c
 +++ b/src/sp_upload_validation.c
-@@ -22,6 +22,94 @@
+@@ -8,6 +8,9 @@
+     efree(env[i]);                 \
+   }
+ 
++/* Userland UPLOAD_ERR_OK; the C-side constant is spelled differently across PHP versions. */
++#define SP_UPLOAD_ERR_OK 0
++
+ #ifdef PHP_WIN32
+ 
+ int sp_rfc1867_callback_win(unsigned int event, void *event_data,
+@@ -22,6 +25,94 @@
  
  #else
  
@@ -93,7 +103,7 @@ Not fixed upstream as of v0.14.0. Remove it once a release handles array-valued 
 +  if (Z_TYPE_P(tmp_name) != IS_STRING || Z_STRLEN_P(tmp_name) == 0) {
 +    return;
 +  }
-+  if (error == NULL || Z_TYPE_P(error) != IS_LONG || Z_LVAL_P(error) != UPLOAD_ERR_OK) {
++  if (error == NULL || Z_TYPE_P(error) != IS_LONG || Z_LVAL_P(error) != SP_UPLOAD_ERR_OK) {
 +    return;
 +  }
 +
@@ -107,7 +117,7 @@ Not fixed upstream as of v0.14.0. Remove it once a release handles array-valued 
  static int sp_rfc1867_callback(unsigned int event, void *event_data, void **extra) {
    int retval = SUCCESS;
  
-@@ -30,58 +118,18 @@
+@@ -30,58 +121,18 @@
    }
  
    if (event == MULTIPART_EVENT_END) {
