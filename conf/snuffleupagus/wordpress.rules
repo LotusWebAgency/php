@@ -182,9 +182,9 @@ sp.disable_function.function("is_callable").allow();
 # above for framework compatibility generally; setting COLUMNS/LINES skips the
 # Terminal probe anyway), and finally proc_open() itself, where piped commands
 # match the command-injection filter this ruleset exists to provide
-# (`proc_open("echo hi")` is allowed, `proc_open("ls | grep x")` is not; item 7
-# exempts only Symfony Console's terminal-width probe). That is the headline
-# protection working, not a false positive like the ones exempted above, and
+# (`proc_open("echo hi")` is allowed, `proc_open("ls | grep x")` is not; items 7
+# and 8 exempt only Symfony Console's terminal-width probe and Laravel's scheduler
+# command shapes). That is the headline protection working, not a false positive like the ones exempted above, and
 # Composer's git, VCS and plugin-script work would likely surface more.
 # So this is a documented property, not a bug: rulesets serve runtime request
 # handling, Composer is build-time tooling, and the intended pattern is to build
@@ -261,6 +261,31 @@ sp.disable_function.function("curl_setopt").filename_r("/wp-includes/Requests/sr
 #    code. Symfony 6+ passes an argv array (['stty', '-a']), which the string
 #    filter never matched.
 sp.disable_function.function("proc_open").filename_r("/(symfony/console|Symfony/Component/Console)/Terminal\\.php$").param("command").value("stty -a | grep columns").allow();
+
+# 8. Laravel's scheduler: `php artisan schedule:run` starts every due event through
+#    Symfony Process (Process::fromShellCommandline), which hands proc_open() the
+#    shell string Laravel's CommandBuilder wrote. proc_open() receives that string
+#    untouched on Linux (Symfony prefixes `exec ` only to argv arrays), and the
+#    argument is named `command` on every PHP version this image builds. Every
+#    scheduled event therefore fataled on the `&` of `2>&1`. The two shapes
+#    CommandBuilder produces on Linux, by source and observed on Laravel 13:
+#      foreground  '/usr/local/bin/php' 'artisan' inspire > '/dev/null' 2>&1
+#                  (` >> ` for appendOutputTo(); `sendOutputTo()` changes the path)
+#      background  ('/usr/local/bin/php' 'artisan' inspire > '/dev/null' 2>&1 ; '/usr/local/bin/php' 'artisan' schedule:finish "framework/schedule-<sha1>" "$?") > '/dev/null' 2>&1 &
+#    Scoped to Symfony Process's own Process.php and to those two anchored shapes:
+#    a quoted PHP binary, the literal 'artisan', a command name with arguments, one
+#    redirect to a quoted file, then `2>&1` (and, for runInBackground(), the literal
+#    schedule:finish tail). The arguments are single-space-separated tokens built
+#    from [A-Za-z0-9_:.=/,@%+-] and '...' quoted runs, and a quoted run may not hold
+#    any character of the filter's class ($ | ; & ` newline ( ) backslash), so an
+#    argument cannot add a command, a substitution or a second redirect; the filter's
+#    class itself is not widened. Everything else keeps being dropped: a scheduled
+#    ->exec() or ->command() string with shell syntax, `->user()` (sudo -u ... sh -c),
+#    Laravel Cloud's `| tee` form, a custom ->mutexNameResolver() name in the
+#    background form, and any other Process::fromShellCommandline() caller (Composer,
+#    spatie/image-optimizer), as are the same strings from any other file.
+sp.disable_function.function("proc_open").filename_r("/(symfony/process|Symfony/Component/Process)/Process\\.php$").param("command").value_r("^'[^']+' 'artisan'(?: (?:[A-Za-z0-9_:.=/,@%+-]|'[^'$|;&`\\n()\\\\]*')+)+ (?:>|>>) '[^']+' 2>&1\\z").allow();
+sp.disable_function.function("proc_open").filename_r("/(symfony/process|Symfony/Component/Process)/Process\\.php$").param("command").value_r("^\\('[^']+' 'artisan'(?: (?:[A-Za-z0-9_:.=/,@%+-]|'[^'$|;&`\\n()\\\\]*')+)+ (?:>|>>) '[^']+' 2>&1 ; '[^']+' 'artisan' schedule:finish \"framework/schedule-[0-9a-f]{40}\" \"\\$\\?\"\\) > '/dev/null' 2>&1 &\\z").allow();
 # ========== END project exemptions ===========================================
 #
 # ============================ BEGIN upstream ============================
