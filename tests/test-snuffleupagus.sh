@@ -142,25 +142,33 @@ echo "$out" | grep -qi "disabled_function" || fail "wrapper-include block failed
 echo "$out" | grep -q "gz-payload-executed" && fail "the wrapper-include payload actually ran: $out"
 echo "ok: default.rules blocks non-.php wrapper includes"
 
-# putenv("DYLD_LIBRARY_PATH") is exempted on its own merits: macOS-only and inert on
-# this Linux image, so upstream's LD_-substring hardening false-positives on it for no
-# protective benefit. It is not a Composer-specific carve-out (Symfony's defensive
-# env-clearing makes the same call). Composer's phar bootstrap is deliberately not
-# exempted: getting past putenv reaches the proc_open() command-injection filter
-# blocking a benign `stty -a | grep columns` pipe, which is the headline RCE
-# protection doing its job. PHP_SNUFFLEUPAGUS (runtime serving) and Composer
-# (build/deploy time) are not meant to run together.
-out=$(run_probe "$IMAGE" default '<?php putenv("DYLD_LIBRARY_PATH"); echo "DYLD_CLEARED_OK";') \
-  || fail "putenv(\"DYLD_LIBRARY_PATH\") was blocked -- the putenv exemption regressed: $out"
-echo "$out" | grep -q "DYLD_CLEARED_OK" || fail "putenv(\"DYLD_LIBRARY_PATH\") did not complete correctly: $out"
-echo "ok: putenv() exemption allows the inert-on-Linux DYLD_LIBRARY_PATH"
+# putenv() drops LD_* and GCONV_* assignments (the LD_PRELOAD / iconv gconv-module
+# injection vectors). Upstream's patterns were unanchored substrings, so any
+# assignment merely containing "LD_" fataled (BUILD_ID=1, WORLD_SIZE=2) and
+# DYLD_LIBRARY_PATH needed an exemption; the rules are anchored to the variable
+# name instead (DIVERGENCES item 5), which is where the loader and iconv look.
+# Composer's phar bootstrap is deliberately not exempted: getting past putenv reaches
+# the proc_open() command-injection filter blocking a benign `stty -a | grep columns`
+# pipe, which is the headline RCE protection doing its job. PHP_SNUFFLEUPAGUS
+# (runtime serving) and Composer (build/deploy time) are not meant to run together.
+for rs in default laravel wordpress prestashop; do
+  for assignment in 'DYLD_LIBRARY_PATH' 'BUILD_ID=1' 'WORLD_SIZE=2' 'APP_FIELD_X=y' 'MY_GCONV_X=1'; do
+    out=$(run_probe "$IMAGE" "$rs" "<?php putenv('${assignment}'); echo 'PUTENV_OK';") \
+      || fail "${rs}.rules blocked putenv('${assignment}') -- the LD_/GCONV_ rules lost their anchor: $out"
+    echo "$out" | grep -q "PUTENV_OK" || fail "putenv('${assignment}') did not complete correctly under ${rs}.rules: $out"
+  done
+done
+echo "ok: putenv() allows names that merely contain LD_/GCONV_ (DYLD_LIBRARY_PATH, BUILD_ID, WORLD_SIZE, ...) in every ruleset"
 
-# ...and does not widen past that one exact value: LD_PRELOAD and friends
-# still match the substring rule and stay blocked.
-out=$(run_probe "$IMAGE" default '<?php putenv("LD_PRELOAD=/tmp/evil.so"); echo "SHOULD_NOT_RUN";') && \
-  fail "putenv(\"LD_PRELOAD=...\") was NOT blocked -- the exemption widened past DYLD_LIBRARY_PATH: $out"
-echo "$out" | grep -qi "disabled_function" || fail "the negative putenv probe failed for the wrong reason: $out"
-echo "ok: putenv() exemption does not widen past DYLD_LIBRARY_PATH"
+# ...and the anchor loses no coverage: every real loader/iconv variable stays blocked.
+for rs in default laravel wordpress prestashop; do
+  for assignment in 'LD_PRELOAD=/tmp/evil.so' 'LD_LIBRARY_PATH=/tmp' 'LD_AUDIT=/tmp/evil.so' 'GCONV_PATH=/tmp'; do
+    out=$(run_probe "$IMAGE" "$rs" "<?php putenv('${assignment}'); echo 'SHOULD_NOT_RUN';") && \
+      fail "putenv('${assignment}') was NOT blocked under ${rs}.rules -- the anchored rule lost coverage: $out"
+    echo "$out" | grep -qi "disabled_function" || fail "the negative putenv probe for ${assignment} failed for the wrong reason under ${rs}.rules: $out"
+  done
+done
+echo "ok: putenv() still blocks LD_PRELOAD, LD_LIBRARY_PATH, LD_AUDIT and GCONV_PATH in every ruleset"
 
 # Documented boundary: `require` from Composer's own phar bootstrap stays blocked;
 # there is deliberately no exemption for it. This asserts that holds.
