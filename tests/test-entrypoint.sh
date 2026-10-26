@@ -1199,17 +1199,60 @@ echo "$out" | grep -qw "proc_nice=LIVE" \
 rm -rf "$mine_persist"
 echo "ok: $FLAVOR -- a persistent conf.d restart rebuilds the disable_functions union from the base list (mounted names kept, previous request dropped, no stale file)"
 
+# A mounted disable_functions that itself disables ini_get must not break the start:
+# the entrypoint reads the resolved value through `php -i`, not ini_get(). Both the
+# mounted names and the requested one end up disabled.
+printf 'disable_functions=ini_get,exec\n' >"$mine_dir/60-ig.ini"
+chmod 644 "$mine_dir/60-ig.ini"
+out=$(drun --rm --read-only --tmpfs /tmp -e PHP_DISABLE_FUNCTIONS=proc_nice \
+  -v "$mine_dir/60-ig.ini":/usr/local/etc/php/conf.d/60-ig.ini:ro "$IMAGE" php -r "$mine_probe" 2>&1) \
+  || fail "$FLAVOR: a mounted disable_functions=ini_get,exec refused to start: $out"
+for f in proc_nice exec; do
+  echo "$out" | grep -qw "${f}=gone" || fail "$FLAVOR: mounted ini_get,exec ini: ${f} is callable: $out"
+done
+echo "ok: $FLAVOR -- a mounted disable_functions that disables ini_get does not break the start (value read without ini_get)"
+
+# Names php-fpm allowlists or cannot know about (getallheaders is absent from the CLI
+# SAPI) are compared against the effective union, so requesting them next to a real
+# name starts fine.
+out=$(drun --rm --read-only --tmpfs /tmp -e PHP_DISABLE_FUNCTIONS=proc_open,getallheaders \
+  "$IMAGE" php -r "$mine_probe" 2>&1) \
+  || fail "$FLAVOR: PHP_DISABLE_FUNCTIONS=proc_open,getallheaders refused to start: $out"
+echo "$out" | grep -qw "proc_open=gone" || fail "$FLAVOR: proc_open,getallheaders: proc_open is callable: $out"
+echo "ok: $FLAVOR -- an allowlisted name next to a real one in PHP_DISABLE_FUNCTIONS starts and applies"
+
+# Restarting the entrypoint on a writable conf.d must never leave a window in which
+# the list is not in force for a concurrently starting PHP process: the generated file
+# is written atomically and the base is probed without touching it. The loop below runs
+# php while 15 entrypoints rewrite the generated file.
+set +e
+out=$(drun --rm -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" timeout 120 sh -c '
+docker-php-entrypoint true
+( for i in $(seq 1 100); do php -r "echo function_exists(\"proc_open\") ? \"L\" : \"g\";"; echo; done ) >/tmp/probe.out &
+sleep 0.3
+for i in $(seq 1 15); do docker-php-entrypoint true & done
+wait
+echo "LIVE=$(grep -c L /tmp/probe.out) TOTAL=$(wc -l </tmp/probe.out) STRAY=$(ls -A /usr/local/etc/php/conf.d | grep -c "pdf-probe\|\.tmp")"
+' 2>&1)
+set -e
+echo "$out" | grep -q "LIVE=0 TOTAL=100 STRAY=0" \
+  || fail "$FLAVOR: concurrent entrypoint restarts let proc_open come back, or left temp files in conf.d: $out"
+echo "ok: $FLAVOR -- concurrent entrypoint restarts never expose a window without the list and leave no temp files"
+
 if [ "$FLAVOR" = fpm ]; then
-# The same mounted list through a live FastCGI worker, bare --read-only (private scan
-# dir) and writable conf.d. www.conf's php_admin_value[disable_functions] is
-# ${PHP_DISABLE_FUNCTIONS} (the baked image ENV here), which php-fpm unions with the
-# main-ini value, so the mounted proc_open must survive in the worker.
-mine_fpm_probe='<?php foreach (["proc_open","proc_nice","exec"] as $f) { echo $f, "=", function_exists($f) ? "LIVE" : "gone", " "; }'
-for mine_mode in readonly writable; do
+# The same mounted list through a live FastCGI worker. Every baked name, the mounted
+# ones and the requested one must be gone in the worker. www.conf's
+# php_admin_value[disable_functions] is ${PHP_DISABLE_FUNCTIONS} (the baked image ENV
+# here), which php-fpm unions with the main-ini value, so the main ini the entrypoint
+# writes has to carry the mounted proc_open and exec as well. Bare --read-only generates
+# nothing, so it is only certified with a writable /tmp (--tmpfs /tmp).
+mine_fpm_names=(passthru shell_exec exec system show_source dl popen pcntl_exec proc_open proc_nice)
+mine_fpm_probe='<?php foreach (["passthru","shell_exec","exec","system","show_source","dl","popen","pcntl_exec","proc_open","proc_nice"] as $f) { echo $f, "=", function_exists($f) ? "LIVE" : "gone", " "; }'
+for mine_mode in readonly-tmpfs writable; do
   mine_fpm_name="fpm-mine-$mine_mode-$$"
   trap 'docker rm -f "$mine_fpm_name" >/dev/null 2>&1 || true' EXIT
-  if [ "$mine_mode" = readonly ]; then
-    mine_fpm_flags=(--read-only --tmpfs /probe)
+  if [ "$mine_mode" = readonly-tmpfs ]; then
+    mine_fpm_flags=(--read-only --tmpfs /tmp --tmpfs /probe)
   else
     mine_fpm_flags=(--tmpfs /probe)
   fi
@@ -1228,12 +1271,43 @@ for mine_mode in readonly writable; do
   mine_fpm_out=$(fcgi_request "$mine_fpm_name" -e SCRIPT_FILENAME=/probe/mine-probe.php -e SCRIPT_NAME=/mine-probe.php -e REQUEST_METHOD=GET)
   docker rm -f "$mine_fpm_name" >/dev/null 2>&1
   trap - EXIT
-  for f in proc_open proc_nice exec; do
+  for f in "${mine_fpm_names[@]}"; do
     echo "$mine_fpm_out" | grep -qw "${f}=gone" \
-      || fail "fpm: $mine_mode: ${f} is callable in a live worker although the mounted ini and/or PHP_DISABLE_FUNCTIONS name it: $mine_fpm_out"
+      || fail "fpm: $mine_mode: ${f} is callable in a live worker although the baked list, the mounted ini and/or PHP_DISABLE_FUNCTIONS name it: $mine_fpm_out"
   done
-  echo "ok: fpm -- $mine_mode: a live FastCGI worker has the mounted ini's disable_functions, the baked list and PHP_DISABLE_FUNCTIONS all in force"
+  echo "ok: fpm -- $mine_mode: a live FastCGI worker has every baked name, the mounted ini's list and PHP_DISABLE_FUNCTIONS all in force"
 done
+
+# Bare --read-only generates nothing (no writable conf.d, no /tmp), so a mounted list
+# plus a request cannot be certified: the mounted list replaces the baked one in the
+# main ini, so the baked names (passthru, ...) are only in the pool's value and the
+# mounted proc_open/exec only in the main ini. Refused, naming the missing writable
+# location.
+set +e
+out=$(drun --rm --read-only -m 512m -e PHP_DISABLE_FUNCTIONS=proc_nice \
+  -v "$mine_dir/99-mine.ini":/usr/local/etc/php/conf.d/99-mine.ini:ro "$IMAGE" php-fpm -tt 2>&1)
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "fpm: bare --read-only + mounted conf.d list + PHP_DISABLE_FUNCTIONS started instead of refusing: $out"
+echo "$out" | grep -q "missing: .*passthru" \
+  || fail "fpm: bare --read-only refusal did not name the baked passthru as missing: $out"
+echo "$out" | grep -q "mount a tmpfs at /tmp" \
+  || fail "fpm: bare --read-only refusal did not say a writable /tmp is needed: $out"
+echo "ok: fpm -- bare --read-only with a mounted list and a request is refused, pointing at --tmpfs /tmp"
+
+# A late-sorting operator ini on a writable conf.d replaces the generated union for the
+# fpm main ini too: refused with the rename hint, never certified from the pool value.
+set +e
+out=$(drun --rm -m 512m -e PHP_DISABLE_FUNCTIONS=proc_nice \
+  -v "$mine_dir/zzz-late.ini":/usr/local/etc/php/conf.d/zzz-late.ini:ro "$IMAGE" php-fpm -tt 2>&1)
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "fpm: writable conf.d + late-sorting zzz-late.ini replacing disable_functions started instead of refusing: $out"
+echo "$out" | grep -q "missing: .*passthru" \
+  || fail "fpm: refusal for the late-sorting ini did not name the baked passthru as missing: $out"
+echo "$out" | grep -qF "/usr/local/etc/php/conf.d/zzz-late.ini" \
+  || fail "fpm: refusal for the late-sorting ini did not name the offending file: $out"
+echo "ok: fpm -- a late-sorting conf.d ini replacing disable_functions is refused on a writable conf.d, naming the file"
 fi
 rm -rf "$mine_dir"
 
@@ -1436,21 +1510,22 @@ echo "$out" | grep -qF "proc_open;x" \
   || fail "refusal for the semi-main.ini fixture did not echo the offending value: $out"
 echo "ok: fpm -- a mounted main-ini disable_functions value containing ';' is refused instead of being unioned in or certified through a pool's own coverage"
 
-# The other vector: conf.d is writable, but an operator-mounted ini sorting late
-# (zz-custom.ini) sets disable_functions and the pool covers only 'exec'. The pool's
-# own value never names proc_open, so verification refuses whatever the main ini says.
-# (The generated file itself is zz-disable-functions-env.ini and sorts after this one;
-# the operator-ini-sorts-later case is covered by the zzz-late.ini test above.)
-confd2w_confd="/tmp/ep-f2w-confd-$$"
-mkdir -p "$confd2w_confd"
-chmod 777 "$confd2w_confd"
-drun --rm -v "$confd2w_confd":/out "$IMAGE" sh -c 'cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
-rm -f "$confd2w_confd/99-env.ini" "$confd2w_confd/90-opcache-env.ini"
-cat >"$confd2w_confd/zz-custom.ini" <<'CONF'
+# conf.d is writable and an operator-mounted ini sets disable_functions while the pool
+# covers only 'exec'. The pool's own value never names proc_open, so the main ini has to.
+# zz-custom.ini sorts before the generated zz-disable-functions-env.ini, so the generated
+# union wins and the main ini covers proc_open: started. zzz-custom.ini sorts after it
+# and replaces the union: refused.
+for confd2w_case in zz-custom zzz-custom; do
+  confd2w_confd="/tmp/ep-f2w-confd-$$"
+  mkdir -p "$confd2w_confd"
+  chmod 777 "$confd2w_confd"
+  drun --rm -v "$confd2w_confd":/out "$IMAGE" sh -c 'cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
+  rm -f "$confd2w_confd/99-env.ini" "$confd2w_confd/90-opcache-env.ini"
+  cat >"$confd2w_confd/$confd2w_case.ini" <<'CONF'
 disable_functions = get_current_user
 CONF
-confd2w_conf="/tmp/ep-f2w-www-$$.conf"
-cat >"$confd2w_conf" <<'CONF'
+  confd2w_conf="/tmp/ep-f2w-www-$$.conf"
+  cat >"$confd2w_conf" <<'CONF'
 [www]
 user = www-data
 group = www-data
@@ -1459,17 +1534,23 @@ pm = static
 pm.max_children = 1
 php_admin_value[disable_functions] = exec
 CONF
-set +e
-out=$(drun --rm -m 512m \
-  -v "$confd2w_confd":/usr/local/etc/php/conf.d \
-  -v "$confd2w_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
-  -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php-fpm -tt 2>&1)
-rc=$?
-set -e
-rm -rf "$confd2w_confd" "$confd2w_conf"
-[ "$rc" -ne 0 ] || fail "a writable-conf.d operator ini (zz-custom.ini) with a pool lacking the requested function started instead of refusing: $out"
-echo "$out" | grep -q "missing: proc_open" \
-  || fail "refusal for the writable-conf.d zz-custom.ini fixture did not name proc_open as missing: $out"
-echo "ok: fpm -- a pool that does not name the requested function is refused on a writable conf.d with an operator ini present"
+  set +e
+  out=$(drun --rm -m 512m \
+    -v "$confd2w_confd":/usr/local/etc/php/conf.d \
+    -v "$confd2w_conf":/usr/local/etc/php-fpm.d/www.conf:ro \
+    -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" php-fpm -tt 2>&1)
+  rc=$?
+  set -e
+  rm -rf "$confd2w_confd" "$confd2w_conf"
+  if [ "$confd2w_case" = zz-custom ]; then
+    [ "$rc" -eq 0 ] || fail "fpm: writable conf.d + zz-custom.ini (sorts before the generated file) + a pool covering only 'exec' was refused although the main ini covers proc_open: $out"
+    echo "ok: fpm -- an operator ini sorting before the generated file does not matter: the main ini covers the request even when the pool value does not repeat it"
+  else
+    [ "$rc" -ne 0 ] || fail "fpm: writable conf.d + zzz-custom.ini (sorts after the generated file) started instead of refusing: $out"
+    echo "$out" | grep -q "missing: proc_open" \
+      || fail "fpm: refusal for the writable-conf.d zzz-custom.ini fixture did not name proc_open as missing: $out"
+    echo "ok: fpm -- an operator ini sorting after the generated file replaces the union and is refused on a writable conf.d"
+  fi
+done
 fi
 echo "ENTRYPOINT TESTS PASSED"

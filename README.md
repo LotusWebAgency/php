@@ -269,14 +269,20 @@ a real function. After loading extensions and rulesets, the entrypoint asks PHP 
 the command about to run) whether each name is actually disabled, and refuses to start if not.
 `proc_open` is not on the baked list because Composer and `symfony/process` need it.
 
-The result is the union of the baked list, any `disable_functions` from an ini you mount into
-`conf.d` (or another scanned directory), and the variable. It is written to its own generated file,
-`zz-disable-functions-env.ini`, which sorts after the other files in a writable `conf.d`. Under
-`--read-only` the file lives in the private `/tmp` directory, which PHP scans last. A mounted ini
-that sorts after the generated file and sets `disable_functions` would replace the union, so the
-entrypoint refuses to start; rename that file to sort earlier. A mounted value with characters other
-than lowercase letters, digits, underscore, comma and space is refused too, and so is one that
-disables `ini_get` itself.
+The result is the union of the baked list, the `disable_functions` your mounted inis resolve to,
+and the variable. PHP keeps only the last `disable_functions` it reads, so when several mounted inis
+set it, only the last one's list joins the union. The union goes to `zz-disable-functions-env.ini`,
+replaced atomically on every start, in `conf.d` or, when that is read-only, in the private `/tmp`
+directory, which PHP scans last. PHP reads the files of a directory in name order, so an ini whose
+name sorts after `zz-disable-functions-env.ini` (`zz_app.ini`, `zzz-late.ini`) and sets
+`disable_functions` would replace the union in `conf.d`. The entrypoint then refuses to start and
+names the file; rename it to sort earlier. A bare `--read-only` without a writable `/tmp` generates
+nothing (add `--tmpfs /tmp`): the container starts only if the ini files and, on `fpm`, the pool
+already disable every baked, mounted and requested name. A mounted value with characters other than
+lowercase letters, digits, underscore, comma and space is refused too.
+
+The check covers the command the entrypoint hands off to. `php -n`, `-c` or `-d disable_functions=`
+on that command line changes the ini after the check and bypasses it.
 
 `docker exec <container> php ...` does not see the env-driven ini. Use
 `docker exec <container> docker-php-entrypoint php ...` to apply it.
@@ -394,8 +400,9 @@ What each setting needs to know:
   while it is loaded and logs a startup warning. `PHP_OPCACHE_JIT=disable` says so up front and
   removes the warning; `off` does not, because it keeps the JIT buffer.
 - **`PHP_DISABLE_FUNCTIONS`.** Adds names to the baked list and any `disable_functions` in a mounted
-  ini, for example `proc_open` when the application never starts processes. Laravel queues, Symfony Process and Composer need `proc_open`.
-  The entrypoint refuses to start if a listed name does not end up disabled.
+  ini, for example `proc_open` when the application never starts processes. Laravel queues, Symfony
+  Process and Composer need `proc_open`. The entrypoint refuses to start if a listed name does not
+  end up disabled.
 - **Limits.** `pids_limit` bounds runaway forks; the memory limit bounds the container and drives FPM
   and opcache autotuning (512 MB is assumed without one).
 - **Network.** `fpm` speaks FastCGI on 9000 and should only be reachable by the web server. Never
