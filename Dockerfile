@@ -5,6 +5,10 @@ ARG PHP_ERA=modern
 # Declared before any FROM so `FROM toolchain-select-${COMPILER}` can resolve it.
 # The toolchain-base stage redeclares it for use inside the stage.
 ARG COMPILER=clang
+# Declared before any FROM so the final ext-builder stage can pick its flags stage.
+# TARGETARCH is the platform arg BuildKit sets for each platform of a multi-platform build.
+ARG UARCH=baseline
+ARG TARGETARCH
 
 # --- toolchain ---
 # Busybox's raw-socket and interface applets have no job in a PHP runtime and only
@@ -867,8 +871,9 @@ COPY --from=php-build /usr/local/include/php /usr/local/include/php
 # Build-stage-only image for compiling PHP extensions that are then COPYed into
 # fpm/cli of the same PHP version. It reuses php-build's output (no second compile
 # or PGO run), taking only the headers and phpize/php-config. Runs as root because
-# `make install` writes into the extension dir. No composer, no node.
-FROM cli AS ext-builder
+# `make install` writes into the extension dir. No composer, no node. The -v3
+# variant is the same image plus default CFLAGS/CXXFLAGS (ext-builder-isa-* below).
+FROM cli AS ext-builder-base
 ARG BUSYBOX_NET_APPLETS
 USER root
 # build-base: gcc, g++, make, binutils, glibc-dev and the openssf compiler wrappers
@@ -888,3 +893,21 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     find / -xdev -perm /6000 -type f -exec chmod a-s {} + || true
 COPY --from=ext-builder-payload / /
 CMD ["bash"]
+
+# Default compiler flags for extensions, chosen by UARCH and TARGETARCH. The
+# baseline keeps Wolfi's compiler defaults. -v3 sets the -march/-mtune that
+# php/cflags.sh passes for v3, so an extension built with a plain
+# `phpize && ./configure && make` carries the same instruction set as the -v3
+# PHP it loads into. -g -O2 is configure's own default, which setting CFLAGS
+# would otherwise replace. tests/preflight.sh checks these values against
+# php/cflags.sh.
+FROM ext-builder-base AS ext-builder-isa-baseline-amd64
+FROM ext-builder-base AS ext-builder-isa-baseline-arm64
+FROM ext-builder-base AS ext-builder-isa-v3-amd64
+ENV CFLAGS="-g -O2 -march=x86-64-v3 -mtune=generic" \
+    CXXFLAGS="-g -O2 -march=x86-64-v3 -mtune=generic"
+FROM ext-builder-base AS ext-builder-isa-v3-arm64
+ENV CFLAGS="-g -O2 -march=armv9-a -mtune=neoverse-v2" \
+    CXXFLAGS="-g -O2 -march=armv9-a -mtune=neoverse-v2"
+
+FROM ext-builder-isa-${UARCH}-${TARGETARCH} AS ext-builder

@@ -1,6 +1,6 @@
 # Build -> test -> scan -> publish for lotuswebagency/php: a docker-bake matrix of
-# 50 targets (11 PHP versions x 4 flavors, plus an x86-64-v3 / armv9-a variant
-# of fpm/cli/cli-builder on 8.4 and 8.5), each built with a PGO training corpus
+# 52 targets (11 PHP versions x 4 flavors, plus an x86-64-v3 / armv9-a variant
+# of every flavor on 8.4 and 8.5), each built with a PGO training corpus
 # that is itself a build input.
 #
 # Three modes, chosen by the event and the ref:
@@ -412,6 +412,7 @@ jobs:
       TARGET_BAKE: ${{ matrix.target.bake }}
       TARGET_TAG: ${{ matrix.target.tags[0] }}
       TARGET_PHP: ${{ matrix.target.php }}
+      TARGET_UARCH: ${{ matrix.target.uarch }}
       TARGET_FLAVOR: ${{ matrix.target.flavor }}
       TARGET_CORPUS: ${{ matrix.target.corpus }}
       RIDER_NAME: ${{ matrix.target.rider_name }}
@@ -573,12 +574,14 @@ jobs:
         if: matrix.target.rider_flavor == 'ext-builder'
         run: |
           set -euo pipefail
+          suffix=""
+          [ "$TARGET_UARCH" != "v3" ] || suffix="-v3"
           slug="php-${TARGET_PHP//./_}"
-          RETRY_KIND=registry,http,apk RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm" \
+          RETRY_KIND=registry,http,apk RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm$suffix" \
             --set "*.platform=$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
             --load
-          ./tests/test-ext-builder.sh "$TARGET_PHP"
+          ./tests/test-ext-builder.sh "$TARGET_PHP$suffix"
 
       # A repo-root .trivyignore, if present, is honored automatically.
       - name: Trivy vulnerability gate
@@ -723,7 +726,7 @@ jobs:
   # succeeded and the run's commit is still the head of develop, so the floating
   # set mixes commits at most inside the short second pass of the script (a
   # cancel or crash there can split it; the prune keeps both sha sets). One job
-  # over all 50 targets, not a matrix: each target is a handful of manifest calls
+  # over all 52 targets, not a matrix: each target is a handful of manifest calls
   # and runners are scarce. A missing arch while verify claims success is a bug
   # and fails the job; after a failed verify leg the missing ones are only
   # reported. The logic is in ci/dev-manifest.sh.
@@ -775,7 +778,7 @@ jobs:
           echo "ok: preflight and every verify leg succeeded"
 
   # -------------------------------------------------------- release-matrix
-  # The full 50-target matrix (scripts/gen_matrix.py --github targets) for the
+  # The full 52-target matrix (scripts/gen_matrix.py --github targets) for the
   # merge job, and the 39 build legs of it (--github build: ext-builder rides
   # with its version's cli leg) for the build job. main only: develop's
   # counterpart is verify-matrix.

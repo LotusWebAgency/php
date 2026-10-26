@@ -59,7 +59,7 @@ Every caveat, with workarounds:
 | Tag shape | Example | Meaning |
 |---|---|---|
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
-| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64-v2` / `armv8-a` baseline. 8.4 and 8.5 only, not `ext-builder`. |
+| `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64-v2` / `armv8-a` baseline. 8.4 and 8.5 only. |
 | `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image. |
 | `{release}-{flavor}[-v3]` | `8.5.12-fpm` | Full patch version, read from the built image after tests and the Trivy gate. |
 
@@ -83,7 +83,7 @@ built for the baseline in every image, `-v3` included.
 | `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` that needs no web server. |
 | `cli` | `php -a` by default. Scripts, cron jobs, queue workers. |
 | `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, Node.js 26 with npm 12.2.1 and corepack, semantic-release and Composer. No compiler. For build stages. |
-| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize`. Runs as root. Extensions built here take Wolfi's default `-march`/`-mtune`, not the generic tuning the PHP build uses. For build stages. |
+| `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize`. Runs as root. Extensions take Wolfi's default `-march`/`-mtune`; `-v3` presets `CFLAGS`/`CXXFLAGS`. For build stages. |
 
 All images run `tini` as PID 1. All but `ext-builder` run as `www-data` (UID and GID 33).
 
@@ -339,7 +339,7 @@ ENV PHP_EXT_ENABLE=myext
 ```
 
 - Use the same PHP version tag in both stages, ideally pinned by digest. An extension built for one
-  PHP minor does not load in another.
+  PHP minor does not load in another. For a `-v3` runtime use `ext-builder-v3`.
 - Install runtime libraries (not `-dev` packages) in the final stage as root, then switch back to
   `www-data`.
 - Package names are Wolfi's, not Debian's: `apk search` finds one by name, and

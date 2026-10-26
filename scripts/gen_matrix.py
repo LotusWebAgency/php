@@ -28,12 +28,6 @@ VALID_SUPPORT = {"active", "security", "end-of-life"}
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def validate_baseline_only_flavors(matrix):
-    unknown = set(matrix.get("baseline_only_flavors", [])) - set(matrix["flavors"])
-    if unknown:
-        raise SystemExit(f"matrix.json: baseline_only_flavors {sorted(unknown)} are not in flavors")
-
-
 def validate_support_fields(matrix):
     """support/eol_date become published image labels (docker-bake.hcl)."""
     versions = matrix["versions"]
@@ -85,19 +79,12 @@ def corpus_tags(matrix):
 
 
 def build_targets(matrix):
-    """One entry per published image. 44 baseline + 6 v3 = 50.
-
-    Flavors in baseline_only_flavors (ext-builder) get no v3 variant: an
-    extension built against baseline headers loads on the v3 runtime.
-    """
-    baseline_only = set(matrix.get("baseline_only_flavors", []))
+    """One entry per published image. 44 baseline + 8 v3 = 52."""
     tags = corpus_tags(matrix)
     targets = []
     for php, spec in matrix["versions"].items():
         for uarch in spec["uarch"]:
             for flavor in matrix["flavors"]:
-                if uarch != "baseline" and flavor in baseline_only:
-                    continue
                 targets.append({
                     "name": target_name(php, flavor, uarch),
                     "php": php,
@@ -228,7 +215,6 @@ def main():
     args = parser.parse_args()
     matrix = load()
     validate_support_fields(matrix)
-    validate_baseline_only_flavors(matrix)
 
     if args.github == "targets":
         print(json.dumps({"include": build_targets(matrix)}))

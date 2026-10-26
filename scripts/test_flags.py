@@ -144,6 +144,31 @@ class TestCflags(unittest.TestCase):
             self.assertEqual([f for f in flags if f.startswith("-D_FORTIFY_SOURCE")], ["-D_FORTIFY_SOURCE=3"])
 
 
+class TestExtBuilderIsaStages(unittest.TestCase):
+    """The ext-builder -v3 default CFLAGS in the Dockerfile are cflags.sh's v3 ISA flags."""
+
+    def isa_env(self, stage):
+        text = (ROOT / "Dockerfile").read_text()
+        block = re.search(rf"^FROM ext-builder-base AS {stage}\n(.*?)(?=^FROM |\Z)", text, re.M | re.S)
+        self.assertIsNotNone(block, f"stage {stage} is missing from the Dockerfile")
+        return dict(re.findall(r'(\w+)="([^"]*)"', block.group(1)))
+
+    def test_v3_stages_use_the_v3_march_and_mtune(self):
+        for machine, arch in (("x86_64", "amd64"), ("aarch64", "arm64")):
+            isa = [f for f in cflags("v3", "c", "gcc", machine) if f.startswith(("-march=", "-mtune="))]
+            env = self.isa_env(f"ext-builder-isa-v3-{arch}")
+            for name in ("CFLAGS", "CXXFLAGS"):
+                self.assertEqual(env[name].split(), ["-g", "-O2", *isa], (arch, name))
+
+    def test_baseline_stages_set_no_flags(self):
+        for arch in ("amd64", "arm64"):
+            self.assertEqual(self.isa_env(f"ext-builder-isa-baseline-{arch}"), {}, arch)
+
+    def test_final_stage_is_picked_by_uarch_and_arch(self):
+        text = (ROOT / "Dockerfile").read_text()
+        self.assertIn("FROM ext-builder-isa-${UARCH}-${TARGETARCH} AS ext-builder\n", text)
+
+
 class TestLdflags(unittest.TestCase):
     def test_full_relro_and_noexecstack(self):
         flags = run("php/ldflags.sh")
