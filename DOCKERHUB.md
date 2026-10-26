@@ -406,6 +406,8 @@ Debian's security patches), curl in 7.0-7.2. Those are tracked by hand through `
 `mariadb-dump`, `mariadb-admin` and `mariadb-check` binaries copied into the image. Reporting
 channel: [SECURITY.md](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md).
 
+Two further gates fail the build on any finding in CISA's Known Exploited Vulnerabilities catalog, fixed or not, and on any AGPL-licensed package.
+
 ## Moving from a Debian or Alpine base
 
 This applies to any PHP image built on Debian (the official `php:*-fpm` images, and

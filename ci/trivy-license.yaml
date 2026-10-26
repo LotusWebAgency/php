@@ -1,0 +1,10 @@
+# Trivy config for the license gate in .github/workflows/ci.yml (TRIVY_CONFIG).
+# Only the forbidden category is redefined: AGPL, so the gate fails on AGPL and
+# nothing else. Trivy maps forbidden to CRITICAL, restricted (GPL, LGPL) to HIGH
+# and the rest lower, so the gate runs with severity CRITICAL.
+license:
+  forbidden:
+    - AGPL-1.0
+    - AGPL-3.0
+    - AGPL-3.0-only
+    - AGPL-3.0-or-later
