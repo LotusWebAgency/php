@@ -245,6 +245,88 @@ out=$(run_probe "$IMAGE" default '<?php $p = proc_open("id; whoami", [1=>["pipe"
 echo "$out" | grep -qi "disabled_function" || fail "the negative proc_open probe failed for the wrong reason: $out"
 echo "ok: removing function_exists()/is_callable() blocking left the real proc_open() filter untouched"
 
+# Laravel's scheduler (project exemption 8): `schedule:run` hands proc_open() the shell
+# string CommandBuilder wrote, through Symfony Process, and its `2>&1` trips the
+# metacharacter filter. The exemption is scoped to Symfony Process's own Process.php
+# (vendor and monorepo paths) and to Laravel's two exact command shapes. The probe
+# lays down a fake Process.php (and, for the control, an unrelated file) that calls
+# proc_open() with the string in $SCHED_CMD, the way the real class does.
+sched_probe() {
+  # $1: ruleset  $2: calling file (relative to /tmp/probe)  $3: command string
+  docker run --rm -e "PHP_SNUFFLEUPAGUS=${1}" -e "SCHED_CMD=${3}" --entrypoint sh "$IMAGE" -c '
+    mkdir -p /tmp/probe/vendor/symfony/process /tmp/probe/src/Symfony/Component/Process /tmp/probe/app
+    for f in vendor/symfony/process/Process.php src/Symfony/Component/Process/Process.php app/Other.php; do
+      cat > "/tmp/probe/$f" <<\PHP
+<?php
+function run_event() {
+  $p = proc_open(getenv("SCHED_CMD"), [1 => ["pipe", "w"], 2 => ["pipe", "w"]], $pipes, "/tmp");
+  if (!is_resource($p)) { echo "PROC_FAILED"; return; }
+  stream_get_contents($pipes[1]);
+  proc_close($p);
+  echo "PROC_OK";
+}
+PHP
+    done
+    echo "<?php require \$argv[1]; run_event();" > /tmp/probe/main.php
+    docker-php-entrypoint php /tmp/probe/main.php "/tmp/probe/$0"
+  ' "$2" 2>&1
+}
+sched_expect_allowed() {
+  local out
+  out=$(sched_probe "$1" "$2" "$3") || fail "scheduler command was dropped under ${1}.rules from ${2}: ${3}: $out"
+  echo "$out" | grep -q "PROC_OK" || fail "scheduler command did not run under ${1}.rules from ${2}: ${3}: $out"
+}
+sched_expect_dropped() {
+  local out
+  out=$(sched_probe "$1" "$2" "$3") && fail "command was NOT dropped under ${1}.rules from ${2}: ${3}: $out"
+  echo "$out" | grep -qi "disabled_function" || fail "command was refused for the wrong reason under ${1}.rules from ${2}: ${3}: $out"
+}
+
+sched_php="'/usr/local/bin/php' 'artisan'"
+sched_mutex="framework/schedule-86dab0bcb3ad4012b61822aad41b041a9564d9e1"
+sched_fg="${sched_php} inspire > '/dev/null' 2>&1"
+sched_fg_append="${sched_php} inspire --no-ansi 'two words' >> '/app/storage/logs/out.log' 2>&1"
+sched_bg="(${sched_php} inspire > '/app/storage/logs/out.log' 2>&1 ; ${sched_php} schedule:finish \"${sched_mutex}\" \"\$?\") > '/dev/null' 2>&1 &"
+for rs in default laravel wordpress prestashop; do
+  sched_expect_allowed "$rs" vendor/symfony/process/Process.php "$sched_fg"
+  sched_expect_allowed "$rs" vendor/symfony/process/Process.php "$sched_fg_append"
+  sched_expect_allowed "$rs" vendor/symfony/process/Process.php "$sched_bg"
+  sched_expect_allowed "$rs" src/Symfony/Component/Process/Process.php "$sched_fg"
+done
+echo "ok: scheduler foreground, append and background commands run from Symfony Process in every ruleset"
+
+for rs in default laravel; do
+  sched_expect_dropped "$rs" app/Other.php "$sched_fg"
+  sched_expect_dropped "$rs" app/Other.php "$sched_bg"
+done
+echo "ok: the same scheduler strings are still dropped from any other file"
+
+# Inside Process.php the exemption is the exact shape, not the file: an injected
+# command in the arguments, a trailing command, another binary, the sudo wrapper and
+# a plain shell string all stay dropped.
+for rs in default laravel wordpress prestashop; do
+  for cmd in \
+    "${sched_php} inspire; id > '/dev/null' 2>&1" \
+    "${sched_php} inspire \$(id) > '/dev/null' 2>&1" \
+    "${sched_php} inspire \`id\` > '/dev/null' 2>&1" \
+    "${sched_php} inspire && id > '/dev/null' 2>&1" \
+    "${sched_php} inspire | sh > '/dev/null' 2>&1" \
+    "${sched_php} inspire 'x' ; id ; 'y' > '/dev/null' 2>&1" \
+    "${sched_php} inspire '\$(id)' > '/dev/null' 2>&1" \
+    "${sched_php} inspire > '/dev/null' 2>&1 ; id" \
+    "${sched_php} inspire > '/dev/null' 2>&1 &" \
+    "id ; ${sched_fg}" \
+    "'/usr/local/bin/php' 'evil.php' > '/dev/null' 2>&1" \
+    "sudo -u www -- sh -c '${sched_fg}'" \
+    "git status 2>&1" \
+    "(${sched_php} inspire; id > '/app/storage/logs/out.log' 2>&1 ; ${sched_php} schedule:finish \"${sched_mutex}\" \"\$?\") > '/dev/null' 2>&1 &" \
+    "(${sched_php} inspire > '/app/storage/logs/out.log' 2>&1 ; id ; ${sched_php} schedule:finish \"${sched_mutex}\" \"\$?\") > '/dev/null' 2>&1 &" \
+    "(${sched_php} inspire > '/app/storage/logs/out.log' 2>&1 ; ${sched_php} schedule:finish \"${sched_mutex}\" \"\$?\") > '/dev/null' 2>&1 & id"; do
+    sched_expect_dropped "$rs" vendor/symfony/process/Process.php "$cmd"
+  done
+done
+echo "ok: injected arguments, trailing commands, other binaries, sudo wrappers and plain shell strings stay dropped even from Process.php"
+
 # default.rules does not break an ordinary unserialize() round trip (Laravel's queue
 # worker does unserialize(serialize($job)) on every job).
 out=$(run_probe "$IMAGE" default '<?php class J{public $to="a@b.com";} $d=serialize(new J()); var_dump(unserialize($d)); echo "ROUNDTRIP_OK";') \

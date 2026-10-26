@@ -364,12 +364,12 @@ inherited from the base image is stripped. Busybox's network applets (`ping`, `n
 again. PHP 7.0-8.4 build with GCC 16.2 (PGO, no LTO) and 8.5 with clang 19 (PGO
 and ThinLTO), both from Wolfi packages.
 
-Snuffleupagus virtual patching is compiled in but not loaded. `PHP_SNUFFLEUPAGUS=prestashop` (or
-`default`, `wordpress`, `laravel`) turns it on. For your own rules, mount
-`/usr/local/etc/php/snuffleupagus/<name>.rules` read-only and set `PHP_SNUFFLEUPAGUS=<name>` (lowercase
-letters, digits, `-` and `_`; a path is refused). A custom file replaces the baked ruleset, so start
-from a copy of `default.rules`. `sp.xxe_protection` is off: it does not hold across requests, and on
-PHP 7 it disables your own `libxml_disable_entity_loader(true)`.
+Snuffleupagus is compiled in but off. `PHP_SNUFFLEUPAGUS=<ruleset>` turns it on. For your own
+rules, mount `/usr/local/etc/php/snuffleupagus/<name>.rules` read-only and set `PHP_SNUFFLEUPAGUS=<name>`
+(lowercase, digits, `-`, `_`; never a path). A custom file replaces the baked one; copy `default.rules`
+to start. Laravel's scheduler (`schedule:run`) works under every ruleset; Composer does not (use
+`cli-builder`). `sp.xxe_protection` is off: it does not hold across requests, and on PHP 7 it
+disables your own `libxml_disable_entity_loader(true)`.
 
 ## Verifying images
 

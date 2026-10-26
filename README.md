@@ -519,7 +519,10 @@ ENV PHP_EXT_ENABLE=myext
 **Snuffleupagus.** [Virtual patching](https://github.com/jvoisin/snuffleupagus) is compiled in but
 not loaded by default. Four rulesets are baked into `/usr/local/etc/php/snuffleupagus/`: `default`,
 `wordpress`, `prestashop` and `laravel`. Enable one with `PHP_SNUFFLEUPAGUS=prestashop`. Snuffleupagus is not available on PHP 7.0 and 7.1. Rulesets are
-for serving; build and deploy (Composer included) with `cli-builder` and no ruleset. No ruleset enables
+for serving; build and deploy (Composer included) with `cli-builder` and no ruleset. Laravel's scheduler
+(`php artisan schedule:run`) works under every ruleset: a narrow exemption lets Symfony Process start the exact
+command shapes Laravel builds, foreground and `runInBackground()`. Composer and any other shell string with
+metacharacters stay blocked. No ruleset enables
 `readonly_exec`; the PrestaShop and Laravel ones disable it explicitly because both frameworks rewrite their own cache
 files. `sp.xxe_protection`
 is off in all of them: it does not carry into requests, and on PHP 7 it disables the application's own
