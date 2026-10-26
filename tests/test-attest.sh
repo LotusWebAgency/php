@@ -61,7 +61,7 @@ export COSIGN REGCTL
 
 # Digest-pinned and pulled anonymously from mirrors, never from Docker Hub with
 # anyone's credentials. BUILDKIT_IMAGE is ci.yml's env when CI runs this.
-REGISTRY_IMAGE="mirror.gcr.io/library/registry:3.1.2@sha256:01cd312e67026f06f5d89c3e133a4a9adc7cb9eeb9b1194e0b2954dfd770efd2"
+REGISTRY_IMAGE="mirror.gcr.io/library/registry:3.1.2@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3"
 ZOT_IMAGE="ghcr.io/project-zot/zot-minimal:v2.1.22@sha256:6704abd9c4c988398d77915549d79c5daa2a2c5731964833e31ca039c9ac4ed3"
 HTPASSWD_IMAGE="mirror.gcr.io/library/httpd:2.4.69-alpine@sha256:070da7661f0be8a05430b2c125c0cde9e53176b4048c813024021969a0e3893c"
 BUILDKIT_IMAGE="${BUILDKIT_IMAGE:-docker.io/moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c}"
