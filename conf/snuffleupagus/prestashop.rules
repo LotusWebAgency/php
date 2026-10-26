@@ -504,13 +504,6 @@ sp.upload_validation.script("/usr/local/bin/sp-upload-check").enable();
 # as in laravel.rules, since upstream ships readonly_exec commented out.
 sp.readonly_exec.disable();
 
-# upload_validation drops every upload sent under a bracketed field name
-# (`attachment[file]`, `a[]`) before the script runs, whatever the content.
-# PrestaShop's back office names every Symfony form file field that way, so
-# attachment, image, logo and import uploads all failed. The move_uploaded_file()
-# destination rules above still block .php/.ht* targets.
-sp.upload_validation.disable();
-
 # sp.disable_function.function("eval").drop() is deliberately absent: PrestaShop's
 # bundled Smarty and Twig both compile templates through eval() as part of normal
 # rendering, so the rule breaks the framework. A delta rule ships only if it is

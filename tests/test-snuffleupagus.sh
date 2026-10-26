@@ -347,6 +347,13 @@ SRV_LOG_FILE="/tmp/sp-srv-logs.$$"
 # Removed on exit: each srv() call overwrites the file, so the last one would leak.
 trap 'rm -f "$SRV_LOG_FILE"' EXIT
 
+# Callers that need a different form shape (array, nested or empty file fields) set
+# SRV_FORM to the curl arguments replacing the default `-F f=@$2` and SRV_QUERY to the
+# request's query string ("?mode=walk" selects up.php's recursive $_FILES walk), then
+# reset both. Unset, srv() behaves exactly as before.
+SRV_FORM=()
+SRV_QUERY=""
+
 srv() {
   # $1: PHP_SNUFFLEUPAGUS  $2: file to upload  $3: optional "allow_curl_failure" when
   # the upload request itself may legitimately get no HTTP response (PHP 7.4's dev
@@ -357,6 +364,8 @@ srv() {
   # when $3 was passed and curl got no response; writes the container's docker logs to
   # $SRV_LOG_FILE either way.
   local name port code out rc status body allow_curl_failure="${3:-}"
+  local -a form=(-F "f=@${2}")
+  if [ "${#SRV_FORM[@]}" -gt 0 ]; then form=("${SRV_FORM[@]}"); fi
   name="sp-upload-e2e-$$"
   port=$((18100 + RANDOM % 1000))
 
@@ -368,6 +377,21 @@ srv() {
   if ! docker run -d --name "$name" -e "PHP_SNUFFLEUPAGUS=${1}" -p "${port}:8099" \
     -w /tmp --entrypoint sh "$IMAGE" -c '
       printf '"'"'<?php
+function sp_leaves($v, &$out) {
+  if (is_array($v)) { foreach ($v as $x) { sp_leaves($x, $out); } } else { $out[] = $v; }
+}
+if (($_GET["mode"] ?? "") === "walk") {
+  $data = []; $empty = 0;
+  foreach ($_FILES as $field) {
+    $leaves = [];
+    sp_leaves($field["tmp_name"], $leaves);
+    foreach ($leaves as $tmp) {
+      if ($tmp === "") { $empty++; } elseif (is_uploaded_file($tmp)) { $data[] = file_get_contents($tmp); }
+    }
+  }
+  echo "ACCEPTED=" . count($data) . " EMPTY=" . $empty . " DATA=" . implode("|", $data);
+  exit;
+}
 if (!empty($_FILES["f"]["tmp_name"]) && is_uploaded_file($_FILES["f"]["tmp_name"])) {
   echo "UPLOAD_ACCEPTED";
 } else {
@@ -397,7 +421,7 @@ if (!empty($_FILES["f"]["tmp_name"]) && is_uploaded_file($_FILES["f"]["tmp_name"
   fi
 
   set +e
-  out=$(curl -s -w $'\n%{http_code}' -F "f=@${2}" "http://127.0.0.1:${port}/up.php")
+  out=$(curl -s -w $'\n%{http_code}' "${form[@]}" "http://127.0.0.1:${port}/up.php${SRV_QUERY}")
   rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then
@@ -478,6 +502,64 @@ case "$resp_status" in
     ;;
 esac
 echo "ok: sp-upload-check rejects <?= webshells, confirmed via snuffleupagus's own rejection log line (transport shape: status=$resp_status)"
+
+# Bracketed and empty file fields. $_FILES holds parallel arrays for `f[]`, `a[b]` and
+# `a[b][c]`, and tmp_name "" (UPLOAD_ERR_NO_FILE) for an empty file input. Snuffleupagus
+# v0.14.0 read both as scalars, handed the validation script a garbage path and rejected
+# every such request (deps/patches/ext-snuffleupagus-v0.14.0/020-upload-validation-array-fields).
+# up.php's walk mode counts the temp files PHP really received and echoes their contents,
+# so a leaf dropped or skipped by mistake shows up as a wrong count or payload.
+walk_assert() {
+  # $1: label  $2: "<status> <body>" from srv  $3: expected body
+  local status="${2%% *}" body="${2#* }"
+  [ "$status" = 200 ] && [ "$body" = "$3" ] \
+    || fail "$1: got status=$status body='$body', expected status=200 body='$3'. Logs were: $(cat "$SRV_LOG_FILE")"
+}
+
+multi_one="/tmp/sp-multi-one-$$.txt"; multi_two="/tmp/sp-multi-two-$$.txt"
+multi_shell="/tmp/sp-multi-shell-$$.txt"
+printf 'first' > "$multi_one"; printf 'second' > "$multi_two"
+printf '<?= system($_GET[0]); ?>' > "$multi_shell"
+SRV_QUERY="?mode=walk"
+
+SRV_FORM=(-F "f[]=@${multi_one}" -F "f[]=@${multi_two}")
+resp=$(srv default -)
+walk_assert "multi-file f[] upload of two benign files" "$resp" "ACCEPTED=2 EMPTY=0 DATA=first|second"
+echo "ok: sp-upload-check accepts a multi-file f[] upload of two benign files, both round-trip"
+
+SRV_FORM=(-F "a[b]=@${multi_one}" -F "n[x][y]=@${multi_two}")
+resp=$(srv prestashop -)
+walk_assert "nested a[b] and n[x][y] uploads under prestashop.rules" "$resp" "ACCEPTED=2 EMPTY=0 DATA=first|second"
+echo "ok: sp-upload-check accepts nested a[b] and n[x][y] uploads under prestashop.rules (upload validation stays on there)"
+
+SRV_FORM=(-F 'f=@/dev/null;filename=')
+resp=$(srv default -)
+walk_assert "form with only an empty file input" "$resp" "ACCEPTED=0 EMPTY=1 DATA="
+SRV_FORM=(-F 'f=@/dev/null;filename=' -F "g[]=@${multi_one}" -F 'g[]=@/dev/null;filename=')
+resp=$(srv default -)
+walk_assert "form with empty file inputs next to a benign g[] file" "$resp" "ACCEPTED=1 EMPTY=2 DATA=first"
+echo "ok: sp-upload-check skips empty file inputs (no temp file) and still validates the real upload beside them"
+
+# A webshell among benign files in an array field must still be rejected, with the same
+# log-line evidence as the plain-field rejection above. The benign file goes first, and
+# the rejection line must name the shell's filename and not the benign one's: that shows
+# the second array leaf was validated on its own.
+SRV_FORM=(-F "f[]=@${multi_one}" -F "f[]=@${multi_shell};filename=arr-shell.php")
+resp=$(srv prestashop - allow_curl_failure)
+SRV_FORM=(); SRV_QUERY=""
+rm -f "$multi_one" "$multi_two" "$multi_shell"
+resp_status="${resp%% *}"; resp_body="${resp#* }"
+grep -qE '\[snuffleupagus\]\[[^]]*\]\[upload_validation\]\[drop\] The upload of arr-shell\.php ' "$SRV_LOG_FILE" \
+  || fail "f[] upload with a <?= webshell as its second file got status=$resp_status body='$resp_body', but the logs show no snuffleupagus upload_validation rejection naming arr-shell.php. Logs were: $(cat "$SRV_LOG_FILE")"
+if grep -qE 'upload_validation\]\[drop\] The upload of sp-multi-one-' "$SRV_LOG_FILE"; then
+  fail "the benign first file of the f[] upload was reported as rejected. Logs were: $(cat "$SRV_LOG_FILE")"
+fi
+case "$resp_status" in
+  500) [ -z "$resp_body" ] || fail "f[] webshell rejection: HTTP 500 carried a non-empty body ('$resp_body')" ;;
+  000) ;;
+  *) fail "f[] webshell rejection: unexpected status=$resp_status (body='$resp_body') -- neither the documented 500 nor a closed connection" ;;
+esac
+echo "ok: sp-upload-check rejects a <?= webshell inside an f[] array upload, confirmed via snuffleupagus's own rejection log line naming it (transport shape: status=$resp_status)"
 
 stored_zip_dir="/tmp/sp-plugin-$$"
 mkdir -p "$stored_zip_dir/hello-dolly"
