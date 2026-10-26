@@ -228,7 +228,7 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_TIMEZONE` | unset | `date.timezone` |
 | `PHP_ERROR_REPORTING` | `E_ALL & ~E_DEPRECATED` | `error_reporting` |
 | `PHP_DISPLAY_ERRORS` | `Off` | `display_errors`. Errors go to stderr regardless. |
-| `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec` (the variable's baked value). cli, ext-builder: the variable is unset; the same list is baked into `10-php.ini`. cli-builder: none | Names to disable in addition to the baked list. Never replaces it. |
+| `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec` (the variable's baked value). cli, ext-builder: the variable is unset; the same list is baked into `10-php.ini`. cli-builder: none | Names to disable in addition to the baked list and any `disable_functions` in a mounted ini. Never replaces either. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
 | `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 64-512 MB | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS` | `1` | `opcache.validate_timestamps`. Set `0` when deploys replace the whole tree. |
@@ -268,6 +268,15 @@ the baked default is refused with a message naming the variable to use.
 a real function. After loading extensions and rulesets, the entrypoint asks PHP (per FPM pool, or for
 the command about to run) whether each name is actually disabled, and refuses to start if not.
 `proc_open` is not on the baked list because Composer and `symfony/process` need it.
+
+The result is the union of the baked list, any `disable_functions` from an ini you mount into
+`conf.d` (or another scanned directory), and the variable. It is written to its own generated file,
+`zz-disable-functions-env.ini`, which sorts after the other files in a writable `conf.d`. Under
+`--read-only` the file lives in the private `/tmp` directory, which PHP scans last. A mounted ini
+that sorts after the generated file and sets `disable_functions` would replace the union, so the
+entrypoint refuses to start; rename that file to sort earlier. A mounted value with characters other
+than lowercase letters, digits, underscore, comma and space is refused too, and so is one that
+disables `ini_get` itself.
 
 `docker exec <container> php ...` does not see the env-driven ini. Use
 `docker exec <container> docker-php-entrypoint php ...` to apply it.
@@ -384,8 +393,8 @@ What each setting needs to know:
   steps in `cli-builder` without one. Snuffleupagus hooks the executor, so PHP turns the JIT off
   while it is loaded and logs a startup warning. `PHP_OPCACHE_JIT=disable` says so up front and
   removes the warning; `off` does not, because it keeps the JIT buffer.
-- **`PHP_DISABLE_FUNCTIONS`.** Adds names to the baked list, for example `proc_open` when the
-  application never starts processes. Laravel queues, Symfony Process and Composer need `proc_open`.
+- **`PHP_DISABLE_FUNCTIONS`.** Adds names to the baked list and any `disable_functions` in a mounted
+  ini, for example `proc_open` when the application never starts processes. Laravel queues, Symfony Process and Composer need `proc_open`.
   The entrypoint refuses to start if a listed name does not end up disabled.
 - **Limits.** `pids_limit` bounds runaway forks; the memory limit bounds the container and drives FPM
   and opcache autotuning (512 MB is assumed without one).

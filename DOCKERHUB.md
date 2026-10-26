@@ -164,7 +164,7 @@ variable that is set but empty, or contains a newline, stops the container with 
 | `PHP_TIMEZONE` | unset | `date.timezone` |
 | `PHP_ERROR_REPORTING` | `E_ALL & ~E_DEPRECATED` | `error_reporting` |
 | `PHP_DISPLAY_ERRORS` | `Off` | `display_errors`. Errors go to stderr regardless. |
-| `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec`. cli, ext-builder: unset; the same list is baked into `10-php.ini`. cli-builder: none | Adds to the baked list, never replaces it. `proc_open` stays enabled for Composer and `symfony/process`. |
+| `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec`. cli, ext-builder: unset; the same list is baked into `10-php.ini`. cli-builder: none | Adds to the baked and mounted-ini lists, never replaces them. `proc_open` stays enabled for Composer. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
 | `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, 64-512 MB | `opcache.memory_consumption` |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS`, `PHP_OPCACHE_REVALIDATE_FREQ` | `1`, `2` | Set validation to `0` when deploys replace the whole tree. |
@@ -280,9 +280,9 @@ What each setting needs to know:
   steps in `cli-builder` without one. Snuffleupagus hooks the executor, so PHP turns the JIT off
   while it is loaded and logs a startup warning. `PHP_OPCACHE_JIT=disable` says so up front and
   removes the warning; `off` does not, because it keeps the JIT buffer.
-- **`PHP_DISABLE_FUNCTIONS`.** Adds names to the baked list, for example `proc_open` when the
-  application never starts processes. Laravel queues, Symfony Process and Composer need `proc_open`.
-  The entrypoint refuses to start if a listed name does not end up disabled.
+- **`PHP_DISABLE_FUNCTIONS`.** Adds names to the baked list and a mounted ini's, for example
+  `proc_open` when the application never starts processes. Laravel queues, Symfony Process and
+  Composer need `proc_open`. It refuses to start if a name does not end up disabled.
 - **Limits.** `pids_limit` bounds runaway forks; the memory limit bounds the container and drives FPM
   and opcache autotuning (512 MB is assumed without one).
 - **Network.** `fpm` speaks FastCGI on 9000 and should only be reachable by the web server. Never

@@ -52,8 +52,8 @@ done
 # zend_disable_functions splits on literal space and comma only and matches tokens
 # case-sensitively against a lowercase function table. Anything else (a tab,
 # 'EXEC') leaves the function callable silently, so such tokens are refused up
-# front, before 99-env.ini, which carries the union of this value and the baked
-# default (see disable_functions_effective() and conf/www.conf).
+# front, before the generated disable_functions ini, which carries the union of this
+# value and the configured list (see disable_functions_effective() and conf/www.conf).
 disable_functions_split() {
   # Mirrors PHP's split: runs of spaces and commas collapse to one separator;
   # other whitespace stays in its token and fails the charset check below.
@@ -346,22 +346,37 @@ if [ "$CONF_WRITABLE" = 1 ]; then
   } > "${CONF_DIR}/90-opcache-env.ini"
 fi
 
-# PHP_DISABLE_FUNCTIONS adds to the baked disable_functions list; it never replaces
-# it. The baked half is read straight from the image's own baked ini with
-# `php -n -c`, bypassing conf.d: a live `ini_get` would also resolve a persistent
-# conf.d's 99-env.ini from the previous start, so the list could only ever grow,
-# and requesting ini_get itself would starve the probe and drop the real baked list.
-# ini_get is never on the baked list, on any flavor.
+# PHP_DISABLE_FUNCTIONS adds to the disable_functions list the image's ini files
+# already resolve to; it never replaces it. The base is the union of two reads:
+#   * the baked list, straight from the image's own 10-php.ini with `php -n -c`, so a
+#     mounted ini that replaces disable_functions can never drop the baked hardening;
+#   * the resolved list, from a plain `php` under the exported PHP_INI_SCAN_DIR, so
+#     whatever an operator mounted into conf.d (or another scan dir) is kept too.
+# The union with the request is written to its own generated file, named to sort after
+# every other ini in a writable conf.d (PHP lets the last file win). With an unwritable
+# conf.d that file lives in the private /tmp dir, which is always scanned last.
+# Generated files from a previous start are removed first: a persistent conf.d would
+# otherwise feed the last start's union back in, so the list could only ever grow, and
+# requesting ini_get itself would starve the resolved probe on the next start.
+# A later-sorting ini of the operator's can still override the file; the "in force"
+# section below checks the whole union and refuses to start when that happens.
 #
 # FPM needs nothing more: php-fpm unions a pool's php_admin_value cumulatively on
 # top of the main-ini value, so www.conf's ${PHP_DISABLE_FUNCTIONS} on top of a
-# 99-env.ini that already carries baked + requested is idempotent. With an
-# unwritable conf.d, 10-php.ini's baked value is the only thing to union with (see
+# generated file that already carries the union is idempotent. With an unwritable
+# conf.d the pool value is unioned with whatever the main ini resolves to (see
 # conf/www.conf).
 #
 # The caller checks for a fixed sentinel, never the probe itself (same convention
 # as disable_functions_still_live/_unresolved below): a probe that cannot complete
-# is a refusal to start, never a silent empty baked list.
+# is a refusal to start, never a silent empty base list. The resolved probe also
+# refuses when ini_get is gone: the operator's own ini disabled it, and PHP would
+# answer NULL, which reads as an empty list.
+PDF_GENERATED_INI="zz-disable-functions-env.ini"
+if [ "$CONF_WRITABLE" = 1 ]; then
+  rm -f "${CONF_DIR}/${PDF_GENERATED_INI}" "${CONF_DIR}/99-env.ini"
+fi
+
 disable_functions_baked_probe() {
   local baked_ini="${BAKED_INI_DEFAULT}/10-php.ini"
   if [ ! -f "$baked_ini" ]; then
@@ -370,38 +385,62 @@ disable_functions_baked_probe() {
   php -n -c "$baked_ini" -r 'echo ini_get("disable_functions"), "__pdf_baked_ok__";' 2>/dev/null || true
 }
 
+disable_functions_resolved_probe() {
+  php -r 'if (!function_exists("ini_get")) { exit(3); } echo ini_get("disable_functions"), "__pdf_resolved_ok__";' 2>/dev/null || true
+}
+
 disable_functions_effective() {
   local line result=""
   # disable_functions_split output has no trailing newline on its last token, so
-  # concatenating two outputs would glue the last baked token onto the first
+  # concatenating two outputs would glue the last base token onto the first
   # requested one ("pcntl_execget_current_user"). The explicit printf '\n'
   # separates them; sed drops it and any empty line before the dedup.
   while IFS= read -r line; do
     result="${result:+${result},}${line}"
-  done < <({ disable_functions_split "$PDF_BAKED"; printf '\n'; disable_functions_split "$1"; } | sed '/^$/d' | awk '!seen[$0]++')
+  done < <({ disable_functions_split "$PDF_BASE"; printf '\n'; disable_functions_split "$1"; } | sed '/^$/d' | awk '!seen[$0]++')
   printf '%s' "$result"
+}
+
+# Each raw base value feeds the per-pool probe's `-d disable_functions=` below, so it
+# needs the same charset guard as a pool's own value, checked before the union
+# (which re-joins tokens and would hide a stray separator). It never trips on this
+# image's baked lowercase names; an operator ini with other characters fails closed.
+disable_functions_base_charset_ok() {
+  case "$1" in
+    *[!a-z0-9_,\ ]*) return 1 ;;
+  esac
+  return 0
 }
 
 if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
   _pdf_baked_raw="$(disable_functions_baked_probe)"
   case "$_pdf_baked_raw" in
     *__pdf_baked_ok__)
-      PDF_BAKED="${_pdf_baked_raw%__pdf_baked_ok__}"
+      _pdf_baked="${_pdf_baked_raw%__pdf_baked_ok__}"
       ;;
     *)
       echo "docker-php-entrypoint: refusing to start: could not read the baked disable_functions list from ${BAKED_INI_DEFAULT}/10-php.ini (the php -n -c probe did not complete) -- cannot safely compute PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS}'s union with it" >&2
       exit 1
       ;;
   esac
-  # The baked value feeds the per-pool probe's `-d disable_functions=` below, so it
-  # needs the same charset guard as a pool's own value. It never trips on this
-  # image's baked lowercase names; it fails closed if that stops being true.
-  case "$PDF_BAKED" in
-    *[!a-z0-9_,\ ]*)
-      echo "docker-php-entrypoint: refusing to start: the baked disable_functions value in ${BAKED_INI_DEFAULT}/10-php.ini ('${PDF_BAKED}') contains a character this script cannot safely re-parse through \`-d\` (only lowercase letters, digits, underscore, comma and space are trusted here)" >&2
+  _pdf_resolved_raw="$(disable_functions_resolved_probe)"
+  case "$_pdf_resolved_raw" in
+    *__pdf_resolved_ok__)
+      _pdf_resolved="${_pdf_resolved_raw%__pdf_resolved_ok__}"
+      ;;
+    *)
+      echo "docker-php-entrypoint: refusing to start: could not read the disable_functions list the image's ini files resolve to (the php probe did not complete, or an ini disables ini_get itself) -- cannot safely compute PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS}'s union with it" >&2
       exit 1
       ;;
   esac
+  for _pdf_val in "$_pdf_baked" "$_pdf_resolved"; do
+    if ! disable_functions_base_charset_ok "$_pdf_val"; then
+      echo "docker-php-entrypoint: refusing to start: the configured disable_functions value ('${_pdf_val}', from the baked ini or an ini the image scans) contains a character this script cannot safely re-parse through \`-d\` (only lowercase letters, digits, underscore, comma and space are trusted here)" >&2
+      exit 1
+    fi
+  done
+  PDF_BASE="$_pdf_baked"
+  PDF_BASE="$(disable_functions_effective "$_pdf_resolved")"
   PDF_EFFECTIVE="$(disable_functions_effective "$PHP_DISABLE_FUNCTIONS")"
 fi
 
@@ -421,8 +460,13 @@ if [ "$CONF_WRITABLE" = 1 ]; then
     emit date.timezone         "${PHP_TIMEZONE:-}"
     emit error_reporting       "${PHP_ERROR_REPORTING:-}"
     emit display_errors        "${PHP_DISPLAY_ERRORS:-}"
-    emit disable_functions     "${PDF_EFFECTIVE:-}"
   } > "${CONF_DIR}/99-env.ini"
+  if [ -n "${PDF_EFFECTIVE:-}" ]; then
+    {
+      echo "; generated by docker-php-entrypoint"
+      echo "disable_functions=${PDF_EFFECTIVE}"
+    } > "${CONF_DIR}/${PDF_GENERATED_INI}"
+  fi
 fi
 
 # disable_functions is verified after the extensions section below, once
@@ -731,12 +775,18 @@ if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
     # function_exists(). An operator-emptied PHP_INI_SCAN_DIR needs no special case:
     # nothing baked is scanned (the image has no main php.ini), so every requested
     # name is correctly reported callable.
-    pdf_probe_names=("${pdf_requested_arr[@]}")
-    missing="$(disable_functions_missing_for "$(disable_functions_effective '')")"
+    # The whole union is checked, not just the requested names: an ini of the
+    # operator's that sorts after the generated file would otherwise replace the
+    # baked and mounted names without touching the requested ones.
+    # Requested names first, so a refusal leads with what the operator asked for.
+    mapfile -t pdf_probe_names < <({ printf '%s\n' "${pdf_requested_arr[@]}"; disable_functions_split "$PDF_BASE"; printf '\n'; } | sed '/^$/d' | awk '!seen[$0]++')
+    missing="$(disable_functions_missing_for "$PDF_BASE")"
     if [ -n "$missing" ]; then
       scan_dir_note=""
       if [ "${PHP_INI_SCAN_DIR+set}" = set ] && [ -z "$PHP_INI_SCAN_DIR" ]; then
         scan_dir_note=" PHP_INI_SCAN_DIR is also set to the empty string, which disables ini scanning entirely (including this image's own baked hardening ini) -- unset it, or leave PHP_DISABLE_FUNCTIONS unset too."
+      else
+        scan_dir_note=" A later-sorting ini (or a PHP_INI_SCAN_DIR directory scanned after this image's) that sets disable_functions overrides the generated ${PDF_GENERATED_INI}; rename it to sort before that file, or drop its disable_functions line."
       fi
       echo "docker-php-entrypoint: refusing to start: PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS} requests functions that will not actually be disabled for the command about to run (missing: $(disable_functions_join "$missing")).${scan_dir_note}" >&2
       exit 1
