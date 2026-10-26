@@ -225,11 +225,11 @@ echo "=== phase 3: ext-builder end to end"
 declare -A EXT_STATUS
 ext_failed=0
 for php in $(ext_versions_selected); do
-  e="php-${php//./_}"
   blocked=""
   for flavor in ext-builder fpm cli; do
-    case "${BUILD_STATUS[$e-$flavor]:-FAIL}${SMOKE_STATUS[$e-$flavor]:-FAIL}" in
-      *FAIL*) blocked="$blocked $e-$flavor" ;;
+    t="$(matrix_ext_target "$php" "$flavor")"
+    case "${BUILD_STATUS[$t]:-FAIL}${SMOKE_STATUS[$t]:-FAIL}" in
+      *FAIL*) blocked="$blocked $t" ;;
     esac
   done
   if [ -n "$blocked" ]; then

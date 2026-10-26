@@ -2,11 +2,11 @@
 # End to end for the ext-builder flavor, across the three images of one PHP
 # version:
 #
-#   ./tests/test-ext-builder.sh <php-version>        e.g. 8.5
+#   ./tests/test-ext-builder.sh <php-version>[-v3]        e.g. 8.5 or 8.4-v3
 #
-# Needs lotuswebagency/php:<version>-{ext-builder,fpm,cli} in the local daemon
-# (PHP_IMAGE overrides the repository part). What it proves that smoke.sh,
-# which sees one image at a time, cannot:
+# Needs lotuswebagency/php:<version>-{ext-builder,fpm,cli}[-v3] in the local
+# daemon (PHP_IMAGE overrides the repository part). What it proves that
+# smoke.sh, which sees one image at a time, cannot:
 #
 #   - php-config in ext-builder reports the extension_dir the fpm and cli
 #     runtimes actually use (the dir name carries the Zend module API number,
@@ -14,21 +14,28 @@
 #   - the tests/fixtures/ext-hello extension, compiled with phpize/configure/
 #     make in ext-builder and COPYed into fpm and cli by a multi-stage build --
 #     the same shape the README documents -- loads there under PHP_EXT_ENABLE=
-#     hello and answers a call, as the images' own uid 33.
+#     hello and answers a call, as the images' own uid 33;
+#   - the default compile flags follow the microarchitecture: the baseline
+#     ext-builder sets none (Wolfi's compiler defaults), the -v3 one sets the
+#     -march/-mtune php/cflags.sh passes for v3, and the fixture's compile
+#     lines carry them, so the .so matches the -v3 runtime it is COPYed into.
 #
 # The two derived images are tagged lotuswebagency/php-ext-hello-test:* and
 # removed again on exit.
 set -euo pipefail
-VERSION="${1:?usage: test-ext-builder.sh <php-version>}"
+ARG="${1:?usage: test-ext-builder.sh <php-version>[-v3]}"
+VERSION="${ARG%-v3}"
+SUFFIX=""
+[ "$ARG" = "$VERSION" ] || SUFFIX="-v3"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 # shellcheck source=tests/docker-lib.sh
 . "$HERE/docker-lib.sh"
 PHP_IMAGE="${PHP_IMAGE:-lotuswebagency/php}"
 FIXTURE="$HERE/fixtures/ext-hello"
-EXT="$PHP_IMAGE:$VERSION-ext-builder"
-FPM="$PHP_IMAGE:$VERSION-fpm"
-CLI="$PHP_IMAGE:$VERSION-cli"
+EXT="$PHP_IMAGE:$VERSION-ext-builder$SUFFIX"
+FPM="$PHP_IMAGE:$VERSION-fpm$SUFFIX"
+CLI="$PHP_IMAGE:$VERSION-cli$SUFFIX"
 DERIVED_REPO="lotuswebagency/php-ext-hello-test"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -81,13 +88,53 @@ case "$pc_dir" in
 esac
 echo "ok: Zend module API $api_ext on all three"
 
+# ------------------------------------------------- default flags per microarch
+# Expected -march/-mtune come from php/cflags.sh run on this host, whose
+# architecture is the one of the images in the local daemon.
+env_flag() { run "$EXT" sh -c "printf %s \"\${$1-}\""; }
+cflags_env="$(env_flag CFLAGS)"
+cxxflags_env="$(env_flag CXXFLAGS)"
+# The compile lines of the fixture, built the way the README builds an extension.
+build_log="$(run -v "$FIXTURE":/src:ro "$EXT" timeout 600 sh -c '/src/build.sh /out 2>&1')" \
+  || fail "ext-hello did not build in $EXT: $build_log"
+if [ -n "$SUFFIX" ]; then
+  isa="$(bash "$ROOT/php/cflags.sh" v3 | grep -oE -- '-m(arch|tune)=[^ ]+' | paste -sd' ' -)"
+  [ -n "$isa" ] || fail "php/cflags.sh v3 printed no -march/-mtune"
+  for pair in "CFLAGS:$cflags_env" "CXXFLAGS:$cxxflags_env"; do
+    case " ${pair#*:} " in
+      *" $isa "*) ;;
+      *) fail "$EXT: ${pair%%:*} is '${pair#*:}', expected it to carry '$isa' (php/cflags.sh v3)" ;;
+    esac
+  done
+  case "$build_log" in
+    *"$isa"*) ;;
+    *) fail "$EXT: the ext-hello compile lines do not carry '$isa':
+$build_log" ;;
+  esac
+  case "$(run "$EXT" uname -m)" in
+    x86_64)  macro=__AVX2__ ;;
+    aarch64) macro=__ARM_FEATURE_SVE2 ;;
+    *) fail "$EXT: unsupported machine" ;;
+  esac
+  run "$EXT" sh -c "gcc \$CFLAGS -dM -E -x c /dev/null | grep -q '^#define $macro '" \
+    || fail "$EXT: gcc with the default CFLAGS does not define $macro -- the v3 instruction set is not on"
+  echo "ok: the -v3 ext-builder compiles with '$isa' by default ($macro defined, ext-hello compile lines carry it)"
+else
+  [ -z "$cflags_env$cxxflags_env" ] \
+    || fail "$EXT: the baseline ext-builder sets CFLAGS='$cflags_env' CXXFLAGS='$cxxflags_env', expected neither"
+  case "$build_log" in
+    *"-march=x86-64-v3"* | *"-march=armv9-a"*) fail "$EXT: the baseline ext-hello compile lines carry a v3 -march" ;;
+  esac
+  echo "ok: the baseline ext-builder sets no default CFLAGS/CXXFLAGS and compiles ext-hello without a v3 -march"
+fi
+
 # ------------------------------------------------- multi-stage build of the .so
 hello_dir=""
 hello_cid=""
 cleanup() {
   [ -z "$hello_cid" ] || docker rm -f "$hello_cid" >/dev/null 2>&1 || true
   [ -z "$hello_dir" ] || rm -rf "$hello_dir"
-  docker rmi -f "$DERIVED_REPO:$VERSION-fpm" "$DERIVED_REPO:$VERSION-cli" >/dev/null 2>&1 || true
+  docker rmi -f "$DERIVED_REPO:$VERSION-fpm$SUFFIX" "$DERIVED_REPO:$VERSION-cli$SUFFIX" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -99,9 +146,9 @@ trap cleanup EXIT
 # the runner happens to reach.
 for flavor in fpm cli; do
   docker buildx build --builder default --network=none -q -f "$FIXTURE/Dockerfile" --target "$flavor" \
-    --build-arg "PHP_VERSION=$VERSION" --build-arg "PHP_IMAGE=$PHP_IMAGE" \
-    -t "$DERIVED_REPO:$VERSION-$flavor" "$FIXTURE" >/dev/null \
-    || fail "multi-stage build of the ext-hello fixture failed for $flavor (re-run without -q: docker buildx build --builder default --network=none -f $FIXTURE/Dockerfile --target $flavor --build-arg PHP_VERSION=$VERSION --build-arg PHP_IMAGE=$PHP_IMAGE $FIXTURE)"
+    --build-arg "PHP_VERSION=$VERSION" --build-arg "PHP_IMAGE=$PHP_IMAGE" --build-arg "TAG_SUFFIX=$SUFFIX" \
+    -t "$DERIVED_REPO:$VERSION-$flavor$SUFFIX" "$FIXTURE" >/dev/null \
+    || fail "multi-stage build of the ext-hello fixture failed for $flavor (re-run without -q: docker buildx build --builder default --network=none -f $FIXTURE/Dockerfile --target $flavor --build-arg PHP_VERSION=$VERSION --build-arg PHP_IMAGE=$PHP_IMAGE --build-arg TAG_SUFFIX=$SUFFIX $FIXTURE)"
 done
 echo "ok: ext-hello compiled in ext-builder and COPYed into fpm and cli of php $VERSION"
 
@@ -112,17 +159,17 @@ echo "ok: ext-hello compiled in ext-builder and COPYed into fpm and cli of php $
 # to produce it. Needs readelf and objdump (or llvm-objdump) on the host, as
 # smoke.sh does.
 hello_dir="$(mktemp -d)"
-hello_cid="$(docker create --pull never "$DERIVED_REPO:$VERSION-fpm")"
+hello_cid="$(docker create --pull never "$DERIVED_REPO:$VERSION-fpm$SUFFIX")"
 docker cp "$hello_cid:$pc_dir/hello.so" "$hello_dir/hello.so" >/dev/null \
   || fail "could not copy $pc_dir/hello.so out of the derived fpm image"
-bash "$HERE/assert-elf-hardening.sh" --code "ext-builder-hello-$VERSION" "$hello_dir/hello.so" \
+bash "$HERE/assert-elf-hardening.sh" --code "ext-builder-hello-$VERSION$SUFFIX" "$hello_dir/hello.so" \
   || fail "the hello.so built by ext-builder is not hardened like the shipped extensions"
 docker rm -f "$hello_cid" >/dev/null 2>&1 || true
 hello_cid=""
 
 # ------------------------------------------------------ load and call, per flavor
 for flavor in fpm cli; do
-  img="$DERIVED_REPO:$VERSION-$flavor"
+  img="$DERIVED_REPO:$VERSION-$flavor$SUFFIX"
 
   run "$img" test -f "$pc_dir/hello.so" || fail "$flavor: hello.so is not in $pc_dir"
 
@@ -143,8 +190,8 @@ done
 
 # php-fpm is a separate SAPI binary reading the same scan dir; php -r above
 # only proves the CLI SAPI.
-mods="$(run -e PHP_EXT_ENABLE=hello "$DERIVED_REPO:$VERSION-fpm" timeout 20 php-fpm -m)"
+mods="$(run -e PHP_EXT_ENABLE=hello "$DERIVED_REPO:$VERSION-fpm$SUFFIX" timeout 20 php-fpm -m)"
 grep -qx hello <<<"$mods" || fail "php-fpm -m does not list hello: $mods"
 echo "ok: php-fpm -m lists hello"
 
-echo "EXT-BUILDER TEST PASSED (php $VERSION)"
+echo "EXT-BUILDER TEST PASSED (php $VERSION${SUFFIX:+ }$SUFFIX)"

@@ -3,7 +3,6 @@
   "base": "cgr.dev/chainguard/wolfi-base:latest@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7",
   "default_version": "8.5",
   "flavors": ["fpm", "cli", "cli-builder", "ext-builder"],
-  "baseline_only_flavors": ["ext-builder"],
   "platforms": ["linux/amd64", "linux/arm64"],
   "uarch": {
     "baseline": {"amd64": "x86-64-v2", "arm64": "armv8-a"},
