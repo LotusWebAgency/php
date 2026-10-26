@@ -367,9 +367,8 @@ and ThinLTO), both from Wolfi packages.
 Snuffleupagus is compiled in but off. `PHP_SNUFFLEUPAGUS=<ruleset>` turns it on. For your own
 rules, mount `/usr/local/etc/php/snuffleupagus/<name>.rules` read-only and set `PHP_SNUFFLEUPAGUS=<name>`
 (lowercase, digits, `-`, `_`; never a path). A custom file replaces the baked one; copy `default.rules`
-to start. Laravel's scheduler (`schedule:run`) works under every ruleset; Composer does not (use
-`cli-builder`). `sp.xxe_protection` is off: it does not hold across requests, and on PHP 7 it
-disables your own `libxml_disable_entity_loader(true)`.
+to start. Laravel's `schedule:run` works under every ruleset. `sp.xxe_protection` is
+off: it does not hold across requests, and on PHP 7 it disables your own `libxml_disable_entity_loader(true)`.
 
 ## Verifying images
 
