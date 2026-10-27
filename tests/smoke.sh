@@ -1138,15 +1138,17 @@ if [ -n "$icu_pinned" ]; then
 else
   # No vendored ICU: the image must be using the system one, and INTL_ICU_VERSION
   # must match the libicuuc it actually ships. Reading the soname rather than a
-  # package name keeps this working across the distro's libicuNN renames.
-  icu_soname=$(drun --rm "$IMAGE" sh -c 'ls /usr/lib/libicuuc.so.* /usr/lib64/libicuuc.so.* 2>/dev/null | head -1')
-  [ -n "$icu_soname" ] || { echo "FAIL: no libicuuc.so in the image, but PHP $EXPECT is supposed to link the system ICU"; exit 1; }
-  icu_major="${icu_soname##*.so.}"
-  case "$icu_reported" in
-    "$icu_major".*)
-      echo "ok: intl reports the system ICU $icu_reported (image ships libicuuc.so.$icu_major)" ;;
+  # package name keeps this working across the distro's libicuNN renames. More
+  # than one major can ship (cli-builder's nodejs may lag Wolfi's icu), so look
+  # for the one intl reports rather than whichever sorts first.
+  icu_major="${icu_reported%%.*}"
+  icu_sonames=$(drun --rm "$IMAGE" sh -c 'ls /usr/lib/libicuuc.so.* /usr/lib64/libicuuc.so.* 2>/dev/null' | sed -n 's|.*/libicuuc\.so\.\([0-9]*\)$|\1|p' | sort -u | tr '\n' ' ')
+  [ -n "$icu_sonames" ] || { echo "FAIL: no libicuuc.so in the image, but PHP $EXPECT is supposed to link the system ICU"; exit 1; }
+  case " $icu_sonames" in
+    *" $icu_major "*)
+      echo "ok: intl reports the system ICU $icu_reported (image ships libicuuc.so.{${icu_sonames% }})" ;;
     *)
-      echo "FAIL: intl reports ICU $icu_reported but the image ships libicuuc.so.$icu_major"; exit 1 ;;
+      echo "FAIL: intl reports ICU $icu_reported but the image ships only libicuuc.so.{${icu_sonames% }}"; exit 1 ;;
   esac
 fi
 
