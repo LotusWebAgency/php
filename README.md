@@ -605,13 +605,13 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
 
   | Tier floor | Serves | PrestaShop | Laravel skeleton | Symfony | WordPress | Drupal |
   |---|---|---|---|---|---|---|
-  | 8.5 | 8.5 | 9.2.0 | 12.12.2 | 7 | 7.1.3 | 11.4.11 |
-  | 8.4 | 8.4 | 8.2.8 | 12.12.2 | 7 | 7.1.3 | 11.4.11 |
-  | 8.2 | 8.2, 8.3 | 8.2.8 | 12.12.2 | 7 | 7.1.3 | none |
-  | 8.1 | 8.1 | 8.2.8 | 10.3.3 | 6.4 | 7.1.3 | none |
-  | 7.2 | 7.2-8.0 | 8.2.8 | 6.20.1 | 5.4 | 6.9.10 | none |
-  | 7.1 | 7.1 | 1.7.8.11 | 5.8.35 | 4.4 | 6.5.13 | none |
-  | 7.0 | 7.0 | 1.6.1.24 | 5.5.28 | 3.4 | 6.5.13 | none |
+  | 8.5 | 8.5 | 9.2.0 | 12.12.2 | 7 | 7.1.4 | 11.4.11 |
+  | 8.4 | 8.4 | 8.2.8 | 12.12.2 | 7 | 7.1.4 | 11.4.11 |
+  | 8.2 | 8.2, 8.3 | 8.2.8 | 12.12.2 | 7 | 7.1.4 | none |
+  | 8.1 | 8.1 | 8.2.8 | 10.3.3 | 6.4 | 7.1.4 | none |
+  | 7.2 | 7.2-8.0 | 8.2.8 | 6.20.1 | 5.4 | 6.9.11 | none |
+  | 7.1 | 7.1 | 1.7.8.11 | 5.8.35 | 4.4 | 6.5.14 | none |
+  | 7.0 | 7.0 | 1.6.1.24 | 5.5.28 | 3.4 | 6.5.14 | none |
 
 - **Pinned sources.** Every fetched tarball is verified by sha256 (`deps/fetch-verified.sh`). PHP
   releases are also GPG-verified against php.net's release keys (`php/release-keys.asc`); PECL
