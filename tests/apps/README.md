@@ -122,7 +122,7 @@ image as built. `tests/test-snuffleupagus.sh` takes `SP_RULES_OVERRIDE` for
 the same thing.
 
 **WordPress, its plugins and its object cache.** Four releases, each on the
-PHP versions `sets` lists: 4.9.34, 5.9.19, 6.9.10 and 7.1.3. Every one is
+PHP versions `sets` lists: 4.9.35, 5.9.20, 6.9.11 and 7.1.4. Every one is
 installed with WooCommerce, Akismet, Contact Form 7, Yoast SEO, Classic Editor,
 Wordfence, WPForms Lite and All-in-One WP Migration, plus Redis Object Cache with
 its `object-cache.php` drop-in (phpredis at host `redis`, igbinary). Each plugin
