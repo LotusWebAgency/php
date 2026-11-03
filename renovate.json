@@ -59,6 +59,13 @@
   ],
   "packageRules": [
     {
+      "description": "Image tags with a variant suffix (httpd's -alpine) keep it: loose versioning reads 2.4.69-alpine to 2.4.69 as an update and switches the image to the Debian variant",
+      "matchPackageNames": [
+        "httpd"
+      ],
+      "versioning": "docker"
+    },
+    {
       "description": "Auto-merge base image digest/patch refreshes once CI is green",
       "matchManagers": [
         "dockerfile"
