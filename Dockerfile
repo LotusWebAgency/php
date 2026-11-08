@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 # One Dockerfile for every published tag; docker-bake.hcl feeds it the matrix.
-ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:fd50bd0cdeb808cf4f45c9c9189e0cc7f7fcc27195d69abd6622c80527e7e021
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:24f549a7fcace88e69b9557941168c74645688ecc4acf7fb6d734a6b74e9019d
 ARG PHP_ERA=modern
 # Declared before any FROM so `FROM toolchain-select-${COMPILER}` can resolve it.
 # The toolchain-base stage redeclares it for use inside the stage.
@@ -795,12 +795,11 @@ CMD ["php", "-a"]
 # so the apk-managed Node (nodejs-26, /usr/bin/node) carries no npm of its own and
 # the pinned npm is the only one outside semantic-release's tree.
 #
-# The pin is npm 12.2.1, the newest release and the first 12.x whose bundled
+# The pin is npm 12.2.2, the newest release and one whose bundled
 # brace-expansion, undici, ip-address, http-cache-semantics and
-# postcss-selector-parser carry their fixes (12.2.0, still npm's `latest` tag, does
-# not). Wolfi's npm package lags it. The apk npm is only the bootstrap that installs
-# it and never ships. semantic-release is not run
-# here (it refuses to start without git); tests/smoke.sh runs
+# postcss-selector-parser carry their fixes (12.2.0 does not). Wolfi's npm package
+# lags it. The apk npm is only the bootstrap that installs it and never ships.
+# semantic-release is not run here (it refuses to start without git); tests/smoke.sh runs
 # `semantic-release --version` in the finished image. The readme/changelog markdown
 # in the packages is 2.5MB nothing reads.
 FROM ${BASE_IMAGE} AS node-tools
@@ -812,8 +811,8 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk upgrade --cache-dir /var/cache/apk -U; \
     apk add --cache-dir /var/cache/apk nodejs-26 npm; \
     node -v; \
-    npm install -g --prefix /usr/local npm@12.2.1; \
-    [ "$(/usr/local/bin/npm -v)" = "12.2.1" ]; \
+    npm install -g --prefix /usr/local npm@12.2.2; \
+    [ "$(/usr/local/bin/npm -v)" = "12.2.2" ]; \
     /usr/local/bin/npm install -g --prefix /usr/local semantic-release; \
     /usr/local/bin/npm cache clean --force; \
     test -x /usr/local/bin/semantic-release; \
