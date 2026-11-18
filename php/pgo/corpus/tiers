@@ -19,22 +19,22 @@
 #
 # Per tier:
 #
-#   8.5  PrestaShop 9.2.0 trains this tier alone. Laravel 12, Symfony 7 and
+#   8.5  PrestaShop 9.2.1 trains this tier alone. Laravel 12, Symfony 7 and
 #        WordPress are the 8.2 tier's pins (same releases, same locks); only the
 #        root php constraint and config.platform.php in their composer.json move
 #        to the floor (^8.5 / 8.5.12). Drupal 11.4.11 and drush 13 resolve against
 #        the same platform.
-#   8.4  PrestaShop 8.2.8 and the same pins for the rest, plus Drupal 11.4.11
+#   8.4  PrestaShop 8.2.9 and the same pins for the rest, plus Drupal 11.4.11
 #        resolved against 8.4.27. The 8.4/8.5 split is not a framework limit; the
 #        composer.json floor constraint keeps the corpus from also running one
 #        version down, which tests/test-corpus-tiers.sh's below-floor control
 #        relies on.
 #   8.2  Laravel 12 (php ^8.2), Symfony 7 (php >=8.2), WordPress 7.1 and
-#        PrestaShop 8.2.8 (see 8.1). Serves 8.2 and 8.3. Laravel 13 needs 8.3, so
+#        PrestaShop 8.2.9 (see 8.1). Serves 8.2 and 8.3. Laravel 13 needs 8.3, so
 #        8.2 is where the Laravel 12 line stops.
 #   8.1  Laravel 10 (php ^8.1) and Symfony 6.4 (php >=8.1) are the newest that
 #        install on 8.1; Laravel 11 and Symfony 7 both require 8.2. WordPress 7.1
-#        still applies (it wants 7.4). PrestaShop 8.2.8 trains this tier and every
+#        still applies (it wants 7.4). PrestaShop 8.2.9 trains this tier and every
 #        one up to 8.4 (7.2, 8.1, 8.2, 8.4): the devdocs say 8.2 supports php up to
 #        8.1, but PS 8.2 has run on PHP 8.4 in production for a long time, so the
 #        pins deliberately go beyond the docs. (The installer's numeric cap,

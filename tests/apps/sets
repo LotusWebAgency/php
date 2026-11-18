@@ -45,7 +45,7 @@ wordpress    5.9    7.0,8.1    -                     mariadb
 wordpress    6.9    7.2,8.5    hardened              mariadb
 wordpress    7.1    7.4-8.5    builder,v3,hardened   mariadb
 # PrestaShop. The PHP lists follow what was measured to work, not each release's
-# documented ceiling (PrestaShop's own devdocs stop 8.2 at 8.1): 8.2.8 is tested
+# documented ceiling (PrestaShop's own devdocs stop 8.2 at 8.1): 8.2.9 is tested
 # up to 8.4 with its cache:warmup allowed to fail there (tests/apps/known-failures: its Twig 3.4.3
 # compiles the closure-based format_date function into invalid PHP under 8.4's
 # closure names); 1.7.8.11 stops at 7.3 because its webservice error handler

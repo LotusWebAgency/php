@@ -236,7 +236,7 @@ APPTEST_FIXTURE_REPO=ghcr.io/lotuswebagency/php/apptest ./tests/apps/run.sh lotu
 
 PrestaShop 1.6 to 8.2 are the official GitHub release zips, pinned by sha256
 (`prestashop-zip` rows; the release asset is a zip in a zip, which
-`prestashop/fixture/unpack.php` opens, restoring the unix modes). 9.2.0 has no
+`prestashop/fixture/unpack.php` opens, restoring the unix modes). 9.2.1 has no
 zip anywhere, so its tree is unpacked out of the vendor's Docker image, pinned
 by digest: that pin is a multi-arch index, so `host-prep.sh` asks for
 `linux/amd64` explicitly (nothing in it executes the image, it is only

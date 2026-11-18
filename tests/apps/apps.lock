@@ -15,7 +15,7 @@
 composer-lts      -     2.2.32      241a3d13b7c6d35d970b1f69a000298b66943541302148a438a932f5dd44a9fc  https://getcomposer.org/download/2.2.32/composer.phar
 composer          -     2.11.2      dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028  https://getcomposer.org/download/2.11.2/composer.phar
 #
-# PrestaShop: two sources, by release. 9.2.0 has no zip anywhere, so its tree comes
+# PrestaShop: two sources, by release. 9.2.1 has no zip anywhere, so its tree comes
 # from the vendor's own Docker image (the sha256 column of a prestashop-image row is
 # the manifest digest; host-prep.sh streams /var/www/html out of it). 1.6 to 8.2 are
 # the official GitHub release zips (prestashop-zip rows, sha256 of the file fetched
@@ -24,21 +24,21 @@ composer          -     2.11.2      dd158c0afd41d15fac89e1b4e47b5d42911fe316c368
 # index.php and a readme; 1.6 is a flat zip with a prestashop/ directory) that build.sh
 # unpacks. 1.7 to 8.2 carry vendor/ and composer.lock (1.6 has neither); the tree is the
 # release, not an image built on top of it.
-prestashop-image     9.2  9.2.0  c76d7d2ca3475654112127245064e230f544506edefdbe40d753d5398bac2494  docker://prestashop/prestashop:9.2.0-8.1
+prestashop-image     9.2  9.2.1  281466ae3666736867107e91d93d8cf47658373ca160f632076d09da305012ca  docker://prestashop/prestashop:9.2.1-8.1
 # The installer downloads the en-US pack even for English, with no offline path.
 # Upstream re-exports these zips in place with every release, so the lang rows
 # are `latest`: fetch.sh checks the zip's shape (en-US/*.xlf only) instead of a
 # hash and logs the sha256 it got.
-prestashop-lang      9.2  9.2.0  latest  https://i18n.prestashop-project.org/translations/9.2.0/en-US/en-US.zip
+prestashop-lang      9.2  9.2.1  latest  https://i18n.prestashop-project.org/translations/9.2.1/en-US/en-US.zip
 # The release image ships composer.lock but no composer.json; the tag's own file
 # is what the lock's content-hash was made from and what suite/builder.sh needs.
 # (The release zips are the same: composer.lock, no composer.json.)
-prestashop-composer  9.2  9.2.0  860dd9121869142b40aa9b068f6e57b025b554bfd9f15902bafc669790e0cffb  https://raw.githubusercontent.com/PrestaShop/PrestaShop/9.2.0/composer.json
+prestashop-composer  9.2  9.2.1  8647a4ac746e67fabbf140a77c62236f22eca5cc699db9797928f009a545ec9d  https://raw.githubusercontent.com/PrestaShop/PrestaShop/9.2.1/composer.json
 # 8.2: the newest 8.2.x patch. PrestaShop's devdocs stop 8.2 at PHP 8.1; tests/apps/sets
 # runs it up to 8.4, cache:warmup excepted (tests/apps/known-failures has why).
-prestashop-zip       8.2  8.2.8  0d6931ed9ecb2636ae8024c5660bb72dc3c5f835738b79d3c1bda984e353598d  https://github.com/PrestaShop/PrestaShop/releases/download/8.2.8/prestashop_8.2.8.zip
-prestashop-lang      8.2  8.2.8  latest  https://i18n.prestashop-project.org/translations/8.2.8/en-US/en-US.zip
-prestashop-composer  8.2  8.2.8  aa188d86fa4301e13f478c4258ea9fed1a2e8d87ba27615d2b78e77defbe5434  https://raw.githubusercontent.com/PrestaShop/PrestaShop/8.2.8/composer.json
+prestashop-zip       8.2  8.2.9  fdf5c1134404369d765a9f8c611af63da0d176c2d316a12f7725a84bd6bedf0d  https://github.com/PrestaShop/PrestaShop/releases/download/8.2.9/prestashop_8.2.9.zip
+prestashop-lang      8.2  8.2.9  latest  https://i18n.prestashop-project.org/translations/8.2.9/en-US/en-US.zip
+prestashop-composer  8.2  8.2.9  2e5f23b75eff371abafe7cee24357476b888432482ba41f7293e10682cc7d313  https://raw.githubusercontent.com/PrestaShop/PrestaShop/8.2.9/composer.json
 # 8.0: 8.0.5, built on the set's php-min 7.4.
 prestashop-zip       8.0  8.0.5  7aad5569c3aa59400e937e4472a3a7b2464c2887e8e5f181f5aacceb24d57af1  https://github.com/PrestaShop/PrestaShop/releases/download/8.0.5/prestashop_8.0.5.zip
 prestashop-lang      8.0  8.0.5  latest  https://i18n.prestashop-project.org/translations/8.0.5/en-US/en-US.zip
