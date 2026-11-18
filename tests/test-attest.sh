@@ -61,10 +61,10 @@ export COSIGN REGCTL
 
 # Digest-pinned and pulled anonymously from mirrors, never from Docker Hub with
 # anyone's credentials. BUILDKIT_IMAGE is ci.yml's env when CI runs this.
-REGISTRY_IMAGE="mirror.gcr.io/library/registry:3.1.2@sha256:38907510915c3f1604c7e83d6ab602ab3020d092f73bdaed8696773693ff768c"
+REGISTRY_IMAGE="mirror.gcr.io/library/registry:3.1.2@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c"
 ZOT_IMAGE="ghcr.io/project-zot/zot-minimal:v2.1.23@sha256:59cb5740832970818903c5ce104425762664c7880835ee566506aad397cd3458"
-HTPASSWD_IMAGE="mirror.gcr.io/library/httpd:2.4.69-alpine@sha256:d72968666c0a6961b07036d85fc053bc3cf640583cb1ff8360e1617818f164dc"
-BUILDKIT_IMAGE="${BUILDKIT_IMAGE:-docker.io/moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe}"
+HTPASSWD_IMAGE="mirror.gcr.io/library/httpd:2.4.71-alpine@sha256:32bd0639bcc4917ef1fd9363a1d9dd2dd9c498565118b062a10d51e43a5c3a24"
+BUILDKIT_IMAGE="${BUILDKIT_IMAGE:-docker.io/moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb}"
 
 PORT="${ATTEST_TEST_PORT:-5077}"
 REPO="localhost:${PORT}/lotuswebagency/php/release"
