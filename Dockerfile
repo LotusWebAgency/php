@@ -795,7 +795,7 @@ CMD ["php", "-a"]
 # so the apk-managed Node (nodejs-26, /usr/bin/node) carries no npm of its own and
 # the pinned npm is the only one outside semantic-release's tree.
 #
-# The pin is npm 12.2.2, the newest release and one whose bundled
+# The pin is npm 12.2.3, the newest release and one whose bundled
 # brace-expansion, undici, ip-address, http-cache-semantics and
 # postcss-selector-parser carry their fixes (12.2.0 does not). Wolfi's npm package
 # lags it. The apk npm is only the bootstrap that installs it and never ships.
@@ -811,8 +811,8 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk upgrade --cache-dir /var/cache/apk -U; \
     apk add --cache-dir /var/cache/apk nodejs-26 npm; \
     node -v; \
-    npm install -g --prefix /usr/local npm@12.2.2; \
-    [ "$(/usr/local/bin/npm -v)" = "12.2.2" ]; \
+    npm install -g --prefix /usr/local npm@12.2.3; \
+    [ "$(/usr/local/bin/npm -v)" = "12.2.3" ]; \
     /usr/local/bin/npm install -g --prefix /usr/local semantic-release; \
     /usr/local/bin/npm cache clean --force; \
     test -x /usr/local/bin/semantic-release; \
