@@ -68,4 +68,4 @@ variable "BOOTSTRAP_TARGETS" {
   ]
 }
 
-variable "BASE_IMAGE" { default = "cgr.dev/chainguard/wolfi-base:latest@sha256:580c9ae79c0229cc381475fbfbed0d91fab5d6606e57cd78732f9836de109e90" }
+variable "BASE_IMAGE" { default = "cgr.dev/chainguard/wolfi-base:latest@sha256:71f52fd289650f1d021d60ba11235550b1b5ce124f3797bd254ca70c4cef39f9" }
