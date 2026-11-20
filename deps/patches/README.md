@@ -26,7 +26,7 @@ the release tarball others audit, and the only one that breaks silently. Prefer,
 2. a registry change (`php/ext.json`, `php/pecl.lock`);
 3. a patch here.
 
-Five of the eight distinct PHP patches are backports of fixes php-src made on a later branch. One is
+Six of the nine distinct PHP patches are backports of fixes php-src made on a later branch. One is
 Wolfi's carried OpenSSL 4 fix, the other two address the legacy OpenSSL probe and ARM64 interpreter
 inlining on clang 19.
 
@@ -41,9 +41,10 @@ inlining on clang 19.
 | `010-preserve-none-probe-clobbers` | 8.5 | The `preserve_none` run-probe in `Zend/Zend.m4` writes `x20` in its aarch64 inline asm but does not list it as a clobber, so the compiler may keep an input operand there. Clang 19 with ThinLTO and lld does, the probe fails with `arg2 mismatch`, `HAVE_PRESERVE_NONE` stays undefined, and arm64 silently gets the CALL VM instead of TAILCALL (`php/build.sh` fails the build on that). amd64 is unaffected; its hunk only adds `memory` and `cc`. | php-src commit `a1cb5a37c0` ("fix aarch64 gcc preserve_none detection"), applied verbatim. Remove it once an 8.5 release carries the commit; `patch --forward` fails the build if it is applied twice. |
 | `010-openssl-ssl-ctx-options-uint64` (`030-` on 8.5) | 8.1-8.5 | `php_openssl_setup_crypto()` keeps the SSL_CTX options in an `int`. `SSL_OP_ALL` includes bit 31, so the value is negative and `SSL_CTX_set_options()` (a `uint64_t` since OpenSSL 3.0) receives it sign-extended with bits 32-63 set. OpenSSL 4.0 assigns `SSL_OP_ECH_GREASE` to bit 37, so every TLS client stream sends an ECH GREASE extension, and the handshake aborts where X25519 is unavailable (the FIPS provider). 8.1-8.5 build against the system OpenSSL 4. | Wolfi's `openssl-ssl-ctx-options-uint64.patch` (its php-8.2 copy, and its php-8.5 copy for the 8.5 backport), regenerated against each release with exact offsets. Remove it from a version once a release of that version carries the fix. |
 | `020-openssl4-opaque-asn1` | 8.1 | OpenSSL 4 made `ASN1_STRING` (and its `ASN1_OCTET_STRING` / `ASN1_UTCTIME` aliases) opaque and stopped exporting `ERR_NUM_ERRORS`. 8.1's `ext/openssl` reads `->data` / `->length` directly and sizes its error queue with the macro, so it does not compile against the system OpenSSL 4. | php-src's 8.2 and later branches use the accessors; 8.1 is security-only and never got the change. |
+| `030-jit-blacklist-root-trace-over-limit` | 8.1 | With the tracing JIT, an invalidating side exit resets its root trace to the hot counter handler. Once `opcache.jit_max_root_traces` (1024) root traces exist, 8.1 skips that reset but still returns into the same trace, which takes the same exit again: the request spins at full CPU, taking the opcache lock on every pass, until a timeout kills it (WordPress 5.9's `load-styles.php`, in `get_stylesheet()`). A larger `opcache.memory_consumption` caches more scripts, so more code is traced and the limit is reached; with 64 MB a WordPress install fills the cache first and hides it. | php-src commit `350af549a0` (GH-14475, 8.2.21), applied verbatim: the root trace is blacklisted instead. 8.1 was security-only by then. |
 | `020-arm64-interpreter-noinline` | 8.5 | Clang 19 with PGO and ThinLTO can inline `execute_ex()` into `zend_do_link_class()`, whose dynamic stack allocation uses `x19` as its frame base. An opcode handler using `preserve_none` clobbers `x19`, but the inlined caller keeps using it, corrupting execution during interface autoloading. Prevent interpreter inlining on clang ARM64 in both the generated header and its template. PGO, ThinLTO and the TAILCALL VM remain enabled. | Local toolchain workaround. Remove after a compiler upgrade passes the autoload regression without it. |
 
-Patches per version: 7.0: 3, 7.1: 2, 7.2: 1, 7.3: 1, 7.4: 1, 8.0: 1, 8.1: 2, 8.2: 1, 8.3: 1, 8.4: 1,
+Patches per version: 7.0: 3, 7.1: 2, 7.2: 1, 7.3: 1, 7.4: 1, 8.0: 1, 8.1: 3, 8.2: 1, 8.3: 1, 8.4: 1,
 8.5: 3.
 
 ### Extension patches
@@ -96,6 +97,7 @@ Check with `sha256sum deps/patches/*/*.patch`.
 - **openssl uint64:** per version, once a release of that version carries the fix, or when it stops
   being built against OpenSSL 4.
 - **opaque ASN1 (8.1):** when 8.1 leaves the matrix. It is end-of-life and will not get the change.
+- **JIT root-trace limit (8.1):** when 8.1 leaves the matrix, for the same reason. 8.2 and later carry the fix.
 - **preserve-none:** see the table.
 - **ARM64 interpreter inlining:** after a compiler upgrade passes the autoload regression without
   the patch on both baseline and v3 builds with PGO and ThinLTO.
