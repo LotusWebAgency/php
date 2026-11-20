@@ -1099,7 +1099,7 @@ esac
 # command line, or ignored by the target. This measures the result.
 #
 # Everything in the image that this build produced is covered, not just `php`:
-# the FPM binary, the chmod shim, and every shared extension .so -- 18 of them
+# the FPM binary, the chmod shim, the healthcheck probe, and every shared extension .so -- 18 of them
 # on 8.5 -- because a shared module is loaded into the same address space and
 # an executable stack or a writable GOT in any one of them is the whole
 # process's problem.
@@ -1108,6 +1108,7 @@ trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -f "$tmp_php"; rm -rf "$ha
 hcid=$(docker create --pull never "$IMAGE")
 docker cp "$hcid:/usr/local/bin/php" "$hard_dir/php" >/dev/null
 docker cp "$hcid:/usr/local/lib/php-chmod-sanitize.so" "$hard_dir/php-chmod-sanitize.so" >/dev/null
+docker cp "$hcid:/usr/local/bin/php-fpm-healthcheck" "$hard_dir/php-fpm-healthcheck" >/dev/null
 mkdir -p "$hard_dir/ext"
 docker cp "$hcid:$extdir/." "$hard_dir/ext" >/dev/null
 # ImageMagick's libraries ship in every flavor (Dockerfile stages them via
@@ -1180,7 +1181,7 @@ assert_compiler_comment "php-$EXPECT" "$hard_dir/php"
 # shellcheck disable=SC2046  # the .so list is meant to word-split
 im_libs=$(find "$hard_dir/im" -maxdepth 1 -type f -name '*.so.*' 2>/dev/null | tr '\n' ' ')
 [ -n "$im_libs" ] || { echo "FAIL: no ImageMagick libraries extracted -- they ship in every flavor, so an empty set means the copy failed"; exit 1; }
-module_files=("$hard_dir/php-chmod-sanitize.so")
+module_files=("$hard_dir/php-chmod-sanitize.so" "$hard_dir/php-fpm-healthcheck")
 [ -f "$hard_dir/php-fpm" ] && module_files+=("$hard_dir/php-fpm")
 # shellcheck disable=SC2206  # both are deliberate globs/word-splits
 module_files+=("$hard_dir"/ext/*.so $im_libs)
@@ -1209,13 +1210,13 @@ for lib in $im_libs; do
     || { echo "FAIL: the /opt ELF walk missed $rel, which the library glob found"; exit 1; }
 done
 
-# Code-level hardening (--code) on every shipped ELF: the chmod shim, php-fpm,
+# Code-level hardening (--code) on every shipped ELF: the chmod shim, the healthcheck probe, php-fpm,
 # the shared extensions and everything under /opt (which includes the libraries
 # in im_libs). Each file is held to the canary, _FORTIFY_SOURCE and
 # the CET/branch-protection landing pads only where it can show them (the rule
 # is documented in assert-elf-hardening.sh). The php binary gets the stricter
 # whole-binary version above.
-hard_files=("$hard_dir/php-chmod-sanitize.so")
+hard_files=("$hard_dir/php-chmod-sanitize.so" "$hard_dir/php-fpm-healthcheck")
 [ -f "$hard_dir/php-fpm" ] && hard_files+=("$hard_dir/php-fpm")
 hard_files+=("$hard_dir"/ext/*.so "${opt_elf_files[@]}")
 bash "$HERE/assert-elf-hardening.sh" --code "modules-$EXPECT" "${hard_files[@]}" || exit 1

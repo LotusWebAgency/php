@@ -120,7 +120,7 @@ These caveats apply to the end-of-life tags. PHP 8.2 and later have none of them
 
 | Flavor | Contents |
 |---|---|
-| `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` (`php-fpm-healthcheck`) that needs no web server. |
+| `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` (`php-fpm-healthcheck`, a small native probe) that needs no web server. |
 | `cli` | `php -a` by default. Scripts, cron jobs, queue workers. |
 | `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, Node.js 26 with npm 12.2.3 and corepack, semantic-release and [Composer](https://getcomposer.org/) (installed with signature verification). No compiler. For build stages. |
 | `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize` / `php-config`. Runs as root, no Composer, no Node.js. Wolfi's openssf compiler wrappers stay on, so extensions built here get Wolfi's hardening flags. They also take Wolfi's default `-march`/`-mtune`, not the generic tuning the PHP build uses; `-v3` presets `CFLAGS` and `CXXFLAGS` with the `-v3` `-march`/`-mtune` instead. For build stages. |
@@ -147,8 +147,11 @@ a MySQL 5.7 built against OpenSSL 1.0.x (the official `mysql:5.7` image) offers 
 to it fails with a handshake error: connect with `--skip-ssl`.
 
 `php-fcgi` is a small FastCGI client, written in PHP, that sends one request to a pool and prints the
-body. The fpm healthcheck uses it, since Wolfi has no `cgi-fcgi`. Usage is in the header of
-[`rootfs/usr/local/bin/php-fcgi`](rootfs/usr/local/bin/php-fcgi).
+body, since Wolfi has no `cgi-fcgi`. Usage is in the header of
+[`rootfs/usr/local/bin/php-fcgi`](rootfs/usr/local/bin/php-fcgi). The fpm healthcheck does not use it:
+`php-fpm-healthcheck` is a small C binary ([`shim/fpm-ping.c`](shim/fpm-ping.c)) that sends the
+ping request itself and exits 0 when the response contains `pong`. It reads `PHP_FPM_LISTEN` (TCP or a
+unix socket), `PHP_FPM_PING_PATH` and `PHP_FPM_PING_RESPONSE`, and gives up after 2 s.
 
 There is no apt, dpkg, `ldd`, `getent`, `useradd` or other shadow tool. `fpm` and `cli` have no perl;
 `cli-builder` and `ext-builder` do, because git and autoconf need it. Setuid and setgid bits are
@@ -200,7 +203,7 @@ every tag unless the row says otherwise.
 | User | `www-data`, UID and GID 33. `ext-builder` runs as root. |
 | Working directory | `/app`, owned by `www-data`. |
 | Port | `fpm`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
-| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed). |
+| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (native FastCGI probe, no web server needed). |
 | Stop signal | `fpm`: `SIGQUIT` (graceful). |
 | Logs | stderr only; no log files. |
 | Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |
@@ -806,8 +809,8 @@ Only the promotion and the description-sync jobs use the Docker Hub credentials,
 | `php/` | Extension registry (`ext.json`), pinned sources (`php-src.lock`, `pecl.lock`), build and flag scripts, PGO training (`pgo/`). |
 | `deps/` | Vendored library builds (`versions.lock`, `build-*.sh`), checksum-verified fetch, [source patches](deps/patches/README.md). |
 | `conf/` | Baked ini files, FPM pool config, Snuffleupagus rulesets, ImageMagick security policy. |
-| `rootfs/usr/local/bin/` | `docker-php-entrypoint`, `php-ext-enable`, `php-fpm-healthcheck`, `php-fcgi` (FastCGI client the healthcheck uses), `sp-upload-check` (upload validator for Snuffleupagus). |
-| `shim/` | Source of the `chmod(0)` `LD_PRELOAD` shim. |
+| `rootfs/usr/local/bin/` | `docker-php-entrypoint`, `php-ext-enable`, `php-fcgi` (FastCGI client), `sp-upload-check` (upload validator for Snuffleupagus). |
+| `shim/` | Sources of the `chmod(0)` `LD_PRELOAD` shim and of `php-fpm-healthcheck` (`fpm-ping.c`). |
 | `scripts/`, `ci/` | Matrix generation, inputs hash, PGO tier checks; release, attestation, verification and VEX scripts. Both have unit tests. |
 | `vex/` | OpenVEX statements for accepted findings. |
 | `tests/` | Smoke, entrypoint, read-only, PGO, ext-builder and extended suites; `tests/apps/` application tests. |

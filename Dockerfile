@@ -446,6 +446,18 @@ RUN set -eux; \
       -o /usr/local/lib/php-chmod-sanitize.so /build/shim/chmod-sanitize.c -ldl; \
     strip --strip-unneeded /usr/local/lib/php-chmod-sanitize.so
 
+# fpm-ping: the HEALTHCHECK probe, installed as php-fpm-healthcheck. A native
+# FastCGI client instead of bash plus a PHP CLI start (php-fcgi) every 10 s. Same
+# flags, plus -pie for an executable, and in its own step after the PHP build so
+# editing it does not invalidate that cache.
+COPY shim/fpm-ping.c /build/shim/fpm-ping.c
+RUN set -eux; \
+    CFLAGS="$(bash /build/php/cflags.sh "$UARCH")"; \
+    LDFLAGS="$(bash /build/php/ldflags.sh)"; \
+    $CC $CFLAGS $LDFLAGS -pie -Wall -Wextra \
+      -o /usr/local/bin/php-fpm-healthcheck /build/shim/fpm-ping.c; \
+    strip --strip-unneeded /usr/local/bin/php-fpm-healthcheck
+
 # Trim /deps-stage to what a running php loads; the COPY out of this stage sees
 # the final view, so removing here keeps these files out of the runtime layer.
 # php links only MagickWand and MagickCore (imagick is static), so the Magick++
@@ -560,6 +572,9 @@ COPY --from=php-build /usr/local/lib/php /usr/local/lib/php
 COPY --from=php-build /usr/local/share/php-build /usr/local/share/php-build
 # chmod-sanitize.so: in every flavor, opt-in via PHP_CHMOD_SHIM in the entrypoint.
 COPY --from=php-build /usr/local/lib/php-chmod-sanitize.so /usr/local/lib/php-chmod-sanitize.so
+# php-fpm-healthcheck: native FastCGI ping probe, in every flavor like the rootfs
+# scripts it replaces; only the fpm flavor's HEALTHCHECK runs it.
+COPY --from=php-build /usr/local/bin/php-fpm-healthcheck /usr/local/bin/php-fpm-healthcheck
 
 # php-build's own /usr/local/etc/php first, then everything runtime-conf baked on
 # top of it (later wins). runtime-base copies this half last.
@@ -789,9 +804,9 @@ RUN set -eux; \
     php-fpm -t
 EXPOSE 9000
 STOPSIGNAL SIGQUIT
-# php-fpm-healthcheck (vendored) speaks FastCGI to the pool's ping.path
-# (conf/www.conf) via php-fcgi, so no front web server or extra HTTP port is
-# needed. It runs as www-data, like the main command.
+# php-fpm-healthcheck (shim/fpm-ping.c) speaks FastCGI to the pool's ping.path
+# (conf/www.conf), so no front web server or extra HTTP port is needed. It runs as
+# www-data, like the main command.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
   CMD php-fpm-healthcheck || exit 1
 USER www-data
