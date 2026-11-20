@@ -151,7 +151,8 @@ body, since Wolfi has no `cgi-fcgi`. Usage is in the header of
 [`rootfs/usr/local/bin/php-fcgi`](rootfs/usr/local/bin/php-fcgi). The fpm healthcheck does not use it:
 `php-fpm-healthcheck` is a small C binary ([`shim/fpm-ping.c`](shim/fpm-ping.c)) that sends the
 ping request itself and exits 0 when the response contains `pong`. It reads `PHP_FPM_LISTEN` (TCP or a
-unix socket), `PHP_FPM_PING_PATH` and `PHP_FPM_PING_RESPONSE`, and gives up after 2 s.
+unix socket), `PHP_FPM_PING_PATH` and `PHP_FPM_PING_RESPONSE` (matched as a literal substring, not a
+pattern), and gives up after 2 s.
 
 There is no apt, dpkg, `ldd`, `getent`, `useradd` or other shadow tool. `fpm` and `cli` have no perl;
 `cli-builder` and `ext-builder` do, because git and autoconf need it. Setuid and setgid bits are
@@ -203,7 +204,7 @@ every tag unless the row says otherwise.
 | User | `www-data`, UID and GID 33. `ext-builder` runs as root. |
 | Working directory | `/app`, owned by `www-data`. |
 | Port | `fpm`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
-| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (native FastCGI probe, no web server needed). |
+| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed; `PHP_FPM_PING_RESPONSE` is a literal substring). |
 | Stop signal | `fpm`: `SIGQUIT` (graceful). |
 | Logs | stderr only; no log files. |
 | Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |

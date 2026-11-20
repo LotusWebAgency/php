@@ -93,8 +93,8 @@ bzip2, the PostgreSQL 18 client (`psql`, `pg_dump`, `pg_restore`) and the MariaD
 `mysql`, `mysqldump`, `mysqladmin` and `mysqlcheck` are wrapper scripts that `exec` `mariadb`,
 `mariadb-dump`, `mariadb-admin` and `mariadb-check`. They log in with every MySQL, Percona and
 MariaDB password plugin, including `caching_sha2_password`, and use TLS when the server offers it
-(`/etc/my.cnf`; `--ssl-verify-server-cert` to verify). `php-fcgi`, a small FastCGI
-client in every flavor, stands in for Wolfi's missing `cgi-fcgi`.
+(`/etc/my.cnf`; `--ssl-verify-server-cert` to verify). `php-fcgi` is a FastCGI client
+in every flavor (Wolfi has no `cgi-fcgi`).
 
 There is no apt, dpkg, `ldd`, `getent`, `useradd` or other shadow tool. `fpm` and `cli` have no perl;
 `cli-builder` and `ext-builder` do, because git and autoconf need it.
@@ -137,7 +137,7 @@ every tag unless the row says otherwise.
 | User | `www-data`, UID and GID 33. `ext-builder` runs as root. |
 | Working directory | `/app`, owned by `www-data`. |
 | Port | `fpm`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
-| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (native FastCGI probe, no web server needed). |
+| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed; `PHP_FPM_PING_RESPONSE` is a literal substring). |
 | Stop signal | `fpm`: `SIGQUIT` (graceful). |
 | Logs | stderr only; no log files. |
 | Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |

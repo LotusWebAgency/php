@@ -10,13 +10,16 @@
  *   PHP_FPM_PING_PATH      default /fpm-ping
  *   PHP_FPM_PING_RESPONSE  default pong
  *
- * The whole probe, connect to exit, is bounded by TIMEOUT_MS. No heap allocation.
+ * The whole probe, connect to exit, is bounded by TIMEOUT_MS: poll deadlines for the
+ * sockets, and a SIGALRM backstop for getaddrinfo, which cannot be interrupted by a
+ * deadline. Buffers are fixed-size; the only heap use is inside getaddrinfo.
  */
 
 #define _GNU_SOURCE
 #include <errno.h>
 #include <netdb.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,12 +44,21 @@
 #define FCGI_REQUEST_ID 1
 
 static struct timespec started;
+static char timeout_message[320];
 
 static long elapsed_ms(void)
 {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     return (long)(now.tv_sec - started.tv_sec) * 1000L + (now.tv_nsec - started.tv_nsec) / 1000000L;
+}
+
+static void on_alarm(int signo)
+{
+    (void)signo;
+    ssize_t written = write(STDERR_FILENO, timeout_message, strlen(timeout_message));
+    (void)written;
+    _exit(1);
 }
 
 static int remaining_ms(void)
@@ -355,6 +367,11 @@ int main(void)
         return 1;
     }
 
+    snprintf(timeout_message, sizeof timeout_message, "fpm did not answer on %.200s\n", listen_spec);
+    struct sigaction on_timeout = {.sa_handler = on_alarm};
+    sigaction(SIGALRM, &on_timeout, NULL);
+    alarm((TIMEOUT_MS + 999) / 1000);
+
     int fd = connect_listen(listen_spec);
     if (fd < 0) {
         fprintf(stderr, "fpm did not answer on %s\n", listen_spec);
@@ -371,6 +388,7 @@ int main(void)
         return 1;
     }
     close(fd);
+    alarm(0);
 
     if (memmem(body, body_len, expect, strlen(expect)) == NULL) {
         size_t shown = body_len < 200 ? body_len : 200;

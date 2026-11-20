@@ -446,10 +446,9 @@ RUN set -eux; \
       -o /usr/local/lib/php-chmod-sanitize.so /build/shim/chmod-sanitize.c -ldl; \
     strip --strip-unneeded /usr/local/lib/php-chmod-sanitize.so
 
-# fpm-ping: the HEALTHCHECK probe, installed as php-fpm-healthcheck. A native
-# FastCGI client instead of bash plus a PHP CLI start (php-fcgi) every 10 s. Same
-# flags, plus -pie for an executable, and in its own step after the PHP build so
-# editing it does not invalidate that cache.
+# fpm-ping: compiles the HEALTHCHECK probe, a native FastCGI client, and installs it
+# as php-fpm-healthcheck. Same flags as the shim, plus -pie for an executable, and in
+# its own step after the PHP build so editing it does not invalidate that cache.
 COPY shim/fpm-ping.c /build/shim/fpm-ping.c
 RUN set -eux; \
     CFLAGS="$(bash /build/php/cflags.sh "$UARCH")"; \
