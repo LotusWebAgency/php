@@ -272,9 +272,10 @@ foreach (["heic", "avif"] as $ext) {
 echo "ok: imagick decodes HEIC and AVIF (red|blue fixtures)"
 
 # The baked ImageMagick security policy (conf/imagemagick-policy.xml): the limits
-# are in force, the raster formats the image is for still round-trip (HEIC/AVIF
-# decode is the run above, which also goes through the policy), and the coders and
-# paths a hostile upload could use are refused.
+# are in force, the raster formats, solid-color and gradient pseudo-formats, frame
+# numbering and animated GIFs the image is for still work (HEIC/AVIF decode is the
+# run above, which also goes through the policy), and the coders and paths a hostile
+# upload could use are refused.
 imagick_policy_php=$(cat <<'PHP'
 $res = [];
 $check = function ($name, $ok, $detail = "") use (&$res) {
@@ -305,7 +306,7 @@ $limits = [
   "area" => [Imagick::RESOURCETYPE_AREA, 128000000],
   "width" => [Imagick::RESOURCETYPE_WIDTH, 16000],
   "height" => [Imagick::RESOURCETYPE_HEIGHT, 16000],
-  "list-length" => [Imagick::RESOURCETYPE_LISTLENGTH, 32],
+  "list-length" => [Imagick::RESOURCETYPE_LISTLENGTH, 256],
   "time" => [Imagick::RESOURCETYPE_TIME, 120],
   "thread" => [Imagick::RESOURCETYPE_THREAD, 1],
 ];
@@ -338,6 +339,53 @@ foreach (["jpg", "jpeg", "png", "webp", "gif", "tif", "tiff", "bmp", "ico"] as $
   }
 }
 
+foreach (["xc:white", "canvas:white", "gradient:red-blue", "radial-gradient:red-blue"] as $spec) {
+  try {
+    $px = new Imagick();
+    $px->newPseudoImage(4, 4, $spec);
+    $check("pseudo-" . $spec, $px->getImageWidth() === 4 && $px->getImageHeight() === 4);
+  } catch (Exception $e) {
+    $check("pseudo-" . $spec, false, $e->getMessage());
+  }
+}
+foreach (["pattern:checkerboard", "plasma:"] as $spec) {
+  $refuse("pseudo-" . $spec, function () use ($spec) { $px = new Imagick(); $px->newPseudoImage(4, 4, $spec); }, "NotAuthorized");
+}
+
+try {
+  $pages = new Imagick();
+  for ($i = 0; $i < 3; $i++) {
+    $pages->addImage(clone $src);
+  }
+  $pages->setImageFormat("png");
+  $pages->writeImages($dir . "/page-%d.png", false);
+  $check("write-frame-numbers", is_file($dir . "/page-0.png") && is_file($dir . "/page-1.png")
+    && is_file($dir . "/page-2.png") && !file_exists($dir . "/page-%d.png"));
+} catch (Exception $e) {
+  $check("write-frame-numbers", false, $e->getMessage());
+}
+
+$frames = [];
+foreach ([40, 300] as $count) {
+  $set = new Imagick();
+  foreach (range(1, $count) as $_) {
+    $frame = new Imagick();
+    $frame->newPseudoImage(4, 4, "xc:white");
+    $frame->setImageFormat("gif");
+    $set->addImage($frame);
+  }
+  $set->setImageFormat("gif");
+  $frames[$count] = $set->getImagesBlob();
+}
+try {
+  $back = new Imagick();
+  $back->readImageBlob($frames[40]);
+  $check("gif-40-frames", $back->getNumberImages() === 40, $back->getNumberImages());
+} catch (Exception $e) {
+  $check("gif-40-frames", false, $e->getMessage());
+}
+$refuse("gif-300-frames", function () use ($frames) { $big = new Imagick(); $big->readImageBlob($frames[300]); }, "ListLengthExceedsLimit");
+
 $mvg = "push graphic-context\nviewbox 0 0 10 10\nfill red\nrectangle 0 0 5 5\npop graphic-context\n";
 $svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\"/></svg>";
 file_put_contents($dir . "/t.mvg", $mvg);
@@ -346,19 +394,23 @@ file_put_contents($dir . "/t.eps", "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 
 file_put_contents($dir . "/t.pdf", "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
 file_put_contents($dir . "/t.msl", "<?xml version=\"1.0\"?><image><read filename=\"/etc/passwd\"/></image>");
 
+// url-php and mvg-file also hold without the policy (the extension rejects a bare URL
+// before ImageMagick sees it, and a .mvg extension has no decoder); mvg-prefix covers MVG.
+// With the policy the denied URL delegates fall through to a file open (UnableToOpenBlob);
+// without it they fail as DelegateFailed (curl) or NoDecodeDelegateForThisImageFormat.
 $refuse("url-php", function () { new Imagick("https://example.com/x.png"); });
 foreach (["https", "http", "ftp"] as $scheme) {
   $refuse("url-" . $scheme, function () use ($scheme) {
     $r = new Imagick();
     $r->readImage($scheme . ":" . $scheme . "://example.com/x.png");
-  }, null, "DelegateFailed");
+  }, "UnableToOpenBlob", "DelegateFailed");
 }
 $refuse("mvg-file", function () use ($dir) { new Imagick($dir . "/t.mvg"); });
 $refuse("mvg-prefix", function () use ($dir) { new Imagick("mvg:" . $dir . "/t.mvg"); }, "NotAuthorized");
 $refuse("msl", function () use ($dir) { new Imagick("msl:" . $dir . "/t.msl"); }, "NotAuthorized");
 $refuse("label-indirect", function () { new Imagick("label:@/etc/passwd"); }, "NotAuthorized");
 $refuse("text", function () { new Imagick("text:/etc/passwd"); }, "NotAuthorized");
-$refuse("indirect-read", function () { new Imagick("@/etc/passwd"); });
+$refuse("indirect-read", function () { new Imagick("png:@/etc/passwd"); }, "NotAuthorized");
 $refuse("path-etc", function () { new Imagick("png:/etc/hostname"); }, "NotAuthorized");
 $refuse("stdin", function () { $r = new Imagick(); $r->readImage("png:-"); }, "NotAuthorized");
 $refuse("fd", function () { $r = new Imagick(); $r->readImage("png:fd:0"); }, "NotAuthorized");
@@ -373,9 +425,9 @@ PHP
 policy_out=$(drun --rm "$IMAGE" php -r "$imagick_policy_php") \
   || { echo "FAIL: the ImageMagick policy checks did not run (see the PHP error above): $policy_out"; exit 1; }
 policy_bad=$(grep -v ':ok$' <<<"$policy_out" || true)
-[ -z "$policy_bad" ] && [ "$(grep -c ':ok$' <<<"$policy_out")" -ge 43 ] \
+[ -z "$policy_bad" ] && [ "$(grep -c ':ok$' <<<"$policy_out")" -ge 52 ] \
   || { echo "FAIL: the ImageMagick security policy is not in force as shipped:"; echo "${policy_bad:-$policy_out}"; exit 1; }
-echo "ok: imagick policy enforces the resource limits, keeps the raster formats and refuses URL, MVG/MSL, indirect, SVG, EPS and PDF input"
+echo "ok: imagick policy enforces the resource limits, keeps the raster formats, xc:/gradient: and animated GIFs and refuses URL, MVG/MSL, indirect, SVG, EPS and PDF input"
 
 # ImageMagick is built with --disable-openmp; confirm that holds once imagick
 # links it into the php binary -- OpenMP spawns a thread per core per request if

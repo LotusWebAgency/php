@@ -35,14 +35,12 @@
   <policy domain="resource" name="map" value="512MiB"/>
   <policy domain="resource" name="area" value="128MP"/>
   <policy domain="resource" name="disk" value="1GiB"/>
-  <policy domain="resource" name="list-length" value="32"/>
+  <policy domain="resource" name="list-length" value="256"/>
   <policy domain="resource" name="width" value="16KP"/>
   <policy domain="resource" name="height" value="16KP"/>
   <policy domain="system" name="max-memory-request" value="256MiB"/>
   <policy domain="system" name="max-profile-size" value="16MiB"/>
   <policy domain="system" name="max-profile-count" value="16"/>
-  <!-- A % in a file name is a literal character, not a format escape. -->
-  <policy domain="system" name="filename:literal" value="true"/>
 
   <!-- Indirect reads (@file), stdin/stdout, descriptors, pipes and system paths. -->
   <policy domain="path" rights="none" pattern="-"/>
@@ -61,6 +59,8 @@
   <!-- Coders: deny everything, then allow the raster formats this build is for. -->
   <policy domain="coder" rights="none" pattern="*"/>
   <policy domain="coder" rights="read|write" pattern="{GIF*,JPEG,JPG,JPE,PJPEG,PNG*,WEBP,TIF*,BMP*,ICO,ICON}"/>
+  <!-- Solid-color and gradient pseudo-formats read no files and no network. -->
+  <policy domain="coder" rights="read" pattern="{XC,CANVAS,GRADIENT,RADIAL-GRADIENT}"/>
   <!-- HEIC, HEIF and AVIF are decode-only in this build. -->
   <policy domain="coder" rights="read" pattern="{HEIC,HEIF,AVIF}"/>
   <!-- Network, scripting, vector, page-description and text coders stay off even if the allow list above grows. -->

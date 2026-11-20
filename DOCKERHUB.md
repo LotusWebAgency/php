@@ -10,6 +10,8 @@ facts a deployment script or agent needs.
 Source and full docs: [github.com/LotusWebAgency/php](https://github.com/LotusWebAgency/php).
 Replaces `dementev/php-fpm-with-ext`
 ([migration notes](https://github.com/LotusWebAgency/php#migrating-from-php-fpm-with-ext)).
+Coming from a Debian- or Alpine-based PHP image? See
+[Moving from a Debian or Alpine base](https://github.com/LotusWebAgency/php#moving-from-a-debian-or-alpine-base).
 
 ```yaml
 services:
@@ -67,7 +69,7 @@ not Graviton2/3, Ampere Altra or Apple silicon. Use the baseline tag on a Mac.
 
 The amd64 baseline is `x86-64-v2` (SSE4.2 and POPCNT; Intel Nehalem and newer, AMD Bulldozer and
 newer), not plain `x86-64`, because Wolfi's packages are built for it. Both baselines and amd64
-`-v3` tune generic; arm64 `-v3` tunes for `neoverse-v2`. The vendored ImageMagick and heif stack (libheif, libde265, dav1d) are
+`-v3` tune generic; arm64 `-v3` tunes for `neoverse-v2`. The vendored ImageMagick and heif stack are
 baseline builds in every image, `-v3` included.
 
 `8.4-fpm` moves with each 8.4 patch release. Pin the digest for reproducible builds.
@@ -302,8 +304,9 @@ and `zstd`. **19 are shared modules**, loaded with `PHP_EXT_ENABLE`: `amqp`, `br
 `uuid`, `xdebug`, `xmlrpc` (7.x), `yaml`. An unknown or unavailable name is refused with a list of
 what the image has.
 
-`imagick` reads HEIC and AVIF (static libheif, libde265 and dav1d inside ImageMagick) but does not
-write them; a baked security policy limits it to raster formats. There is no `ssh2` extension: use [phpseclib](https://phpseclib.com/) for SSH and SFTP,
+`imagick` reads HEIC and AVIF but does not write them. Its [policy](https://github.com/LotusWebAgency/php#hardening)
+caps resources and allows rasters only; replace `/opt/imagemagick/etc/ImageMagick-7/policy.xml`.
+There is no `ssh2` extension: use [phpseclib](https://phpseclib.com/) for SSH and SFTP,
 or compile `ssh2` in an `ext-builder` stage.
 
 ### Adding your own extension
@@ -347,26 +350,24 @@ ENV PHP_EXT_ENABLE=myext
 
 ## Hardening
 
-Measured on the shipped binaries: PIE, full RELRO
+Measured on the shipped ELF binaries, not assumed from compiler flags: PIE, full RELRO
 (`GNU_RELRO` and `BIND_NOW`), non-executable stack, `-fstack-protector-strong`,
 `_FORTIFY_SOURCE=3`, and `-fcf-protection=full` on amd64. On arm64, PAC and BTI
 (`-mbranch-protection=standard`) are compiled in; BTI is not enforced at runtime on PHP 7.0-8.4,
 because gold writes no `PT_GNU_PROPERTY` header. The compilers
 also run with zero-initialized locals, no null-check deletion, wrapping signed overflow and no strict
 aliasing. Links use packed relative relocations
-(`-z pack-relative-relocs`, `DT_RELR`) where the linker supports it. Every inherited setuid and setgid bit
-is stripped. Busybox's raw-socket and interface applets
-(`ping`, `netstat` and others) are removed; `curl` stays. PHP 7.0-8.4 build with GCC 16.2 and 8.5 with clang 19 (ThinLTO), all with PGO. The baked ini sets `zend.assertions=-1` (not on cli-builder),
+(`-z pack-relative-relocs`, `DT_RELR`) where the linker supports it. Every setuid and setgid bit
+inherited from the base image is stripped. Busybox's raw-socket and interface applets
+(`ping`, `netstat`, `traceroute` and the rest) are removed;
+`curl` stays. A derived image that runs `apk add` gets the busybox links back and can prune them
+again. PHP 7.0-8.4 build with GCC 16.2 (PGO, no LTO) and 8.5 with clang 19 (PGO
+and ThinLTO), both from Wolfi packages. The baked ini sets `zend.assertions=-1` (not on cli-builder),
 `session.upload_progress.enabled=0` and, on PHP 8.5, `fatal_error_backtraces=Off`.
-
-ImageMagick runs under a baked policy, `/opt/imagemagick/etc/ImageMagick-7/policy.xml`: 256MiB
-memory, 1GiB disk, 128MP area, 16KP width and height, 120 s, one thread. Only GIF, JPEG, PNG, WEBP,
-TIFF, BMP and ICO load (HEIC, HEIF and AVIF read-only); delegates, URLs, MVG, MSL, SVG, PostScript,
-PDF, `label:` and `@file` are refused. Mount your own file there to replace it.
 
 Snuffleupagus is compiled in but off. `PHP_SNUFFLEUPAGUS=<ruleset>` turns it on. For your own
 rules, mount `/usr/local/etc/php/snuffleupagus/<name>.rules` read-only and set `PHP_SNUFFLEUPAGUS=<name>`
-(never a path). A custom file replaces the baked one; copy `default.rules`
+(lowercase, digits, `-`, `_`; never a path). A custom file replaces the baked one; copy `default.rules`
 to start. Laravel's `schedule:run` works under every ruleset. `sp.xxe_protection` is
 off: it does not hold across requests, and on PHP 7 it disables your own `libxml_disable_entity_loader(true)`.
 
@@ -398,7 +399,7 @@ semantic-release, HIGH) and CVE-2026-15534 (perl 5.44.0 in `ext-builder`, MEDIUM
 [Accepted findings](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md#accepted-findings).
 They are suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan
 without that file shows them. Trivy reads the apk database, so it cannot see libraries built from source
-(static or under `/opt`): ImageMagick (with static libheif, libde265 and dav1d) in
+(static or under `/opt`): ImageMagick in
 every image, OpenSSL 1.1.1w, ICU,
 libxml2 and libxslt in the 7.0-8.0 builds (the last two are Debian trixie's 2.9.14 and 1.1.35 with
 Debian's security patches), curl in 7.0-7.2. Those are tracked by hand through `deps/versions.lock`, as are the

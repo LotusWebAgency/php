@@ -544,15 +544,20 @@ templates). Without a policy ImageMagick sizes its memory limit from the host's 
 coder, so one hostile upload could exhaust the container or reach the network and local files.
 
 - **Limits:** memory 256MiB, map 512MiB, disk 1GiB, area 128MP, width and height 16KP, list-length
-  32, time 120 s, thread 1, max-memory-request 256MiB, file 768, profile size 16MiB (16 profiles).
+  256, time 120 s, thread 1, max-memory-request 256MiB, file 768, profile size 16MiB (16 profiles).
+  Frames beyond the list-length are refused. With the 256MiB memory limit, large images spill the
+  pixel cache to `/tmp`, up to the 1GiB disk limit, so a read-only deployment that processes large
+  images should size its `/tmp` tmpfs accordingly.
 - **Coders:** all denied, then read and write for GIF, JPEG, PNG, WEBP, TIFF, BMP and ICO (with their
   aliases such as `JPG`, `PNG8`, `TIF`, `GIF87`, `BMP3`) and read-only for HEIC, HEIF and AVIF. URL,
   HTTP, HTTPS, FTP, MVG, MSVG, MSL, SVG, EPHEMERAL, LABEL, CAPTION, TEXT, TXT, INLINE, PS, EPS, PDF,
   XPS and PCL are denied again after the allow list, so widening it cannot re-enable them.
-  Pseudo-formats such as `xc:` and `canvas:` are refused too; `Imagick::newImage()` is not affected.
+  The pseudo-formats `xc:`, `canvas:`, `gradient:` and `radial-gradient:` are allowed for reading (they
+  read no files and no network); `pattern:`, `plasma:` and the other pseudo-formats are refused.
   `Imagick::queryFormats()` still lists every compiled coder: the policy decides at read and write.
 - **Delegates, filters and paths:** every delegate and filter is denied, as are the paths `-`, `@*`
-  (indirect reads), `fd:*`, `|*`, `/etc/*`, `/proc/*` and `/sys/*`. A `%` in a file name is literal.
+  (indirect reads), file-descriptor paths (`fd:` and `FD:`), `|*` (pipes), `/etc/*`, `/proc/*` and
+  `/sys/*`.
 
 To replace the policy, mount your own file over that path. It is one file; keep it root-owned and
 world-readable. It replaces the whole policy, so start from a copy of the shipped one
