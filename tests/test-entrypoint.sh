@@ -311,7 +311,17 @@ case "$PHP_MM" in 7.0|7.1|7.2) want_interned=16 ;; *) want_interned=40 ;; esac
 [ "$got" = "512 $want_interned" ] || fail "PHP_OPCACHE_INTERNED_STRINGS=40: opcache memory/interned is '$got', expected '512 $want_interned' on PHP $PHP_MM"
 echo "ok: PHP_OPCACHE_INTERNED_STRINGS overrides the buffer, capped at 16MB before PHP 7.3"
 
-for v in 0 abc 8M -4 1.5; do
+got=$(opcache_sizes -e PHP_OPCACHE_MEMORY=8)
+[ "$got" = "8 4" ] || fail "PHP_OPCACHE_MEMORY=8: opcache memory/interned is '$got', expected '8 4' (the derived buffer is capped at half the segment)"
+echo "ok: a tiny PHP_OPCACHE_MEMORY starts with the interned strings buffer at half the segment"
+
+got=$(opcache_sizes -e PHP_OPCACHE_MEMORY=32 -e PHP_OPCACHE_INTERNED_STRINGS=40)
+[ "$got" = "32 16" ] || fail "PHP_OPCACHE_MEMORY=32 + PHP_OPCACHE_INTERNED_STRINGS=40: opcache memory/interned is '$got', expected '32 16'"
+err=$(drun --rm -e PHP_OPCACHE_MEMORY=32 -e PHP_OPCACHE_INTERNED_STRINGS=40 "$IMAGE" php -v 2>&1 >/dev/null)
+echo "$err" | grep -q 'using 16 instead' || fail "PHP_OPCACHE_INTERNED_STRINGS=40 over half of 32MB logged no warning naming the cap: $err"
+echo "ok: an explicit PHP_OPCACHE_INTERNED_STRINGS over half the segment is capped at half, with a warning"
+
+for v in 0 abc 8M -4 1.5 18446744073709551617; do
   set +e
   out=$(drun --rm -e "PHP_OPCACHE_INTERNED_STRINGS=${v}" "$IMAGE" php -v 2>&1 >/dev/null)
   rc=$?
@@ -319,11 +329,11 @@ for v in 0 abc 8M -4 1.5; do
   [ "$rc" -ne 0 ] || fail "PHP_OPCACHE_INTERNED_STRINGS=${v} was not rejected"
   echo "$out" | grep -q "invalid PHP_OPCACHE_INTERNED_STRINGS=${v}" || fail "PHP_OPCACHE_INTERNED_STRINGS=${v} rejected for the wrong reason: $out"
 done
-echo "ok: PHP_OPCACHE_INTERNED_STRINGS rejects anything but a positive integer"
+echo "ok: PHP_OPCACHE_INTERNED_STRINGS rejects anything but a positive integer of up to 6 digits (20 digits wrap to 1 in bash arithmetic)"
 
 # Huge pages are opt-in. Whether opcache.huge_code_pages exists is a property of the
 # build, so a build without it must start, warn and skip; the entrypoint's own
-# probe decides, and the baked ini's `= 0` makes the directive visible when present.
+# probe decides. Where it exists, its default is 0 (PHP's own; no baked ini sets it).
 huge_probe='$v = ini_get("opcache.huge_code_pages"); echo $v === false ? "absent" : $v;'
 got=$(drun --rm "$IMAGE" php -r "$huge_probe" 2>/dev/null)
 if [ "$got" = absent ]; then

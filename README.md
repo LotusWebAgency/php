@@ -235,7 +235,7 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec` (the variable's baked value). cli, ext-builder: the variable is unset; the same list is baked into `10-php.ini`. cli-builder: none | Names to disable in addition to the baked list and any `disable_functions` in a mounted ini. Never replaces either. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
 | `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 128-512 MB | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. |
-| `PHP_OPCACHE_INTERNED_STRINGS` | one eighth of the opcache memory, clamped to 8-32 MB (at most 16 on PHP 7.0-7.2) | `opcache.interned_strings_buffer`, carved out of the opcache segment. A bare number, in MB. |
+| `PHP_OPCACHE_INTERNED_STRINGS` | one eighth of the opcache memory, clamped to 8-32 MB (at most 16 on PHP 7.0-7.2, and at most half the opcache memory, also when set) | `opcache.interned_strings_buffer`, carved out of the opcache segment. A bare number, in MB. |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS` | `1` | `opcache.validate_timestamps`. Set `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_REVALIDATE_FREQ` | `2` | `opcache.revalidate_freq` |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |

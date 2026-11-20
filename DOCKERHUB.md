@@ -162,7 +162,7 @@ variable that is set but empty, or contains a newline, stops the container with 
 | `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec`. cli, ext-builder: unset; the same list is baked into `10-php.ini`. cli-builder: none | Adds to the baked and mounted-ini lists, never replaces them. `proc_open` stays enabled for Composer. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
 | `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, 128-512 MB | `opcache.memory_consumption` |
-| `PHP_OPCACHE_INTERNED_STRINGS` | opcache memory / 8, 8-32 MB (max 16 on 7.0-7.2) | `opcache.interned_strings_buffer` |
+| `PHP_OPCACHE_INTERNED_STRINGS` | opcache memory / 8, 8-32 MB (max 16 on 7.0-7.2; max half the opcache memory) | `opcache.interned_strings_buffer` |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS`, `PHP_OPCACHE_REVALIDATE_FREQ` | `1`, `2` | Set validation to `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
 | `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing`, `64M` | PHP 8.1+, and 8.0 on amd64 (8.0 on arm64 has no JIT). |

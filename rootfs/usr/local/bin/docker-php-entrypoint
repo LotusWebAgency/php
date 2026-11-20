@@ -73,9 +73,10 @@ env_flag_on() {
   return 1
 }
 
-# PHP_OPCACHE_INTERNED_STRINGS is a bare size in MB, 1 or more.
+# PHP_OPCACHE_INTERNED_STRINGS is a bare size in MB, 1 to 6 digits. The length bound
+# keeps the 64-bit arithmetic below from wrapping a longer value back into range.
 if [ -n "${PHP_OPCACHE_INTERNED_STRINGS:-}" ]; then
-  if ! [[ "$PHP_OPCACHE_INTERNED_STRINGS" =~ ^[0-9]+$ ]] || [ "$((10#$PHP_OPCACHE_INTERNED_STRINGS))" -lt 1 ]; then
+  if ! [[ "$PHP_OPCACHE_INTERNED_STRINGS" =~ ^[0-9]{1,6}$ ]] || [ "$((10#$PHP_OPCACHE_INTERNED_STRINGS))" -lt 1 ]; then
     echo "docker-php-entrypoint: invalid PHP_OPCACHE_INTERNED_STRINGS=${PHP_OPCACHE_INTERNED_STRINGS} (expected a positive integer, in MB)" >&2
     exit 1
   fi
@@ -379,11 +380,20 @@ case "$PHP_MAJOR_MINOR" in
     fi
     ;;
 esac
+# The buffer is carved out of the opcache segment, and PHP refuses to start unless the
+# buffer is smaller than the segment; half leaves the rest of the segment room.
+INTERNED_CAP_MB=$(( OPCACHE_MB / 2 ))
+[ "$INTERNED_CAP_MB" -ge 1 ] || INTERNED_CAP_MB=1
+if [ "$INTERNED_MB" -gt "$INTERNED_CAP_MB" ]; then
+  [ -z "${PHP_OPCACHE_INTERNED_STRINGS:-}" ] || echo "docker-php-entrypoint: PHP_OPCACHE_INTERNED_STRINGS=${PHP_OPCACHE_INTERNED_STRINGS} exceeds half of the opcache memory (${OPCACHE_MB}MB); using ${INTERNED_CAP_MB} instead." >&2
+  INTERNED_MB=$INTERNED_CAP_MB
+fi
 
 # opcache.huge_code_pages exists only where opcache was built with the Linux
-# huge-page remap, so it is probed instead of assumed.
+# huge-page remap, so it is probed instead of assumed. Without a writable conf dir the
+# directive is never written, so there is nothing to probe or warn about.
 HUGE_CODE_PAGES=0
-if env_flag_on PHP_OPCACHE_HUGE_CODE_PAGES; then
+if [ "$CONF_WRITABLE" = 1 ] && env_flag_on PHP_OPCACHE_HUGE_CODE_PAGES; then
   if php -r 'exit(ini_get("opcache.huge_code_pages") === false ? 1 : 0);' >/dev/null 2>&1; then
     HUGE_CODE_PAGES=1
   else
