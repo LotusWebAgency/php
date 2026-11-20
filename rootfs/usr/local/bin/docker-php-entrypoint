@@ -87,22 +87,26 @@ fi
 # 'EXEC') leaves the function callable silently, so such tokens are refused up
 # front, before the generated disable_functions ini, which carries the union of this
 # value and the configured list (see disable_functions_effective() and conf/www.conf).
-disable_functions_split() {
+disable_functions_split_into() {
   # Mirrors PHP's split: runs of spaces and commas collapse to one separator;
   # other whitespace stays in its token and fails the charset check below.
-  printf '%s' "$1" | tr ',' ' ' | tr -s ' ' '\n' | sed '/^$/d'
+  local -n _split_out="$1"
+  local _split_in="${2//,/ }"
+  _split_in="${_split_in//$'\n'/ }"
+  _split_out=()
+  IFS=' ' read -r -a _split_out <<<"$_split_in" || true
 }
 if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
-  # `read` fails on a final line without a trailing newline, and this split never
-  # emits one, so `|| [ -n "$_pdf_tok" ]` keeps the last token from being skipped.
-  while IFS= read -r _pdf_tok || [ -n "$_pdf_tok" ]; do
+  _pdf_toks=()
+  disable_functions_split_into _pdf_toks "$PHP_DISABLE_FUNCTIONS"
+  for _pdf_tok in "${_pdf_toks[@]}"; do
     case "$_pdf_tok" in
       *[!a-z0-9_]*)
         echo "docker-php-entrypoint: refusing PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS}: '${_pdf_tok}' is not a name PHP's own disable_functions parser can ever match -- it splits only on space/comma (so a tab or other separator stays part of the token) and matches case-sensitively against its all-lowercase function table. Use bare, lowercase function names, e.g. 'exec,proc_open'." >&2
         exit 1
         ;;
     esac
-  done < <(disable_functions_split "$PHP_DISABLE_FUNCTIONS")
+  done
 fi
 
 # PHP_SNUFFLEUPAGUS names a file under /usr/local/etc/php/snuffleupagus/, so it
@@ -298,7 +302,15 @@ elif [ "$CONF_DIR" != "$BAKED_INI_DEFAULT" ]; then
   export PHP_INI_SCAN_DIR="${BAKED_INI_DEFAULT}:${CONF_DIR}"
 fi
 
-PHP_MAJOR_MINOR="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+# The Dockerfile writes the version PHP reported at build time; an image without the
+# file (or with anything but MAJOR.MINOR in it) asks PHP.
+PHP_MAJOR_MINOR=""
+if [ -r /usr/local/etc/php/php-major-minor ]; then
+  read -r PHP_MAJOR_MINOR </usr/local/etc/php/php-major-minor || true
+fi
+if ! [[ "$PHP_MAJOR_MINOR" =~ ^[0-9]+\.[0-9]+$ ]]; then
+  PHP_MAJOR_MINOR="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
+fi
 
 # Accepts a bare non-negative integer (already MB) or a php.ini-style size with a
 # K/M/G suffix (case-insensitive), normalizes to whole MB and prints it. An
@@ -339,9 +351,9 @@ to_int() {
 detect_memory_limit() {
   local limit=""
   if [ -r /sys/fs/cgroup/memory.max ]; then
-    limit="$(cat /sys/fs/cgroup/memory.max)"
+    read -r limit </sys/fs/cgroup/memory.max || true
   elif [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
-    limit="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+    read -r limit </sys/fs/cgroup/memory/memory.limit_in_bytes || true
   fi
   # "max", empty, or an absurd sentinel means no container limit. Host MemTotal is
   # not a safe stand-in (every container on a shared host would size itself for the
@@ -463,13 +475,12 @@ PDF_GENERATED_INI="zz-disable-functions-env.ini"
 PDF_LEGACY_INI="99-env.ini"
 
 disable_functions_ini_value() {
-  local out line
+  local out line re=$'(^|\n)disable_functions => ([^\n]*)'
   out="$(php "$@" -i 2>/dev/null)" || return 1
-  line="$(sed -n '/^disable_functions => /{p;q}' <<<"$out")"
-  if [ -z "$line" ]; then
+  if ! [[ "$out" =~ $re ]]; then
     return 1
   fi
-  line="${line#disable_functions => }"
+  line="${BASH_REMATCH[2]}"
   line="${line% => *}"
   if [ "$line" = "no value" ]; then
     line=""
@@ -529,6 +540,41 @@ pdf_probe_scan_dirs() {
   )
 }
 
+# Success when the resolved read below is certain to return what the baked read
+# returns, so the second php run can be skipped: the baked 10-php.ini is scanned and
+# assigns disable_functions itself, and no other ini php reads (the generated files
+# aside) so much as mentions the directive. php applies the scanned files after any
+# main php.ini, in order, so the last assignment is then the baked one. Anything
+# unreadable or unclear fails the test and the resolved read runs.
+disable_functions_resolved_is_baked() (
+  shopt -s dotglob nullglob
+  [ "$CONF_WRITABLE" = 1 ] || exit 1
+  baked_ini="${BAKED_INI_DEFAULT}/10-php.ini"
+  baked_scanned=0
+  others=()
+  while IFS= read -r d; do
+    for f in "$d"/*.ini; do
+      if [ "$f" = "$baked_ini" ]; then
+        baked_scanned=1
+        continue
+      fi
+      name="${f##*/}"
+      if [ "$d" = "$CONF_DIR" ] && { [ "$name" = "$PDF_GENERATED_INI" ] || [ "$name" = "$PDF_LEGACY_INI" ]; }; then
+        continue
+      fi
+      others+=("$f")
+    done
+  done < <(pdf_scan_dirs)
+  [ "$baked_scanned" = 1 ] || exit 1
+  grep -qsE '^[[:space:]]*disable_functions[[:space:]]*=' "$baked_ini" || exit 1
+  if [ "${#others[@]}" -gt 0 ]; then
+    rc=0
+    grep -qsiF -- disable_functions "${others[@]}" || rc=$?
+    [ "$rc" -eq 1 ] || exit 1
+  fi
+  exit 0
+)
+
 disable_functions_resolved_probe() {
   local root scan value
   if [ "$CONF_WRITABLE" != 1 ]; then
@@ -550,14 +596,17 @@ disable_functions_resolved_probe() {
 
 # Union of the lists $1 and $2, deduplicated, comma-joined.
 disable_functions_union() {
-  local line result=""
-  # disable_functions_split output has no trailing newline on its last token, so
-  # concatenating two outputs would glue the last token of one onto the first of the
-  # other ("pcntl_execget_current_user"). The explicit printf '\n' separates them; sed
-  # drops it and any empty line before the dedup.
-  while IFS= read -r line; do
-    result="${result:+${result},}${line}"
-  done < <({ disable_functions_split "$1"; printf '\n'; disable_functions_split "$2"; } | sed '/^$/d' | awk '!seen[$0]++')
+  local -a _union_a _union_b
+  local -A _union_seen=()
+  local _union_tok result=""
+  disable_functions_split_into _union_a "$1"
+  disable_functions_split_into _union_b "$2"
+  for _union_tok in "${_union_a[@]}" "${_union_b[@]}"; do
+    if [ -z "${_union_seen["k${_union_tok}"]+x}" ]; then
+      _union_seen["k${_union_tok}"]=1
+      result="${result:+${result},}${_union_tok}"
+    fi
+  done
   printf '%s' "$result"
 }
 
@@ -581,7 +630,9 @@ if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
     echo "docker-php-entrypoint: refusing to start: could not read the baked disable_functions list from ${BAKED_INI_DEFAULT}/10-php.ini (the php -n -c probe did not complete) -- cannot safely compute PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS}'s union with it" >&2
     exit 1
   fi
-  if ! _pdf_resolved="$(disable_functions_resolved_probe)"; then
+  if disable_functions_resolved_is_baked; then
+    _pdf_resolved="$_pdf_baked"
+  elif ! _pdf_resolved="$(disable_functions_resolved_probe)"; then
     echo "docker-php-entrypoint: refusing to start: could not read the disable_functions list the image's ini files resolve to (the php probe did not complete) -- cannot safely compute PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS}'s union with it" >&2
     exit 1
   fi
@@ -734,12 +785,12 @@ pdf_is_allowlisted() {
 }
 
 if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
-  requested_functions="$(disable_functions_split "$PHP_DISABLE_FUNCTIONS")"
-  if [ -z "$requested_functions" ]; then
+  pdf_requested_arr=()
+  disable_functions_split_into pdf_requested_arr "$PHP_DISABLE_FUNCTIONS"
+  if [ "${#pdf_requested_arr[@]}" -eq 0 ]; then
     echo "docker-php-entrypoint: PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS} contains no function names after splitting on space/comma" >&2
     exit 1
   fi
-  mapfile -t pdf_requested_arr <<<"$requested_functions"
 
   # Comma-and-space joins the newline list $1 for a diagnostic.
   disable_functions_join() {
@@ -829,11 +880,16 @@ if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
   # remaining arguments are extra php flags for the probe over every other name.
   disable_functions_missing_for() {
     local resolved="$1"; shift
-    local -a all=("${pdf_probe_names[@]}") plain=() pdf_missing=() resolved_tokens=() f
-    mapfile -t resolved_tokens < <(disable_functions_split "$resolved")
+    local -a all=("${pdf_probe_names[@]}") plain=() pdf_missing=() resolved_tokens=()
+    local f tok found
+    disable_functions_split_into resolved_tokens "$resolved"
     for f in "${all[@]}"; do
       if pdf_is_allowlisted "$f"; then
-        printf '%s\n' "${resolved_tokens[@]}" | grep -qxF "$f" || pdf_missing+=("$f")
+        found=0
+        for tok in "${resolved_tokens[@]}"; do
+          [ "$tok" = "$f" ] && found=1
+        done
+        [ "$found" = 1 ] || pdf_missing+=("$f")
       else
         plain+=("$f")
       fi
@@ -841,7 +897,9 @@ if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
     if [ "${#plain[@]}" -gt 0 ]; then
       pdf_probe_names=("${plain[@]}")
       local live
-      if ! live="$(disable_functions_still_live "$@")"; then
+      if [ "$#" -eq 0 ] && [ "$pdf_live_probe_done" = 1 ] && [ "${plain[*]}" = "$pdf_live_probe_names" ]; then
+        live="$pdf_live_probe_callable"
+      elif ! live="$(disable_functions_still_live "$@")"; then
         live="$(printf '%s\n' "${plain[@]}")"
       fi
       [ -n "$live" ] && pdf_missing+=("$live")
@@ -866,18 +924,76 @@ if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
     exit 1
   fi
 
+  # Requested names first, so a refusal leads with what the operator asked for.
+  pdf_required_arr=()
+  _pdf_base_toks=()
+  disable_functions_split_into _pdf_base_toks "$PDF_BASE"
+  declare -A _pdf_required_seen=()
+  for _pdf_f in "${pdf_requested_arr[@]}" "${_pdf_base_toks[@]}"; do
+    if [ -z "${_pdf_required_seen["k${_pdf_f}"]+x}" ]; then
+      _pdf_required_seen["k${_pdf_f}"]=1
+      pdf_required_arr+=("$_pdf_f")
+    fi
+  done
+
+  # One php run reads the value the exec'd command's php resolves to and asks the
+  # same still-callable question disable_functions_still_live asks, over the plain
+  # (non-allowlisted) names of pdf_required_arr, which is what every verification
+  # below needs for a context without its own `-d`. The value comes from ini_get, so
+  # when an operator ini has disabled ini_get it is reported unknown and read from
+  # `php -i` below instead. An incomplete run changes nothing: both questions are
+  # then asked separately, as before.
+  pdf_live_probe_done=0
+  pdf_live_probe_known=0
+  pdf_live_probe_value=""
+  pdf_live_probe_names=""
+  pdf_live_probe_callable=""
+  disable_functions_live_probe() {
+    local out first rest f
+    local -a plain=()
+    for f in "${pdf_required_arr[@]}"; do
+      pdf_is_allowlisted "$f" || plain+=("$f")
+    done
+    out="$(php -r '
+      $v = function_exists("ini_get") ? ini_get("disable_functions") : false;
+      if ($v !== false && strpbrk($v, "\r\n") !== false) { $v = false; }
+      echo ($v === false ? "?" : "=" . $v), "\n";
+      foreach ($argv as $i => $f) {
+        if ($i === 0) { continue; }
+        if (function_exists($f)) { echo $f, "\n"; }
+      }
+      echo "__pdf_probe_ok__";
+    ' -- "${plain[@]}" 2>/dev/null)" || return 0
+    case "$out" in
+      *$'\n'__pdf_probe_ok__) ;;
+      *) return 0 ;;
+    esac
+    out="${out%__pdf_probe_ok__}"
+    first="${out%%$'\n'*}"
+    rest="${out#*$'\n'}"
+    pdf_live_probe_callable="${rest%$'\n'}"
+    pdf_live_probe_names="${plain[*]}"
+    pdf_live_probe_done=1
+    if [ "${first:0:1}" = "=" ]; then
+      pdf_live_probe_value="${first:1}"
+      pdf_live_probe_known=1
+    fi
+  }
+
   # The disable_functions value the exec'd command's php (and an fpm worker's main ini)
   # resolves to now, with the generated file in place and every ini written. Both
   # branches verify the requested names AND the baked and mounted ones (PDF_BASE)
   # against it; nothing assumes it equals PDF_BASE, which it does not when nothing
   # could be generated (bare --read-only) or an operator ini sorts after the
-  # generated file. Read from `php -i`, so an ini that disables ini_get is fine.
-  if ! pdf_live="$(disable_functions_ini_value)"; then
+  # generated file. Read from `php -i` unless the probe above got it, so an ini that
+  # disables ini_get is fine.
+  disable_functions_live_probe
+  if [ "$pdf_live_probe_known" = 1 ]; then
+    pdf_live="$pdf_live_probe_value"
+  elif ! pdf_live="$(disable_functions_ini_value)"; then
     echo "docker-php-entrypoint: refusing to start: could not read the disable_functions value the image's ini files resolve to (the php probe did not complete) -- cannot verify PHP_DISABLE_FUNCTIONS=${PHP_DISABLE_FUNCTIONS} is in force" >&2
     exit 1
   fi
-  # Requested names first, so a refusal leads with what the operator asked for.
-  mapfile -t pdf_required_arr < <({ printf '%s\n' "${pdf_requested_arr[@]}"; disable_functions_split "$PDF_BASE"; printf '\n'; } | sed '/^$/d' | awk '!seen[$0]++')
 
   if [ "${1:-}" = php-fpm ]; then
     case "$pdf_live" in
@@ -886,6 +1002,7 @@ if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
         exit 1
         ;;
     esac
+    pdf_live_normalized="$(disable_functions_union "$pdf_live" "")"
     # Resolve what php-fpm will load for the pool(s) about to run, with the same
     # arguments the exec'd command gets; a mounted custom pool config may not carry
     # the stock www.conf's php_admin_value lock.
@@ -981,7 +1098,14 @@ if [ -n "${PHP_DISABLE_FUNCTIONS:-}" ]; then
         # A worker enforces the main-ini value unioned with the pool's own.
         pool_effective="$(disable_functions_union "$pdf_live" "$pool_value")"
         pdf_probe_names=("${pdf_required_arr[@]}")
-        pool_missing="$(disable_functions_missing_for "$pool_effective" -d "disable_functions=${pool_effective}")"
+        if [ "$pool_effective" = "$pdf_live_normalized" ]; then
+          # The pool adds nothing to the main ini's list (the stock pool carries the
+          # same names the generated file does), so `-d` would only restate what a
+          # plain probe already runs under.
+          pool_missing="$(disable_functions_missing_for "$pool_effective")"
+        else
+          pool_missing="$(disable_functions_missing_for "$pool_effective" -d "disable_functions=${pool_effective}")"
+        fi
       else
         pdf_probe_names=("${pdf_required_arr[@]}")
         pool_missing="$(disable_functions_missing_for "$pdf_live")"

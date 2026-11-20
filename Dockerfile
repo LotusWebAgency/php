@@ -679,6 +679,11 @@ RUN set -eux; \
     grep -q '^www-data:' /etc/group || addgroup -S -g "$WWW_GID" www-data; \
     grep -q '^www-data:' /etc/passwd || adduser -S -D -H -u "$WWW_UID" -G www-data -h /var/www -s /sbin/nologin www-data; \
     mkdir -p /app /usr/local/etc/php/conf.d; \
+# docker-php-entrypoint reads MAJOR.MINOR from this file instead of starting php to
+# ask on every container start; the build refuses a value php does not report.
+    [ "$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')" = "$PHP_VERSION" ] \
+      || { echo "FATAL: PHP_VERSION=$PHP_VERSION is not the MAJOR.MINOR this php reports" >&2; exit 1; }; \
+    printf '%s\n' "$PHP_VERSION" > /usr/local/etc/php/php-major-minor; \
     install -d -o www-data -g www-data /var/www; \
     chown -R www-data:www-data /app; \
 # php-ext-enable writes here as whatever user runs the container (the flavors set
