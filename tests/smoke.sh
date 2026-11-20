@@ -1223,8 +1223,9 @@ bash "$HERE/assert-elf-hardening.sh" --code "modules-$EXPECT" "${hard_files[@]}"
 echo "ok: code-level hardening holds on ${#hard_files[@]} shipped ELF files (${#opt_elf_files[@]} of them under /opt)"
 
 # Packed relative relocations (DT_RELR): php/ldflags.sh passes -z pack-relative-relocs
-# to every link, and lld links php, its extensions and the vendored libraries in
-# every era.
+# to every link: lld links php and its extensions, GNU ld links the vendored libraries
+# (ImageMagick and the deps stages). The chmod shim and php-fpm-healthcheck take the same
+# flags but are not asserted: a small object can have no relative relocations to pack.
 has_relr() { readelf -dW "$1" | grep -q '(RELRSZ)'; }
 # shellcheck disable=SC2206  # the list is a deliberate word-split
 relr_files=($im_libs "$hard_dir/php" "$hard_dir"/ext/*.so)

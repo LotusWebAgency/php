@@ -42,8 +42,8 @@ ARG NM_COMPILER=llvm-nm
 # path that keeps that dispatch.
 # upgrade: the digest-pinned base can hold a library older than the -dev package the
 # deps stages install next (sqlite-libs 3.54.0 beside sqlite-dev 3.54.1, whose
-# libsqlite3.so names a file only 3.54.1 ships), which breaks a link on the dangling
-# symlink. WOLFI_INDEX_STATE re-runs this layer whenever the
+# libsqlite3.so names a file only 3.54.1 ships), and lld, unlike GNU ld, fails the
+# link on that dangling symlink. WOLFI_INDEX_STATE re-runs this layer whenever the
 # index stamp changes instead of replaying a cached upgrade.
 ARG WOLFI_INDEX_STATE=""
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
@@ -300,11 +300,11 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # -Wc,-fuse-ld=lld would reach libtool's compiler flags, but ./configure's own
 # probes call clang directly, where it is an unknown argument; every probe would
 # fail and autoconf would read that as a feature answer.
-# gcc links through lld as well: it links plain gcc objects, takes
-# -z pack-relative-relocs and writes the GNU property note, and with
-# -z keep-text-section-prefix it folds gcc's profile-guided .text.hot.* input
-# sections into a .text.hot output section, which assert_profile_reached_the_link
-# measures. GNU ld (binutils 2.47) does not fold them.
+# gcc links through lld as well. GNU ld also accepts -z pack-relative-relocs; lld adds
+# the .text.hot fold: with -z keep-text-section-prefix it folds gcc's profile-guided
+# .text.hot.* input sections into a .text.hot output section, which
+# assert_profile_reached_the_link measures (GNU ld 2.47 does not), and it writes the
+# GNU property note when every input carries it.
 # Wolfi's gcc does not look at PATH for ld: collect2 takes the first ld in
 # COMPILER_PATH, which ends with /usr/x86_64-pc-linux-gnu/bin (binutils' own
 # target directory). The PATH shim alone leaves gcc on bfd, so for gcc that

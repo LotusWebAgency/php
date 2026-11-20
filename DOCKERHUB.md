@@ -350,19 +350,19 @@ ENV PHP_EXT_ENABLE=myext
 
 ## Hardening
 
-Measured on the shipped ELF binaries, not assumed from compiler flags: PIE, full RELRO
-(`GNU_RELRO` and `BIND_NOW`), non-executable stack, `-fstack-protector-strong`,
-`_FORTIFY_SOURCE=3`, and `-fcf-protection=full` on amd64. On arm64, PAC and BTI
-(`-mbranch-protection=standard`) are compiled in, and lld writes the BTI property glibc enforces
-when every input carries it; PHP 7.0-8.0 link OpenSSL 1.1.1w statically, whose objects do not, so
-BTI is off there. The compilers
-also run with zero-initialized locals, no null-check deletion, wrapping signed overflow and no strict
-aliasing. Links use packed relative relocations (`-z pack-relative-relocs`, `DT_RELR`).
-Every setuid and setgid bit inherited from the base image is stripped. Busybox's raw-socket and interface applets
-(`ping`, `netstat`, `traceroute` and the rest) are removed;
-`curl` stays. A derived image that runs `apk add` gets the busybox links back and can prune them
-again. PHP 7.0-8.4 build with GCC 16.2 (PGO, no LTO) and 8.5 with clang 19 (PGO
-and ThinLTO), both from Wolfi packages. The baked ini sets `zend.assertions=-1` (not on cli-builder),
+Measured on the shipped ELF binaries, not assumed from compiler flags: PIE, full RELRO (`GNU_RELRO`
+and `BIND_NOW`), non-executable stack, `-fstack-protector-strong`, `_FORTIFY_SOURCE=3`, and
+`-fcf-protection=full` on amd64. On arm64, PAC and BTI (`-mbranch-protection=standard`) are compiled
+in.
+
+lld writes the GNU property note for BTI (arm64) and IBT/SHSTK (amd64) only if every input has it;
+the images do not assert it. The compilers run with zero-initialized locals, no null-check deletion,
+wrapping signed overflow and no strict aliasing. Links use packed relative relocations (`-z
+pack-relative-relocs`, `DT_RELR`). Every setuid and setgid bit inherited from the base image is
+stripped. Busybox's raw-socket and interface applets (`ping`, `netstat`, `traceroute` and the rest)
+are removed; `curl` stays. A derived image that runs `apk add` gets the busybox links back and can
+prune them again. PHP 7.0-8.4 build with GCC 16.2 (PGO, no LTO) and 8.5 with clang 19 (PGO and
+ThinLTO), both from Wolfi packages. The baked ini sets `zend.assertions=-1` (not on cli-builder),
 `session.upload_progress.enabled=0` and, on PHP 8.5, `fatal_error_backtraces=Off`.
 
 Snuffleupagus is compiled in but off. `PHP_SNUFFLEUPAGUS=<ruleset>` turns it on. For your own
