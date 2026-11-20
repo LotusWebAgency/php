@@ -286,40 +286,47 @@ echo "ok: PHP_CHMOD_SHIM rejects ambiguous values instead of silently treating t
 
 # --- opcache segment sizing and huge pages -----------------------------------
 # The interned strings buffer is carved out of the opcache segment, so the segment
-# floor is 128MB and the buffer scales with it. PHP before 7.3 cannot allocate more
-# than 16MB of it.
+# floor is 128MB and the buffer scales with it. PHP 7.0-7.2 cannot allocate more than
+# 16MB of it, and fails to start opcache with more than a fifth of a small segment.
+# ini_get() alone proves nothing here: opcache is not initialized in the CLI unless
+# enabled, and a bad pair kills it at startup, so every case also requires opcache to
+# come up with the computed values.
 PHP_MM=$(drun --rm "$IMAGE" php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null)
-case "$PHP_MM" in 7.0|7.1|7.2) interned_cap=16 ;; *) interned_cap=32 ;; esac
+case "$PHP_MM" in 7.0|7.1|7.2) legacy_opcache=1 ;; *) legacy_opcache=0 ;; esac
+if [ "$legacy_opcache" = 1 ]; then interned_cap=16; else interned_cap=32; fi
 opcache_sizes() {
-  drun --rm "$@" "$IMAGE" php -r 'echo ini_get("opcache.memory_consumption"), " ", ini_get("opcache.interned_strings_buffer");' 2>/dev/null
+  drun --rm "$@" "$IMAGE" php -d opcache.enable_cli=1 -r 'echo ini_get("opcache.memory_consumption"), " ", ini_get("opcache.interned_strings_buffer"), " ", (opcache_get_status(false)["opcache_enabled"] ?? false) === true ? "started" : "stopped";' 2>/dev/null || true
 }
 
 got=$(opcache_sizes -m 256m)
-[ "$got" = "128 16" ] || fail "256m: opcache memory/interned is '$got', expected '128 16' (the floor is 128MB, interned an eighth of it)"
+[ "$got" = "128 16 started" ] || fail "256m: opcache memory/interned/state is '$got', expected '128 16 started' (the floor is 128MB, interned an eighth of it)"
 got=$(opcache_sizes -m 4g)
-[ "$got" = "512 $interned_cap" ] || fail "4g: opcache memory/interned is '$got', expected '512 $interned_cap'"
-echo "ok: opcache segment is at least 128MB and the interned strings buffer scales with it ($got at 4g)"
+[ "$got" = "512 $interned_cap started" ] || fail "4g: opcache memory/interned/state is '$got', expected '512 $interned_cap started'"
+echo "ok: opcache segment is at least 128MB, the interned strings buffer scales with it, and opcache starts ($got at 4g)"
 
 got=$(opcache_sizes -m 4g -e PHP_OPCACHE_MEMORY=64M)
-[ "$got" = "64 8" ] || fail "PHP_OPCACHE_MEMORY=64M: opcache memory/interned is '$got', expected '64 8' (an explicit size is used exactly)"
-echo "ok: an explicit PHP_OPCACHE_MEMORY below the floor is used exactly"
+[ "$got" = "64 8 started" ] || fail "PHP_OPCACHE_MEMORY=64M: opcache memory/interned/state is '$got', expected '64 8 started' (an explicit size is used exactly)"
+echo "ok: an explicit PHP_OPCACHE_MEMORY below the floor is used exactly and starts"
 
 got=$(opcache_sizes -m 4g -e PHP_OPCACHE_INTERNED_STRINGS=12)
-[ "$got" = "512 12" ] || fail "PHP_OPCACHE_INTERNED_STRINGS=12: opcache memory/interned is '$got', expected '512 12'"
+[ "$got" = "512 12 started" ] || fail "PHP_OPCACHE_INTERNED_STRINGS=12: opcache memory/interned/state is '$got', expected '512 12 started'"
 got=$(opcache_sizes -m 4g -e PHP_OPCACHE_INTERNED_STRINGS=40)
-case "$PHP_MM" in 7.0|7.1|7.2) want_interned=16 ;; *) want_interned=40 ;; esac
-[ "$got" = "512 $want_interned" ] || fail "PHP_OPCACHE_INTERNED_STRINGS=40: opcache memory/interned is '$got', expected '512 $want_interned' on PHP $PHP_MM"
-echo "ok: PHP_OPCACHE_INTERNED_STRINGS overrides the buffer, capped at 16MB before PHP 7.3"
+if [ "$legacy_opcache" = 1 ]; then want_interned=16; else want_interned=40; fi
+[ "$got" = "512 $want_interned started" ] || fail "PHP_OPCACHE_INTERNED_STRINGS=40: opcache memory/interned/state is '$got', expected '512 $want_interned started' on PHP $PHP_MM"
+echo "ok: PHP_OPCACHE_INTERNED_STRINGS overrides the buffer, capped at 16MB before PHP 7.3, and opcache starts"
 
+if [ "$legacy_opcache" = 1 ]; then want_tiny="8 1 started"; else want_tiny="8 4 started"; fi
 got=$(opcache_sizes -e PHP_OPCACHE_MEMORY=8)
-[ "$got" = "8 4" ] || fail "PHP_OPCACHE_MEMORY=8: opcache memory/interned is '$got', expected '8 4' (the derived buffer is capped at half the segment)"
-echo "ok: a tiny PHP_OPCACHE_MEMORY starts with the interned strings buffer at half the segment"
+[ "$got" = "$want_tiny" ] || fail "PHP_OPCACHE_MEMORY=8: opcache memory/interned/state is '$got', expected '$want_tiny' on PHP $PHP_MM (the derived buffer is capped below the segment size)"
+echo "ok: a tiny PHP_OPCACHE_MEMORY starts opcache with a capped interned strings buffer ($got)"
 
+if [ "$legacy_opcache" = 1 ]; then want_cap_mb=6; else want_cap_mb=16; fi
+want_capped="32 $want_cap_mb started"
 got=$(opcache_sizes -e PHP_OPCACHE_MEMORY=32 -e PHP_OPCACHE_INTERNED_STRINGS=40)
-[ "$got" = "32 16" ] || fail "PHP_OPCACHE_MEMORY=32 + PHP_OPCACHE_INTERNED_STRINGS=40: opcache memory/interned is '$got', expected '32 16'"
+[ "$got" = "$want_capped" ] || fail "PHP_OPCACHE_MEMORY=32 + PHP_OPCACHE_INTERNED_STRINGS=40: opcache memory/interned/state is '$got', expected '$want_capped' on PHP $PHP_MM"
 err=$(drun --rm -e PHP_OPCACHE_MEMORY=32 -e PHP_OPCACHE_INTERNED_STRINGS=40 "$IMAGE" php -v 2>&1 >/dev/null)
-echo "$err" | grep -q 'using 16 instead' || fail "PHP_OPCACHE_INTERNED_STRINGS=40 over half of 32MB logged no warning naming the cap: $err"
-echo "ok: an explicit PHP_OPCACHE_INTERNED_STRINGS over half the segment is capped at half, with a warning"
+echo "$err" | grep -q "PHP_OPCACHE_INTERNED_STRINGS=40 exceeds .*using ${want_cap_mb} instead" || fail "PHP_OPCACHE_INTERNED_STRINGS=40 over the cap for 32MB logged no warning naming both numbers: $err"
+echo "ok: an explicit PHP_OPCACHE_INTERNED_STRINGS over the cap for the segment is lowered, with a warning, and opcache starts"
 
 for v in 0 abc 8M -4 1.5 18446744073709551617; do
   set +e

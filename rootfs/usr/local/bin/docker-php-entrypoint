@@ -365,27 +365,28 @@ else
   OPCACHE_MB="$(clamp $(( MEM_MB / 8 )) 128 512)"
 fi
 # The interned strings buffer is carved out of the opcache segment, so it scales
-# with it: an eighth, 8-32 MB. PHP before 7.3 cannot allocate more than 16 MB of it
-# (php/pgo/shipped-opcache-ini.sh clamps the shipped ini the same way).
+# with it: an eighth, 8-32 MB.
 if [ -n "${PHP_OPCACHE_INTERNED_STRINGS:-}" ]; then
   INTERNED_MB=$(( 10#$PHP_OPCACHE_INTERNED_STRINGS ))
 else
   INTERNED_MB="$(clamp $(( OPCACHE_MB / 8 )) 8 32)"
 fi
+# PHP refuses to start unless the buffer is smaller than the segment; half leaves the
+# rest of the segment room. PHP 7.0-7.2 fails well below that (measured: with the
+# baked ini the buffer must stay under about 3/8 of the segment, less on 8 and 16 MB
+# segments, and below 16 MB at any size), so a fifth of the segment, at most 16 MB.
+INTERNED_CAP_MB=$(( OPCACHE_MB / 2 ))
+INTERNED_CAP_WHY="half of the opcache memory (${OPCACHE_MB}MB)"
 case "$PHP_MAJOR_MINOR" in
   7.0|7.1|7.2)
-    if [ "$INTERNED_MB" -gt 16 ]; then
-      [ -z "${PHP_OPCACHE_INTERNED_STRINGS:-}" ] || echo "docker-php-entrypoint: PHP ${PHP_MAJOR_MINOR} cannot allocate more than 16MB of interned strings; using 16 instead of ${INTERNED_MB}." >&2
-      INTERNED_MB=16
-    fi
+    INTERNED_CAP_MB=$(( OPCACHE_MB / 5 ))
+    [ "$INTERNED_CAP_MB" -le 16 ] || INTERNED_CAP_MB=16
+    INTERNED_CAP_WHY="what PHP ${PHP_MAJOR_MINOR} can allocate in ${OPCACHE_MB}MB of opcache memory (a fifth of it, at most 16)"
     ;;
 esac
-# The buffer is carved out of the opcache segment, and PHP refuses to start unless the
-# buffer is smaller than the segment; half leaves the rest of the segment room.
-INTERNED_CAP_MB=$(( OPCACHE_MB / 2 ))
 [ "$INTERNED_CAP_MB" -ge 1 ] || INTERNED_CAP_MB=1
 if [ "$INTERNED_MB" -gt "$INTERNED_CAP_MB" ]; then
-  [ -z "${PHP_OPCACHE_INTERNED_STRINGS:-}" ] || echo "docker-php-entrypoint: PHP_OPCACHE_INTERNED_STRINGS=${PHP_OPCACHE_INTERNED_STRINGS} exceeds half of the opcache memory (${OPCACHE_MB}MB); using ${INTERNED_CAP_MB} instead." >&2
+  [ -z "${PHP_OPCACHE_INTERNED_STRINGS:-}" ] || echo "docker-php-entrypoint: PHP_OPCACHE_INTERNED_STRINGS=${PHP_OPCACHE_INTERNED_STRINGS} exceeds ${INTERNED_CAP_WHY}; using ${INTERNED_CAP_MB} instead." >&2
   INTERNED_MB=$INTERNED_CAP_MB
 fi
 
