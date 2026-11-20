@@ -284,6 +284,102 @@ for v in 2 maybe TRUEX; do
 done
 echo "ok: PHP_CHMOD_SHIM rejects ambiguous values instead of silently treating them as off"
 
+# --- opcache segment sizing and huge pages -----------------------------------
+# The interned strings buffer is carved out of the opcache segment, so the segment
+# floor is 128MB and the buffer scales with it. PHP before 7.3 cannot allocate more
+# than 16MB of it.
+PHP_MM=$(drun --rm "$IMAGE" php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null)
+case "$PHP_MM" in 7.0|7.1|7.2) interned_cap=16 ;; *) interned_cap=32 ;; esac
+opcache_sizes() {
+  drun --rm "$@" "$IMAGE" php -r 'echo ini_get("opcache.memory_consumption"), " ", ini_get("opcache.interned_strings_buffer");' 2>/dev/null
+}
+
+got=$(opcache_sizes -m 256m)
+[ "$got" = "128 16" ] || fail "256m: opcache memory/interned is '$got', expected '128 16' (the floor is 128MB, interned an eighth of it)"
+got=$(opcache_sizes -m 4g)
+[ "$got" = "512 $interned_cap" ] || fail "4g: opcache memory/interned is '$got', expected '512 $interned_cap'"
+echo "ok: opcache segment is at least 128MB and the interned strings buffer scales with it ($got at 4g)"
+
+got=$(opcache_sizes -m 4g -e PHP_OPCACHE_MEMORY=64M)
+[ "$got" = "64 8" ] || fail "PHP_OPCACHE_MEMORY=64M: opcache memory/interned is '$got', expected '64 8' (an explicit size is used exactly)"
+echo "ok: an explicit PHP_OPCACHE_MEMORY below the floor is used exactly"
+
+got=$(opcache_sizes -m 4g -e PHP_OPCACHE_INTERNED_STRINGS=12)
+[ "$got" = "512 12" ] || fail "PHP_OPCACHE_INTERNED_STRINGS=12: opcache memory/interned is '$got', expected '512 12'"
+got=$(opcache_sizes -m 4g -e PHP_OPCACHE_INTERNED_STRINGS=40)
+case "$PHP_MM" in 7.0|7.1|7.2) want_interned=16 ;; *) want_interned=40 ;; esac
+[ "$got" = "512 $want_interned" ] || fail "PHP_OPCACHE_INTERNED_STRINGS=40: opcache memory/interned is '$got', expected '512 $want_interned' on PHP $PHP_MM"
+echo "ok: PHP_OPCACHE_INTERNED_STRINGS overrides the buffer, capped at 16MB before PHP 7.3"
+
+for v in 0 abc 8M -4 1.5; do
+  set +e
+  out=$(drun --rm -e "PHP_OPCACHE_INTERNED_STRINGS=${v}" "$IMAGE" php -v 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "PHP_OPCACHE_INTERNED_STRINGS=${v} was not rejected"
+  echo "$out" | grep -q "invalid PHP_OPCACHE_INTERNED_STRINGS=${v}" || fail "PHP_OPCACHE_INTERNED_STRINGS=${v} rejected for the wrong reason: $out"
+done
+echo "ok: PHP_OPCACHE_INTERNED_STRINGS rejects anything but a positive integer"
+
+# Huge pages are opt-in. Whether opcache.huge_code_pages exists is a property of the
+# build, so a build without it must start, warn and skip; the entrypoint's own
+# probe decides, and the baked ini's `= 0` makes the directive visible when present.
+huge_probe='$v = ini_get("opcache.huge_code_pages"); echo $v === false ? "absent" : $v;'
+got=$(drun --rm "$IMAGE" php -r "$huge_probe" 2>/dev/null)
+if [ "$got" = absent ]; then
+  echo "ok: this build has no opcache.huge_code_pages; PHP_OPCACHE_HUGE_CODE_PAGES is skipped"
+else
+  [ "$got" = 0 ] || fail "opcache.huge_code_pages is '$got' by default, expected 0"
+  for v in 1 true TRUE yes on; do
+    got=$(drun --rm -e "PHP_OPCACHE_HUGE_CODE_PAGES=${v}" "$IMAGE" php -r "$huge_probe" 2>/dev/null)
+    [ "$got" = 1 ] || fail "PHP_OPCACHE_HUGE_CODE_PAGES=${v} gave opcache.huge_code_pages='$got', expected 1"
+  done
+  for v in 0 false FALSE no off; do
+    got=$(drun --rm -e "PHP_OPCACHE_HUGE_CODE_PAGES=${v}" "$IMAGE" php -r "$huge_probe" 2>/dev/null)
+    [ "$got" = 0 ] || fail "PHP_OPCACHE_HUGE_CODE_PAGES=${v} gave opcache.huge_code_pages='$got', expected 0"
+  done
+  echo "ok: PHP_OPCACHE_HUGE_CODE_PAGES is off by default and takes the boolean spellings"
+fi
+
+for v in true TRUE yes on 1; do
+  out=$(drun --rm -e "PHP_ZEND_ALLOC_HUGE_PAGES=${v}" "$IMAGE" env 2>/dev/null)
+  echo "$out" | grep -qx 'USE_ZEND_ALLOC_HUGE_PAGES=1' || fail "PHP_ZEND_ALLOC_HUGE_PAGES=${v} did not export USE_ZEND_ALLOC_HUGE_PAGES=1: $out"
+done
+for v in 0 false no off; do
+  out=$(drun --rm -e "PHP_ZEND_ALLOC_HUGE_PAGES=${v}" "$IMAGE" env 2>/dev/null)
+  echo "$out" | grep -q '^USE_ZEND_ALLOC_HUGE_PAGES=' && fail "PHP_ZEND_ALLOC_HUGE_PAGES=${v} unexpectedly exported USE_ZEND_ALLOC_HUGE_PAGES: $out"
+done
+out=$(drun --rm "$IMAGE" env 2>/dev/null)
+echo "$out" | grep -q '^USE_ZEND_ALLOC_HUGE_PAGES=' && fail "USE_ZEND_ALLOC_HUGE_PAGES is exported by default: $out"
+echo "ok: PHP_ZEND_ALLOC_HUGE_PAGES exports USE_ZEND_ALLOC_HUGE_PAGES=1 only when on"
+
+for var in PHP_OPCACHE_HUGE_CODE_PAGES PHP_ZEND_ALLOC_HUGE_PAGES; do
+  for v in 2 maybe TRUEX; do
+    set +e
+    out=$(drun --rm -e "${var}=${v}" "$IMAGE" php -v 2>&1 >/dev/null)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "${var}=${v} (neither on nor off) was not rejected"
+    echo "$out" | grep -qi "invalid ${var}=${v}" || fail "${var}=${v} rejected for the wrong reason: $out"
+  done
+done
+echo "ok: the huge page switches reject ambiguous values"
+
+# A host with transparent huge pages set to never makes both switches inert: one
+# warning, then the container starts. The sysfs file is replaced with a bind mount.
+thp_dir=$(mktemp -d)
+echo "always madvise [never]" > "$thp_dir/enabled"
+chmod 755 "$thp_dir"; chmod 644 "$thp_dir/enabled"
+set +e
+out=$(drun --rm -e PHP_ZEND_ALLOC_HUGE_PAGES=1 -v "$thp_dir/enabled:/sys/kernel/mm/transparent_hugepage/enabled:ro" "$IMAGE" php -r 'echo "started";' 2>&1)
+rc=$?
+set -e
+rm -rf "$thp_dir"
+[ "$rc" -eq 0 ] || fail "a host with THP=never refused to start: $out"
+echo "$out" | grep -q "transparent huge pages are 'never'" || fail "THP=never did not log the warning: $out"
+[ "$(echo "$out" | grep -c "transparent huge pages are 'never'")" -eq 1 ] || fail "THP=never warning was not exactly one line: $out"
+echo "ok: THP=never on the host logs one warning and the container still starts"
+
 # --- autotuning and input validation ----------------------------------------
 
 if [ "$FLAVOR" = fpm ]; then

@@ -41,13 +41,12 @@ dates are upstream's ([php.net](https://www.php.net/supported-versions.php)) and
 | `8.5` | clang | yes | active | 2029-12-31 |
 
 End-of-life tags are still published and rebuilt weekly for base-image and package updates, but their PHP
-interpreter gets no upstream fixes. Policy:
+interpreter (8.1 and below) gets no upstream security fixes. Policy:
 [SUPPORT.md](https://github.com/LotusWebAgency/php/blob/main/SUPPORT.md).
 
 ### Older PHP versions
 
-- 8.1 and below get no upstream security fixes. 7.0-8.0 link a vendored OpenSSL 1.1.1w, ICU,
-  libxml2 and libxslt statically.
+- 7.0-8.0 link a vendored OpenSSL 1.1.1w, ICU, libxml2 and libxslt statically.
 - mysqli/PDO support `caching_sha2_password` from 7.4. 7.1-7.3 need `mysql_native_password`
   accounts on MySQL 8 and cannot reach MySQL 9. 7.0 also needs the server's default plugin set to
   `mysql_native_password`. 7.0 and 7.1 speak TLS 1.0 only, which MySQL 8.4 and MariaDB 11 refuse.
@@ -71,8 +70,6 @@ The amd64 baseline is `x86-64-v2` (SSE4.2 and POPCNT; Intel Nehalem and newer, A
 newer), not plain `x86-64`, because Wolfi's packages are built for it. Both baselines and amd64
 `-v3` tune generic; arm64 `-v3` tunes for `neoverse-v2`. The vendored ImageMagick and heif stack are
 baseline builds in every image, `-v3` included.
-
-`8.4-fpm` moves with each 8.4 patch release. Pin the digest for reproducible builds.
 
 ## Flavors
 
@@ -164,10 +161,12 @@ variable that is set but empty, or contains a newline, stops the container with 
 | `PHP_DISPLAY_ERRORS` | `Off` | `display_errors`. Errors go to stderr regardless. |
 | `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec`. cli, ext-builder: unset; the same list is baked into `10-php.ini`. cli-builder: none | Adds to the baked and mounted-ini lists, never replaces them. `proc_open` stays enabled for Composer. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
-| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, 64-512 MB | `opcache.memory_consumption` |
+| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, 128-512 MB | `opcache.memory_consumption` |
+| `PHP_OPCACHE_INTERNED_STRINGS` | opcache memory / 8, 8-32 MB (max 16 on 7.0-7.2) | `opcache.interned_strings_buffer` |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS`, `PHP_OPCACHE_REVALIDATE_FREQ` | `1`, `2` | Set validation to `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
 | `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing`, `64M` | PHP 8.1+, and 8.0 on amd64 (8.0 on arm64 has no JIT). |
+| `PHP_OPCACHE_HUGE_CODE_PAGES`, `PHP_ZEND_ALLOC_HUGE_PAGES` | off | `true` sets `opcache.huge_code_pages=1` / `USE_ZEND_ALLOC_HUGE_PAGES=1`. The host needs transparent huge pages in `madvise` or `always` mode; [details](https://github.com/LotusWebAgency/php#configuration). |
 | `PHP_EXT_ENABLE` | unset | Comma-separated shared extensions to load, for example `ldap,uuid`. |
 | `PHP_SNUFFLEUPAGUS` | unset | `default`, `wordpress`, `prestashop`, `laravel`, or a custom ruleset name. |
 | `PHP_CHMOD_SHIM` | `0` | `true` enables the PrestaShop `chmod(0)` cache-bug shim. |
@@ -202,11 +201,9 @@ directory when `conf.d` is not writable). Size it for the largest upload times c
 plus sessions; it counts against the memory limit. `cli-builder` needs
 `/tmp:exec,size=256m` because `npx` runs packages from `/tmp`.
 
-Without a writable `/tmp`, `PHP_EXT_ENABLE` and `PHP_SNUFFLEUPAGUS` refuse to start,
-and the other `PHP_*` ini variables are ignored with a warning naming each one. Your application's
-own writes (PrestaShop `var/cache`, Laravel `storage`, WordPress uploads) need their own volume. A
-FastCGI unix socket needs a writable directory. Use `docker exec <container> docker-php-entrypoint php ...` to
-see the env-driven ini; plain `php ...` does not. Details:
+Without a writable `/tmp`, `PHP_EXT_ENABLE` and `PHP_SNUFFLEUPAGUS` refuse to start, and the other
+`PHP_*` ini variables are ignored with a warning naming each one. The application's own writes and a
+FastCGI unix socket need their own writable mounts. Details:
 [README](https://github.com/LotusWebAgency/php#read-only-root-filesystem).
 
 ## Hardened deployment
@@ -266,8 +263,7 @@ the code (`./:/app:ro`) works too.
 What each setting needs:
 
 - **`read_only` and `/tmp`.** `/tmp` is the only path the image writes. `noexec` is fine for `fpm`
-  and `cli`; `cli-builder` needs `exec` for `npx`. Without a writable `/tmp`, `PHP_SNUFFLEUPAGUS` and
-  `PHP_EXT_ENABLE` refuse to start. See [Read-only root filesystem](https://github.com/LotusWebAgency/php#read-only-root-filesystem).
+  and `cli`; `cli-builder` needs `exec` for `npx`. See [Read-only root filesystem](https://github.com/LotusWebAgency/php#read-only-root-filesystem).
 - **`cap_drop: [ALL]`.** Nothing in `fpm` or `cli` needs a capability. The FPM master already runs as
   `www-data`, so the log notes that the pool's `user` and `group` lines are ignored; that is expected.
   Keep `PHP_FPM_LISTEN` on a port above 1024.
@@ -275,15 +271,14 @@ What each setting needs:
 - **Snuffleupagus.** Pick the ruleset that matches the application, or start a custom one from
   `default` (see [Hardening](https://github.com/LotusWebAgency/php#hardening)). Rulesets are for serving: run Composer and other build
   steps in `cli-builder` without one. Snuffleupagus hooks the executor, so PHP turns the JIT off
-  while it is loaded and logs a startup warning. `PHP_OPCACHE_JIT=disable` says so up front and
-  removes the warning; `off` does not, because it keeps the JIT buffer.
+  and logs a startup warning. `PHP_OPCACHE_JIT=disable` removes the warning; `off` does not, because it keeps the JIT buffer.
 - **`PHP_DISABLE_FUNCTIONS`.** Adds names to the baked list and a mounted ini's (as in PHP, only the
-  last mounted `disable_functions` counts), for example `proc_open` when the application never
-  starts processes (Laravel queues, Symfony Process and Composer need it). It refuses to
+  last mounted `disable_functions` counts), for example `proc_open` when nothing starts processes
+  (Composer, Symfony Process and Laravel queues do). It refuses to
   start if a name does not end up disabled: a later-sorting ini replaces the list, or a bare
   `--read-only` has no writable `/tmp`. `php -n`, `-c` or `-d disable_functions=` bypasses the check.
 - **Limits.** `pids_limit` bounds runaway forks; the memory limit bounds the container and drives FPM
-  and opcache autotuning (512 MB without one).
+  and opcache autotuning.
 - **Network.** `fpm` speaks FastCGI on 9000 and should only be reachable by the web server. Never
   publish 9000 to the host.
 - **Errors.** `PHP_DISPLAY_ERRORS` stays `Off`; errors go to stderr.
@@ -363,7 +358,7 @@ stripped. Busybox's raw-socket and interface applets (`ping`, `netstat`, `tracer
 are removed; `curl` stays. A derived image that runs `apk add` gets the busybox links back and can
 prune them again. PHP 7.0-8.4 build with GCC 16.2 (PGO, no LTO) and 8.5 with clang 19 (PGO and
 ThinLTO), both from Wolfi packages. The baked ini sets `zend.assertions=-1` (not on cli-builder),
-`session.upload_progress.enabled=0` and, on PHP 8.5, `fatal_error_backtraces=Off`.
+`session.upload_progress.enabled=0`, `mysqli.allow_local_infile=0` and, on PHP 8.5, `fatal_error_backtraces=Off`.
 
 Snuffleupagus is compiled in but off. `PHP_SNUFFLEUPAGUS=<ruleset>` turns it on. For your own
 rules, mount `/usr/local/etc/php/snuffleupagus/<name>.rules` read-only and set `PHP_SNUFFLEUPAGUS=<name>`

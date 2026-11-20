@@ -234,11 +234,14 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_DISPLAY_ERRORS` | `Off` | `display_errors`. Errors go to stderr regardless. |
 | `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec` (the variable's baked value). cli, ext-builder: the variable is unset; the same list is baked into `10-php.ini`. cli-builder: none | Names to disable in addition to the baked list and any `disable_functions` in a mounted ini. Never replaces either. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
-| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 64-512 MB | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. |
+| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 128-512 MB | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. |
+| `PHP_OPCACHE_INTERNED_STRINGS` | one eighth of the opcache memory, clamped to 8-32 MB (at most 16 on PHP 7.0-7.2) | `opcache.interned_strings_buffer`, carved out of the opcache segment. A bare number, in MB. |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS` | `1` | `opcache.validate_timestamps`. Set `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_REVALIDATE_FREQ` | `2` | `opcache.revalidate_freq` |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
 | `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing`, `64M` | `opcache.jit`, `opcache.jit_buffer_size`. PHP 8.1+, and 8.0 on amd64. 8.0 on arm64 has no JIT: its opcache builds one for x86 only. |
+| `PHP_OPCACHE_HUGE_CODE_PAGES` | off | `1`, `true`, `yes` or `on` sets `opcache.huge_code_pages=1`. `0`, `false`, `no`, `off` leave it off. Anything else is refused. See the huge pages paragraph below. |
+| `PHP_ZEND_ALLOC_HUGE_PAGES` | off | Same spellings. On exports `USE_ZEND_ALLOC_HUGE_PAGES=1`, which php-fpm passes to its workers. |
 | `PHP_EXT_ENABLE` | unset | Comma-separated shared extensions to load. See [Extensions](#extensions). |
 | `PHP_SNUFFLEUPAGUS` | unset | Ruleset name to load. See [Hardening](#hardening). |
 | `PHP_CHMOD_SHIM` | `0` | `1`, `true`, `yes` or `on` preloads the [chmod shim](#hardening). `0`, `false`, `no`, `off` disable it. Anything else is refused. |
@@ -260,6 +263,12 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_FPM_REQUEST_TERMINATE_TIMEOUT` | `600s` | `request_terminate_timeout`, a wall-clock cap per request. `max_execution_time` does not count time blocked on I/O, so only this stops a hung worker. |
 
 The ping endpoint is fixed at `/fpm-ping` (response `pong`) and is what the healthcheck uses.
+
+**Huge pages.** Both switches are off by default and need transparent huge pages in `madvise` or `always`
+mode on the host (`/sys/kernel/mm/transparent_hugepage/enabled`). With `never` the entrypoint logs one
+warning and starts anyway, and the request has no effect. The gain depends on the workload, so measure
+it. `PHP_ZEND_ALLOC_HUGE_PAGES` also raises the resident memory of every worker. A PHP build without
+`opcache.huge_code_pages` ignores that switch with a warning.
 
 **Pool autotuning.** The entrypoint reads the container memory limit from cgroup. Without a limit it
 assumes 512 MB and logs that. It reserves opcache memory plus 64 MB and divides 80% of the rest by
@@ -538,9 +547,11 @@ ENV PHP_EXT_ENABLE=myext
   the raw-socket and interface set) are removed; `curl` stays. A derived image that runs
   `apk add` gets the busybox links back and can prune them again.
 - Baked ini defaults for fpm, cli and ext-builder: `zend.assertions = -1`, so `assert()` is compiled out
-  instead of executing in production. All four flavors set `session.upload_progress.enabled = 0` and
-  `fatal_error_backtraces = Off` (a PHP 8.5 directive that older versions ignore). cli-builder keeps
-  assertions on for test suites. Override any of them with a drop-in `99-*.ini`.
+  instead of executing in production. All four flavors set `session.upload_progress.enabled = 0`,
+  `mysqli.allow_local_infile = 0` (PHP 7.0 compiles in 1, 8.x 0, so a hostile MySQL server cannot ask the
+  client for its files on any version) and `fatal_error_backtraces = Off` (a PHP 8.5 directive that older
+  versions ignore). cli-builder keeps assertions on for test suites. Override any of them with a drop-in
+  `99-*.ini`.
 
 **ImageMagick policy.** Every image ships `/opt/imagemagick/etc/ImageMagick-7/policy.xml` (source:
 `conf/imagemagick-policy.xml`, derived from upstream's `policy-secure` and `policy-websafe`

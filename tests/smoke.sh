@@ -956,6 +956,11 @@ case "$FLAVOR" in
 esac
 [[ "$za" == "$want_za" ]] || { echo "FAIL: $FLAVOR zend.assertions is '$za', expected $want_za"; exit 1; }
 echo "ok: session.upload_progress off, zend.assertions=$za on $FLAVOR"
+# PHP 7.0 compiles mysqli.allow_local_infile in as 1 and 8.x as 0; the baked ini
+# pins it off so every version agrees.
+infile=$(drun --rm "$IMAGE" php -r "echo ini_get('mysqli.allow_local_infile') ?: '0';")
+[[ "$infile" == "0" ]] || { echo "FAIL: mysqli.allow_local_infile is '$infile' on $FLAVOR, expected off"; exit 1; }
+echo "ok: mysqli.allow_local_infile off on $FLAVOR"
 # fatal_error_backtraces exists from 8.5; older versions ignore the unknown
 # directive (php starts silent above), so only 8.5 can read it back.
 if ! version_lt "$EXPECT" 8.5; then
