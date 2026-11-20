@@ -818,7 +818,9 @@ def webservice():
     if cid:
         r = ws_request(c, "GET", f"customers/{cid}", fmt="JSON")
         s.ok("ws: created customer reads back", r.status == 200 and r.json()["customer"]["email"] == email, r.text[:150])
-        upd = xml.replace("<customer>", f"<customer><id>{cid}</id>").replace(f"Api{RUNW}", f"Api{RUNW}Updated")
+        # PUT writes every field it leaves out as empty, id_shop too, and 8.2.9+ then refuses records owned by a shop-0 customer
+        got = r.json()["customer"] if r.status == 200 else {}
+        upd = xml.replace("<customer>", f"<customer><id>{cid}</id><id_shop>{got.get('id_shop', 1)}</id_shop><id_shop_group>{got.get('id_shop_group', 1)}</id_shop_group>").replace(f"Api{RUNW}", f"Api{RUNW}Updated")
         r = ws_request(c, "PUT", f"customers/{cid}", body=upd)
         s.ok("ws: customer updated (PUT)", r.status == 200, f"{r.status} {r.text[:300]}")
         r = ws_request(c, "GET", f"customers/{cid}", fmt="JSON")
