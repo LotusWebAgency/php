@@ -713,6 +713,7 @@ ENV PHP_FPM_PM=dynamic \
     PHP_FPM_STATUS_PATH=/fpm-status \
     PHP_FPM_ACCESS_LOG=/proc/self/fd/2 \
     PHP_FPM_SLOWLOG_TIMEOUT=10s \
+    PHP_FPM_REQUEST_TERMINATE_TIMEOUT=600s \
     PHP_DISABLE_FUNCTIONS="passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec"
 # One RUN for everything that edits or verifies the files above.
 RUN set -eux; \

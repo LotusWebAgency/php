@@ -786,6 +786,26 @@ for pair in "expose_php:" "display_errors:" "allow_url_include:"; do
 done
 echo "ok: php.ini hardened"
 
+# session.upload_progress.enabled is off everywhere. zend.assertions is -1
+# (assert() compiled out) on fpm and cli, which ext-builder inherits; cli-builder
+# keeps the compiled default 1 because test suites rely on assertions.
+up=$(drun --rm "$IMAGE" php -r "echo ini_get('session.upload_progress.enabled') ?: '0';")
+[[ "$up" == "0" ]] || { echo "FAIL: session.upload_progress.enabled is '$up', expected off"; exit 1; }
+za=$(drun --rm "$IMAGE" php -r "echo ini_get('zend.assertions');")
+case "$FLAVOR" in
+  cli-builder) want_za=1 ;;
+  *) want_za=-1 ;;
+esac
+[[ "$za" == "$want_za" ]] || { echo "FAIL: $FLAVOR zend.assertions is '$za', expected $want_za"; exit 1; }
+echo "ok: session.upload_progress off, zend.assertions=$za on $FLAVOR"
+# fatal_error_backtraces exists from 8.5; older versions ignore the unknown
+# directive (php starts silent above), so only 8.5 can read it back.
+if ! version_lt "$EXPECT" 8.5; then
+  fb=$(drun --rm "$IMAGE" php -r "echo ini_get('fatal_error_backtraces') ?: '0';")
+  [[ "$fb" == "0" ]] || { echo "FAIL: fatal_error_backtraces is '$fb' on PHP $EXPECT, expected off"; exit 1; }
+  echo "ok: fatal_error_backtraces off on PHP $EXPECT"
+fi
+
 # proc_open must stay enabled: composer and symfony/process need it. Builder
 # (conf/php-builder.ini) drops disable_functions entirely -- build tooling
 # legitimately needs shell_exec/exec too -- so shell_exec is only required to

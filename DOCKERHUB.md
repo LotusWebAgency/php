@@ -62,8 +62,8 @@ Every caveat and workaround: [Older PHP versions](https://github.com/LotusWebAge
 | `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image. |
 | `{release}-{flavor}[-v3]` | `8.5.13-fpm` | Full patch version, read from the built image after tests and the Trivy gate. |
 
-`-v3` needs a newer CPU. On older amd64 the image refuses to start (a startup
-check prints `this build requires an x86-64-v3 CPU`, exit 127). On arm64 there is no check and an unsupported core
+`-v3` needs a newer CPU. On older amd64 the image refuses to start
+(`this build requires an x86-64-v3 CPU`, exit 127). On arm64 there is no check and an unsupported core
 gets SIGILL: `armv9-a` code needs Neoverse N2/V2-class cores (Graviton4, Axion, Cobalt 100, Grace),
 not Graviton2/3, Ampere Altra or Apple silicon. Use the baseline tag on a Mac.
 
@@ -175,7 +175,7 @@ variable that is set but empty, or contains a newline, stops the container with 
 
 `fpm` only: `PHP_FPM_PM` (`dynamic`), `PHP_FPM_MAX_REQUESTS` (`1000`), `PHP_FPM_LISTEN`
 (`0.0.0.0:9000`), `PHP_FPM_STATUS_PATH` (`/fpm-status`), `PHP_FPM_ACCESS_LOG` (`/proc/self/fd/2`),
-`PHP_FPM_SLOWLOG_TIMEOUT` (`10s`). `PHP_FPM_MAX_CHILDREN`, `PHP_FPM_START_SERVERS`,
+`PHP_FPM_SLOWLOG_TIMEOUT` (`10s`), `PHP_FPM_REQUEST_TERMINATE_TIMEOUT` (`600s`). `PHP_FPM_MAX_CHILDREN`, `PHP_FPM_START_SERVERS`,
 `PHP_FPM_MIN_SPARE` and `PHP_FPM_MAX_SPARE` are autotuned from the container memory limit and
 `PHP_FPM_WORKER_MEMORY` (default `64` MB per worker). A value you set is used exactly and the
 others adjust to stay consistent. Without a memory limit the entrypoint assumes 512 MB and says so.
@@ -271,8 +271,7 @@ What each setting needs:
 - **`cap_drop: [ALL]`.** Nothing in `fpm` or `cli` needs a capability. The FPM master already runs as
   `www-data`, so the log notes that the pool's `user` and `group` lines are ignored; that is expected.
   Keep `PHP_FPM_LISTEN` on a port above 1024.
-- **`no-new-privileges`.** No setuid binary is left to gain privileges with; this closes the path for
-  anything added later.
+- **`no-new-privileges`.** No setuid binary is left; this closes the path for anything added later.
 - **Snuffleupagus.** Pick the ruleset that matches the application, or start a custom one from
   `default` (see [Hardening](https://github.com/LotusWebAgency/php#hardening)). Rulesets are for serving: run Composer and other build
   steps in `cli-builder` without one. Snuffleupagus hooks the executor, so PHP turns the JIT off
@@ -287,7 +286,7 @@ What each setting needs:
   and opcache autotuning (512 MB without one).
 - **Network.** `fpm` speaks FastCGI on 9000 and should only be reachable by the web server. Never
   publish 9000 to the host.
-- **Errors.** `PHP_DISPLAY_ERRORS` stays `Off` (the default); errors go to stderr.
+- **Errors.** `PHP_DISPLAY_ERRORS` stays `Off`; errors go to stderr.
 
 The `docker run` flags and the Kubernetes `securityContext` for the same setup are in the
 [README](https://github.com/LotusWebAgency/php#hardened-deployment).
@@ -353,16 +352,17 @@ ENV PHP_EXT_ENABLE=myext
 Measured on the shipped ELF binaries, not assumed from compiler flags: PIE, full RELRO
 (`GNU_RELRO` and `BIND_NOW`), non-executable stack, `-fstack-protector-strong`,
 `_FORTIFY_SOURCE=3`, and `-fcf-protection=full` on amd64. On arm64, PAC and BTI
-(`-mbranch-protection=standard`) are compiled in; on PHP 7.0-8.4 (gcc, gold) BTI is not enforced at
-runtime, because gold writes no `PT_GNU_PROPERTY` header and glibc enforces BTI from it. The compilers
+(`-mbranch-protection=standard`) are compiled in; BTI is not enforced at runtime on PHP 7.0-8.4,
+because gold writes no `PT_GNU_PROPERTY` header. The compilers
 also run with zero-initialized locals, no null-check deletion, wrapping signed overflow and no strict
 aliasing. Links use packed relative relocations
 (`-z pack-relative-relocs`, `DT_RELR`) where the linker supports it. Every setuid and setgid bit
-inherited from the base image is stripped. Busybox's network applets (`ping`, `netstat`,
-`traceroute`, `arping`, `microcom` and the rest of the raw-socket and interface set) are removed;
+inherited from the base image is stripped. Busybox's raw-socket and interface applets
+(`ping`, `netstat`, `traceroute` and the rest) are removed;
 `curl` stays. A derived image that runs `apk add` gets the busybox links back and can prune them
 again. PHP 7.0-8.4 build with GCC 16.2 (PGO, no LTO) and 8.5 with clang 19 (PGO
-and ThinLTO), both from Wolfi packages.
+and ThinLTO), both from Wolfi packages. The baked ini sets `zend.assertions=-1` (not on cli-builder),
+`session.upload_progress.enabled=0` and, on PHP 8.5, `fatal_error_backtraces=Off`.
 
 Snuffleupagus is compiled in but off. `PHP_SNUFFLEUPAGUS=<ruleset>` turns it on. For your own
 rules, mount `/usr/local/etc/php/snuffleupagus/<name>.rules` read-only and set `PHP_SNUFFLEUPAGUS=<name>`
@@ -385,7 +385,7 @@ cosign verify \
 Use cosign 3. Signatures and attestations are created in the GHCR staging repository
 `ghcr.io/lotuswebagency/php/release` and copied to Docker Hub with the image, digest for digest,
 before any tag moves, so they verify on `lotuswebagency/php`. The test-result and OpenVEX attestation
-commands and the details of what each contains are in the
+commands are in the
 [README](https://github.com/LotusWebAgency/php#verifying-images).
 
 CI verifies the base image's Chainguard cosign signature before building on it, and every image
@@ -397,8 +397,8 @@ findings are accepted, both without an upstream fix: CVE-2026-93687 (braces 3.0.
 semantic-release, HIGH) and CVE-2026-15534 (perl 5.44.0 in `ext-builder`, MEDIUM); see
 [Accepted findings](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md#accepted-findings).
 They are suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan
-without that file shows them. Trivy reads the apk database, so it cannot see libraries built from source and
-linked statically or kept under `/opt`: ImageMagick (with static libheif, libde265 and dav1d) in
+without that file shows them. Trivy reads the apk database, so it cannot see libraries built from source
+(static or under `/opt`): ImageMagick (with static libheif, libde265 and dav1d) in
 every image, OpenSSL 1.1.1w, ICU,
 libxml2 and libxslt in the 7.0-8.0 builds (the last two are Debian trixie's 2.9.14 and 1.1.35 with
 Debian's security patches), curl in 7.0-7.2. Those are tracked by hand through `deps/versions.lock`, as are the

@@ -253,6 +253,7 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_FPM_STATUS_PATH` | `/fpm-status` | `pm.status_path` |
 | `PHP_FPM_ACCESS_LOG` | `/proc/self/fd/2` | `access.log` |
 | `PHP_FPM_SLOWLOG_TIMEOUT` | `10s` | `request_slowlog_timeout` |
+| `PHP_FPM_REQUEST_TERMINATE_TIMEOUT` | `600s` | `request_terminate_timeout`, a wall-clock cap per request. `max_execution_time` does not count time blocked on I/O, so only this stops a hung worker. |
 
 The ping endpoint is fixed at `/fpm-ping` (response `pong`) and is what the healthcheck uses.
 
@@ -531,6 +532,10 @@ ENV PHP_EXT_ENABLE=myext
 - Busybox's network applets (`ping`, `netstat`, `traceroute`, `arping`, `microcom` and the rest of
   the raw-socket and interface set) are removed; `curl` stays. A derived image that runs
   `apk add` gets the busybox links back and can prune them again.
+- Baked ini defaults for fpm, cli and ext-builder: `zend.assertions = -1`, so `assert()` is compiled out
+  instead of executing in production. All four flavors set `session.upload_progress.enabled = 0` and
+  `fatal_error_backtraces = Off` (a PHP 8.5 directive that older versions ignore). cli-builder keeps
+  assertions on for test suites. Override any of them with a drop-in `99-*.ini`.
 
 **Snuffleupagus.** [Virtual patching](https://github.com/jvoisin/snuffleupagus) is compiled in but
 not loaded by default. Four rulesets are baked into `/usr/local/etc/php/snuffleupagus/`: `default`,
