@@ -1666,4 +1666,75 @@ CONF
   fi
 done
 fi
+# disable_functions in the baked 10-php.ini is only taken as the resolved value when
+# it is a plain list. A ${name} reference resolves from a directive an earlier ini
+# parsed, which the baked-only read cannot see: skipping the resolved read there
+# would start with a shorter list than the one php applies.
+if [ "$FLAVOR" != cli-builder ]; then
+varref_dir="/tmp/ep-varref-$$"
+mkdir -p "$varref_dir"
+printf 'disable_functions = ${my_df}\n' >"$varref_dir/10-php.ini"
+printf 'my_df = "exec,system,getmyuid"\n' >"$varref_dir/05-vars.ini"
+chmod 755 "$varref_dir"
+chmod 644 "$varref_dir"/*.ini
+out=$(drun --rm -e PHP_DISABLE_FUNCTIONS=getmypid \
+  -v "$varref_dir/10-php.ini":/usr/local/etc/php/conf.d/10-php.ini:ro \
+  -v "$varref_dir/05-vars.ini":/usr/local/etc/php/conf.d/05-vars.ini:ro \
+  "$IMAGE" php -r 'echo ini_get("disable_functions"), "|", function_exists("exec") ? "LIVE" : "gone";' 2>/dev/null)
+rm -rf "$varref_dir"
+[ "$out" = "exec,system,getmyuid,getmypid|gone" ] \
+  || fail "$FLAVOR: a \${name} reference in the baked disable_functions line, resolved from an earlier ini, gave '$out' instead of 'exec,system,getmyuid,getmypid|gone'"
+echo "ok: $FLAVOR -- a baked disable_functions line that references an ini variable is resolved through the full ini set, not read on its own"
+
+# A FIFO named *.ini in a scanned directory is not a file php parses; the entrypoint
+# must not open it (that blocks until a writer shows up, so start-up would hang).
+fifo_dir="/tmp/ep-fifo-$$"
+fifo_name="ep-fifo-$$"
+fifo_out="$fifo_dir/out"
+mkdir -p "$fifo_dir"
+chmod 755 "$fifo_dir"
+mkfifo "$fifo_dir/50-x.ini"
+drun --rm --name "$fifo_name" -e PHP_DISABLE_FUNCTIONS=getmypid \
+  -v "$fifo_dir/50-x.ini":/usr/local/etc/php/conf.d/50-x.ini:ro \
+  "$IMAGE" php -r 'echo ini_get("disable_functions");' >"$fifo_out" 2>&1 &
+fifo_pid=$!
+for _ in $(seq 1 60); do
+  kill -0 "$fifo_pid" 2>/dev/null || break
+  sleep 0.5
+done
+if kill -0 "$fifo_pid" 2>/dev/null; then
+  command docker rm -f "$fifo_name" >/dev/null 2>&1 || true
+  kill "$fifo_pid" 2>/dev/null || true
+  rm -rf "$fifo_dir"
+  fail "$FLAVOR: a FIFO at conf.d/50-x.ini hung the entrypoint (still not started after 30s)"
+fi
+wait "$fifo_pid" || { out=$(cat "$fifo_out"); rm -rf "$fifo_dir"; fail "$FLAVOR: a FIFO at conf.d/50-x.ini made the start fail: $out"; }
+out=$(cat "$fifo_out")
+rm -rf "$fifo_dir"
+echo "$out" | grep -qw getmypid || fail "$FLAVOR: with a FIFO at conf.d/50-x.ini the effective disable_functions lost getmypid: $out"
+echo "ok: $FLAVOR -- a FIFO named *.ini in conf.d does not block start-up"
+fi
+
+# /usr/local/etc/php/php-major-minor is trusted only when it is a regular file whose
+# MAJOR.MINOR agrees with the PHP_VERSION the environment carries; otherwise the
+# entrypoint asks php. A wrong value would emit JIT settings php 7.x rejects, or drop
+# them on 8.x. PHP_VERSION is passed explicitly: the image's own ENV does not carry it.
+case "$PHP_MM" in 8.*|9.*|[1-9][0-9].*) want_jit=1; wrong_mm=7.0 ;; *) want_jit=0; wrong_mm=8.5 ;; esac
+mm_dir="/tmp/ep-mm-$$"
+mkdir -p "$mm_dir/dir"
+printf '%s\n' "$wrong_mm" >"$mm_dir/php-major-minor"
+chmod -R a+rX "$mm_dir"
+jit_lines=$(drun --rm -e "PHP_VERSION=${PHP_MM}" \
+  -v "$mm_dir/php-major-minor":/usr/local/etc/php/php-major-minor:ro \
+  "$IMAGE" sh -c 'grep -c "^opcache.jit" /usr/local/etc/php/conf.d/90-opcache-env.ini || true' 2>/dev/null)
+if [ "$want_jit" = 1 ]; then
+  [ "$jit_lines" -ge 1 ] || fail "$FLAVOR: a php-major-minor saying $wrong_mm in a $PHP_MM image dropped the JIT settings from the generated opcache ini"
+else
+  [ "$jit_lines" -eq 0 ] || fail "$FLAVOR: a php-major-minor saying $wrong_mm in a $PHP_MM image wrote JIT settings into the generated opcache ini"
+fi
+echo "ok: $FLAVOR -- a php-major-minor that disagrees with PHP_VERSION is ignored and php is asked"
+err=$(drun --rm -v "$mm_dir/dir":/usr/local/etc/php/php-major-minor:ro "$IMAGE" php -r 'echo "";' 2>&1 >/dev/null || true)
+rm -rf "$mm_dir"
+echo "$err" | grep -qi "read error" && fail "$FLAVOR: a directory at php-major-minor made the entrypoint print a read error: $err"
+echo "ok: $FLAVOR -- a directory at php-major-minor is skipped without a read error"
 echo "ENTRYPOINT TESTS PASSED"

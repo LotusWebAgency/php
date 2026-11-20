@@ -305,8 +305,13 @@ fi
 # The Dockerfile writes the version PHP reported at build time; an image without the
 # file (or with anything but MAJOR.MINOR in it) asks PHP.
 PHP_MAJOR_MINOR=""
-if [ -r /usr/local/etc/php/php-major-minor ]; then
-  read -r PHP_MAJOR_MINOR </usr/local/etc/php/php-major-minor || true
+if [ -f /usr/local/etc/php/php-major-minor ] && [ -r /usr/local/etc/php/php-major-minor ]; then
+  read -r PHP_MAJOR_MINOR </usr/local/etc/php/php-major-minor 2>/dev/null || true
+fi
+# A file that disagrees with the PHP_VERSION the environment carries was not written
+# by this image's build.
+if [[ "${PHP_VERSION:-}" =~ ^([0-9]+\.[0-9]+)([^0-9]|$) ]] && [ "${BASH_REMATCH[1]}" != "$PHP_MAJOR_MINOR" ]; then
+  PHP_MAJOR_MINOR=""
 fi
 if ! [[ "$PHP_MAJOR_MINOR" =~ ^[0-9]+\.[0-9]+$ ]]; then
   PHP_MAJOR_MINOR="$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')"
@@ -542,10 +547,12 @@ pdf_probe_scan_dirs() {
 
 # Success when the resolved read below is certain to return what the baked read
 # returns, so the second php run can be skipped: the baked 10-php.ini is scanned and
-# assigns disable_functions itself, and no other ini php reads (the generated files
-# aside) so much as mentions the directive. php applies the scanned files after any
-# main php.ini, in order, so the last assignment is then the baked one. Anything
-# unreadable or unclear fails the test and the resolved read runs.
+# assigns disable_functions itself, once, as a plain list (lowercase names, digits,
+# underscore, comma, space, optionally in double quotes: no ${name}, which php
+# resolves from a directive parsed earlier), and no other regular file php reads
+# (the generated files aside) so much as mentions the directive. php applies the
+# scanned files after any main php.ini, in order, so the last assignment is then the
+# baked one. Anything unreadable or unclear fails the test and the resolved read runs.
 disable_functions_resolved_is_baked() (
   shopt -s dotglob nullglob
   [ "$CONF_WRITABLE" = 1 ] || exit 1
@@ -562,11 +569,16 @@ disable_functions_resolved_is_baked() (
       if [ "$d" = "$CONF_DIR" ] && { [ "$name" = "$PDF_GENERATED_INI" ] || [ "$name" = "$PDF_LEGACY_INI" ]; }; then
         continue
       fi
+      [ -f "$f" ] || continue
       others+=("$f")
     done
   done < <(pdf_scan_dirs)
   [ "$baked_scanned" = 1 ] || exit 1
-  grep -qsE '^[[:space:]]*disable_functions[[:space:]]*=' "$baked_ini" || exit 1
+  [ -f "$baked_ini" ] || exit 1
+  mapfile -t baked_mentions < <(grep -siF -- disable_functions "$baked_ini")
+  [ "${#baked_mentions[@]}" -eq 1 ] || exit 1
+  baked_plain_list='^[[:space:]]*disable_functions[[:space:]]*=[[:space:]]*("[a-z0-9_, ]*"|[a-z0-9_, ]*)[[:space:]]*$'
+  [[ "${baked_mentions[0]}" =~ $baked_plain_list ]] || exit 1
   if [ "${#others[@]}" -gt 0 ]; then
     rc=0
     grep -qsiF -- disable_functions "${others[@]}" || rc=$?
