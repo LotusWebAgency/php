@@ -222,7 +222,7 @@ done
 # ----------------------------------------------- phase 3: ext-builder end to end
 echo
 echo "=== phase 3: ext-builder end to end"
-declare -A EXT_STATUS
+declare -A EXT_STATUS=()
 ext_failed=0
 for php in $(ext_versions_selected); do
   blocked=""
