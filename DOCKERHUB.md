@@ -60,7 +60,7 @@ Every caveat and workaround: [Older PHP versions](https://github.com/LotusWebAge
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
 | `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64-v2` / `armv8-a` baseline. 8.4 and 8.5 only. |
 | `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image. |
-| `{release}-{flavor}[-v3]` | `8.5.12-fpm` | Full patch version, read from the built image after tests and the Trivy gate. |
+| `{release}-{flavor}[-v3]` | `8.5.13-fpm` | Full patch version, read from the built image after tests and the Trivy gate. |
 
 `-v3` needs a newer CPU. On older amd64 the image refuses to start (a startup
 check prints `this build requires an x86-64-v3 CPU`, exit 127). On arm64 there is no check and an unsupported core
