@@ -436,7 +436,8 @@ the smoke test's assertions, and lists each extension's source, linkage, PHP ran
 
 - **53 are compiled in** and need nothing to use: the usual core set plus `igbinary`, `redis`,
   `imagick`, `memcached`, `apcu` and `zstd`. `imagick` reads HEIC and AVIF (static libheif,
-  libde265 and dav1d inside ImageMagick) but does not write them.
+  libde265 and dav1d inside ImageMagick) but does not write them. A baked security policy limits
+  it to raster formats (see [Hardening](#hardening)).
 - **19 are shared modules**, built but not loaded. Load them with `PHP_EXT_ENABLE: "ldap,uuid"`:
   `amqp`, `brotli`, `bz2`, `event`, `ffi` (7.4+), `ldap`, `lz4`, `mcrypt` (7.x),
   `mongodb` (8.1+), `msgpack`, `pcov` (7.1+), `protobuf` (8.2+), `snuffleupagus` (7.2+),
@@ -536,6 +537,33 @@ ENV PHP_EXT_ENABLE=myext
   instead of executing in production. All four flavors set `session.upload_progress.enabled = 0` and
   `fatal_error_backtraces = Off` (a PHP 8.5 directive that older versions ignore). cli-builder keeps
   assertions on for test suites. Override any of them with a drop-in `99-*.ini`.
+
+**ImageMagick policy.** Every image ships `/opt/imagemagick/etc/ImageMagick-7/policy.xml` (source:
+`conf/imagemagick-policy.xml`, derived from upstream's `policy-secure` and `policy-websafe`
+templates). Without a policy ImageMagick sizes its memory limit from the host's RAM and opens every
+coder, so one hostile upload could exhaust the container or reach the network and local files.
+
+- **Limits:** memory 256MiB, map 512MiB, disk 1GiB, area 128MP, width and height 16KP, list-length
+  32, time 120 s, thread 1, max-memory-request 256MiB, file 768, profile size 16MiB (16 profiles).
+- **Coders:** all denied, then read and write for GIF, JPEG, PNG, WEBP, TIFF, BMP and ICO (with their
+  aliases such as `JPG`, `PNG8`, `TIF`, `GIF87`, `BMP3`) and read-only for HEIC, HEIF and AVIF. URL,
+  HTTP, HTTPS, FTP, MVG, MSVG, MSL, SVG, EPHEMERAL, LABEL, CAPTION, TEXT, TXT, INLINE, PS, EPS, PDF,
+  XPS and PCL are denied again after the allow list, so widening it cannot re-enable them.
+  Pseudo-formats such as `xc:` and `canvas:` are refused too; `Imagick::newImage()` is not affected.
+  `Imagick::queryFormats()` still lists every compiled coder: the policy decides at read and write.
+- **Delegates, filters and paths:** every delegate and filter is denied, as are the paths `-`, `@*`
+  (indirect reads), `fd:*`, `|*`, `/etc/*`, `/proc/*` and `/sys/*`. A `%` in a file name is literal.
+
+To replace the policy, mount your own file over that path. It is one file; keep it root-owned and
+world-readable. It replaces the whole policy, so start from a copy of the shipped one
+(`docker run --rm lotuswebagency/php:8.5-fpm cat /opt/imagemagick/etc/ImageMagick-7/policy.xml`):
+
+```yaml
+volumes:
+  - ./policy.xml:/opt/imagemagick/etc/ImageMagick-7/policy.xml:ro
+```
+
+`tests/smoke.sh` asserts the limits, the formats and the refusals above.
 
 **Snuffleupagus.** [Virtual patching](https://github.com/jvoisin/snuffleupagus) is compiled in but
 not loaded by default. Four rulesets are baked into `/usr/local/etc/php/snuffleupagus/`: `default`,
@@ -772,7 +800,7 @@ Only the promotion and the description-sync jobs use the Docker Hub credentials,
 | `docker-bake.hcl`, `matrix.json`, `matrix.gen.hcl` | Build targets. `matrix.gen.hcl` is generated from `matrix.json`. |
 | `php/` | Extension registry (`ext.json`), pinned sources (`php-src.lock`, `pecl.lock`), build and flag scripts, PGO training (`pgo/`). |
 | `deps/` | Vendored library builds (`versions.lock`, `build-*.sh`), checksum-verified fetch, [source patches](deps/patches/README.md). |
-| `conf/` | Baked ini files, FPM pool config, Snuffleupagus rulesets. |
+| `conf/` | Baked ini files, FPM pool config, Snuffleupagus rulesets, ImageMagick security policy. |
 | `rootfs/usr/local/bin/` | `docker-php-entrypoint`, `php-ext-enable`, `php-fpm-healthcheck`, `php-fcgi` (FastCGI client the healthcheck uses), `sp-upload-check` (upload validator for Snuffleupagus). |
 | `shim/` | Source of the `chmod(0)` `LD_PRELOAD` shim. |
 | `scripts/`, `ci/` | Matrix generation, inputs hash, PGO tier checks; release, attestation, verification and VEX scripts. Both have unit tests. |

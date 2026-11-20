@@ -531,6 +531,16 @@ RUN set -eux; \
     install -m 0644 /tmp/my.cnf /stage/etc/my.cnf; \
     rm -f /tmp/my.cnf
 
+# ImageMagick security policy, at the configure path the /opt/imagemagick build
+# reads (tests/smoke.sh checks it against Imagick::getConfigureOptions). One
+# root-owned, world-readable file in every flavor and era; operators replace it
+# by mounting their own over this path.
+COPY conf/imagemagick-policy.xml /tmp/imagemagick-policy.xml
+RUN set -eux; \
+    install -d -m 0755 /stage/opt/imagemagick/etc/ImageMagick-7; \
+    install -m 0644 /tmp/imagemagick-policy.xml /stage/opt/imagemagick/etc/ImageMagick-7/policy.xml; \
+    rm -f /tmp/imagemagick-policy.xml
+
 # --- runtime-payload ---
 # Build-only, in two halves so runtime-base needs two COPYs (two layers), split by
 # change rate: this one holds the tens of MB (php, extensions, vendored libraries),

@@ -271,6 +271,112 @@ foreach (["heic", "avif"] as $ext) {
   || { echo "FAIL: Imagick did not decode the HEIC/AVIF fixtures correctly (got: $heif_out)"; exit 1; }
 echo "ok: imagick decodes HEIC and AVIF (red|blue fixtures)"
 
+# The baked ImageMagick security policy (conf/imagemagick-policy.xml): the limits
+# are in force, the raster formats the image is for still round-trip (HEIC/AVIF
+# decode is the run above, which also goes through the policy), and the coders and
+# paths a hostile upload could use are refused.
+imagick_policy_php=$(cat <<'PHP'
+$res = [];
+$check = function ($name, $ok, $detail = "") use (&$res) {
+  $res[] = $name . ":" . ($ok ? "ok" : "bad (" . $detail . ")");
+};
+$refuse = function ($name, $open, $need = null, $forbid = null) use ($check) {
+  try {
+    $open();
+    $check($name, false, "accepted");
+  } catch (Exception $e) {
+    $m = $e->getMessage();
+    $check($name, ($need === null || strpos($m, $need) !== false)
+      && ($forbid === null || strpos($m, $forbid) === false), $m);
+  }
+};
+$dir = sys_get_temp_dir() . "/imp";
+mkdir($dir);
+
+$cfg = (new Imagick())->getConfigureOptions("CONFIGURE_PATH");
+$policy = $cfg["CONFIGURE_PATH"] . "policy.xml";
+$check("policy-path", $cfg["CONFIGURE_PATH"] === "/opt/imagemagick/etc/ImageMagick-7/" && is_file($policy), $cfg["CONFIGURE_PATH"]);
+$check("policy-mode", is_file($policy) && fileowner($policy) === 0 && (fileperms($policy) & 0777) === 0644);
+
+$limits = [
+  "memory" => [Imagick::RESOURCETYPE_MEMORY, 256 * 1048576],
+  "map" => [Imagick::RESOURCETYPE_MAP, 512 * 1048576],
+  "disk" => [Imagick::RESOURCETYPE_DISK, 1073741824],
+  "area" => [Imagick::RESOURCETYPE_AREA, 128000000],
+  "width" => [Imagick::RESOURCETYPE_WIDTH, 16000],
+  "height" => [Imagick::RESOURCETYPE_HEIGHT, 16000],
+  "list-length" => [Imagick::RESOURCETYPE_LISTLENGTH, 32],
+  "time" => [Imagick::RESOURCETYPE_TIME, 120],
+  "thread" => [Imagick::RESOURCETYPE_THREAD, 1],
+];
+foreach ($limits as $name => $l) {
+  $got = Imagick::getResourceLimit($l[0]);
+  $check("limit-" . $name, $got == $l[1], "got " . $got);
+}
+
+$src = new Imagick();
+$src->newImage(64, 48, "red");
+foreach (["jpeg", "png", "webp", "gif", "tiff", "bmp"] as $fmt) {
+  try {
+    $im = clone $src;
+    $im->setImageFormat($fmt);
+    $back = new Imagick();
+    $back->readImageBlob($im->getImageBlob());
+    $check("blob-" . $fmt, $back->getImageWidth() === 64 && $back->getImageHeight() === 48);
+  } catch (Exception $e) {
+    $check("blob-" . $fmt, false, $e->getMessage());
+  }
+}
+foreach (["jpg", "jpeg", "png", "webp", "gif", "tif", "tiff", "bmp", "ico"] as $ext) {
+  try {
+    $im = clone $src;
+    $im->writeImage($dir . "/x." . $ext);
+    $back = new Imagick($dir . "/x." . $ext);
+    $check("file-" . $ext, $back->getImageWidth() > 0);
+  } catch (Exception $e) {
+    $check("file-" . $ext, false, $e->getMessage());
+  }
+}
+
+$mvg = "push graphic-context\nviewbox 0 0 10 10\nfill red\nrectangle 0 0 5 5\npop graphic-context\n";
+$svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\"/></svg>";
+file_put_contents($dir . "/t.mvg", $mvg);
+file_put_contents($dir . "/t.svg", $svg);
+file_put_contents($dir . "/t.eps", "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 10 10\n0 0 10 10 rectfill\nshowpage\n");
+file_put_contents($dir . "/t.pdf", "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
+file_put_contents($dir . "/t.msl", "<?xml version=\"1.0\"?><image><read filename=\"/etc/passwd\"/></image>");
+
+$refuse("url-php", function () { new Imagick("https://example.com/x.png"); });
+foreach (["https", "http", "ftp"] as $scheme) {
+  $refuse("url-" . $scheme, function () use ($scheme) {
+    $r = new Imagick();
+    $r->readImage($scheme . ":" . $scheme . "://example.com/x.png");
+  }, null, "DelegateFailed");
+}
+$refuse("mvg-file", function () use ($dir) { new Imagick($dir . "/t.mvg"); });
+$refuse("mvg-prefix", function () use ($dir) { new Imagick("mvg:" . $dir . "/t.mvg"); }, "NotAuthorized");
+$refuse("msl", function () use ($dir) { new Imagick("msl:" . $dir . "/t.msl"); }, "NotAuthorized");
+$refuse("label-indirect", function () { new Imagick("label:@/etc/passwd"); }, "NotAuthorized");
+$refuse("text", function () { new Imagick("text:/etc/passwd"); }, "NotAuthorized");
+$refuse("indirect-read", function () { new Imagick("@/etc/passwd"); });
+$refuse("path-etc", function () { new Imagick("png:/etc/hostname"); }, "NotAuthorized");
+$refuse("stdin", function () { $r = new Imagick(); $r->readImage("png:-"); }, "NotAuthorized");
+$refuse("fd", function () { $r = new Imagick(); $r->readImage("png:fd:0"); }, "NotAuthorized");
+$refuse("svg-file", function () use ($dir) { new Imagick($dir . "/t.svg"); }, "NotAuthorized");
+$refuse("svg-blob", function () use ($svg) { $r = new Imagick(); $r->readImageBlob($svg); }, "NotAuthorized");
+$refuse("eps", function () use ($dir) { new Imagick($dir . "/t.eps"); }, "NotAuthorized");
+$refuse("pdf", function () use ($dir) { new Imagick($dir . "/t.pdf"); }, "NotAuthorized");
+
+echo implode("\n", $res), "\n";
+PHP
+)
+policy_out=$(drun --rm "$IMAGE" php -r "$imagick_policy_php") \
+  || { echo "FAIL: the ImageMagick policy checks did not run (see the PHP error above): $policy_out"; exit 1; }
+policy_bad=$(grep -v ':ok$' <<<"$policy_out" || true)
+[ -z "$policy_bad" ] && [ "$(grep -c ':ok$' <<<"$policy_out")" -ge 43 ] \
+  || { echo "FAIL: the ImageMagick security policy is not in force as shipped:"; echo "${policy_bad:-$policy_out}"; exit 1; }
+echo "ok: imagick policy enforces the resource limits, keeps the raster formats and refuses URL, MVG/MSL, indirect, SVG, EPS and PDF input"
+
 # ImageMagick is built with --disable-openmp; confirm that holds once imagick
 # links it into the php binary -- OpenMP spawns a thread per core per request if
 # it sneaks back in under FPM.
