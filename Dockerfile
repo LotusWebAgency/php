@@ -42,8 +42,8 @@ ARG NM_COMPILER=llvm-nm
 # path that keeps that dispatch.
 # upgrade: the digest-pinned base can hold a library older than the -dev package the
 # deps stages install next (sqlite-libs 3.54.0 beside sqlite-dev 3.54.1, whose
-# libsqlite3.so names a file only 3.54.1 ships), and gold, unlike GNU ld, fails the
-# link on that dangling symlink. WOLFI_INDEX_STATE re-runs this layer whenever the
+# libsqlite3.so names a file only 3.54.1 ships), which breaks a link on the dangling
+# symlink. WOLFI_INDEX_STATE re-runs this layer whenever the
 # index stamp changes instead of replaying a cached upgrade.
 ARG WOLFI_INDEX_STATE=""
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
@@ -51,7 +51,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     && echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
     && apk upgrade --cache-dir /var/cache/apk -U \
     && apk add --cache-dir /var/cache/apk \
-      build-base clang-19 lld-19 llvm-19 binutils-gold ccache pkgconf ca-certificates curl \
+      build-base clang-19 lld-19 llvm-19 ccache pkgconf ca-certificates curl \
       bash coreutils findutils grep sed gawk diffutils \
       autoconf automake libtool bison re2c patch xz file \
       gpg gpg-agent python3 linux-headers \
@@ -288,7 +288,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     && { [ -n "$(find /usr/lib/llvm-* -name 'libclang_rt.profile*' -print -quit)" ] \
          || { echo "no libclang_rt.profile under /usr/lib/llvm-*; -fprofile-generate cannot link" >&2; exit 1; }; }
 
-# `ld` means lld (clang) or gold (gcc) in this stage, via a PATH shim.
+# `ld` means lld in this stage, via a PATH shim.
 # -fuse-ld=lld in LDFLAGS is not enough: libtool forwards only flags it knows
 # (-O*, -flto*, -fstack-protector*, ...) to its shared-library link template, so
 # opcache.la was linked by /usr/bin/ld, which cannot read ThinLTO bitcode:
@@ -300,32 +300,29 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # -Wc,-fuse-ld=lld would reach libtool's compiler flags, but ./configure's own
 # probes call clang directly, where it is an unknown argument; every probe would
 # fail and autoconf would read that as a feature answer.
-# gcc needs gold for a different reason: its profile-guided hot/cold split puts
-# hot functions in .text.hot.* input sections, and the default bfd ld
-# (binutils 2.47) does not fold them into a .text.hot output section,
-# so assert_profile_reached_the_link would measure nothing. gold does. A
-# -fuse-ld=gold flag fails for the same libtool reason as lld.
+# gcc links through lld as well: it links plain gcc objects, takes
+# -z pack-relative-relocs and writes the GNU property note, and with
+# -z keep-text-section-prefix it folds gcc's profile-guided .text.hot.* input
+# sections into a .text.hot output section, which assert_profile_reached_the_link
+# measures. GNU ld (binutils 2.47) does not fold them.
 # Wolfi's gcc does not look at PATH for ld: collect2 takes the first ld in
 # COMPILER_PATH, which ends with /usr/x86_64-pc-linux-gnu/bin (binutils' own
 # target directory). The PATH shim alone leaves gcc on bfd, so for gcc that
 # private ld is replaced as well and the check asks gcc which ld it will run.
 RUN set -eux; \
     mkdir -p /usr/local/lib/php-docker-ld; \
-    case "$COMPILER" in \
-      clang) ln -sf /usr/bin/ld.lld /usr/local/lib/php-docker-ld/ld ;; \
-      gcc)   ln -sf /usr/bin/ld.gold /usr/local/lib/php-docker-ld/ld; \
-             gcc_ld="$(gcc -print-prog-name=ld)"; \
-             case "$gcc_ld" in /*) ;; *) echo "FATAL: gcc -print-prog-name=ld printed '$gcc_ld', not an absolute path; the private ld cannot be replaced" >&2; exit 1 ;; esac; \
-             ln -sf /usr/bin/ld.gold "$gcc_ld" ;; \
-    esac; \
+    ln -sf /usr/bin/ld.lld /usr/local/lib/php-docker-ld/ld; \
+    if [ "$COMPILER" = gcc ]; then \
+      gcc_ld="$(gcc -print-prog-name=ld)"; \
+      case "$gcc_ld" in /*) ;; *) echo "FATAL: gcc -print-prog-name=ld printed '$gcc_ld', not an absolute path; the private ld cannot be replaced" >&2; exit 1 ;; esac; \
+      ln -sf /usr/bin/ld.lld "$gcc_ld"; \
+    fi; \
     PATH=/usr/local/lib/php-docker-ld:$PATH; \
     if [ "$COMPILER" = gcc ]; then v="$("$(gcc -print-prog-name=ld)" --version | head -1)"; \
     else v="$(ld --version | head -1)"; fi; \
-    case "$COMPILER:$v" in \
-      clang:*LLD*) echo "ok: ld on PATH is '$v'" ;; \
-      clang:*) echo "FATAL: ld on PATH is '$v', not lld; ThinLTO shared-object links will fail" >&2; exit 1 ;; \
-      gcc:*GNU\ gold*) echo "ok: ld run by gcc is '$v'" ;; \
-      gcc:*) echo "FATAL: ld run by gcc is '$v', not gold; profile-guided .text.hot would not survive the link" >&2; exit 1 ;; \
+    case "$v" in \
+      *LLD*) echo "ok: ld run by $COMPILER is '$v'" ;; \
+      *) echo "FATAL: ld run by $COMPILER is '$v', not lld; the profile-guided .text.hot fold and ThinLTO shared-object links need it" >&2; exit 1 ;; \
     esac
 ENV PATH=/usr/local/lib/php-docker-ld:$PATH
 

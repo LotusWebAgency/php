@@ -516,14 +516,15 @@ ENV PHP_EXT_ENABLE=myext
 - **Control-flow protection**, checked on php-src's own functions (the vendored static libraries
   would otherwise hide a gap):
   - amd64 (`-fcf-protection=full`): at least half of the function entries start with an `endbr64`
-    landing pad. The loader-enforced IBT/SHSTK property note is not claimed, because it is absent
-    from these binaries.
+    landing pad. The IBT/SHSTK property note lld writes is not asserted.
   - arm64 (`-mbranch-protection=standard`): at least half of the entries start with `bti` or a
-    `paciasp`/`pacibsp` instruction, so PAC and BTI are compiled in. On PHP 7.0-8.4 (gcc, linked with
-    gold) BTI is not enforced at runtime: gold writes no `PT_GNU_PROPERTY` header, and glibc turns BTI
-    on from that header.
+    `paciasp`/`pacibsp` instruction, so PAC and BTI are compiled in. lld links php and its extensions
+    and writes the BTI property in `PT_GNU_PROPERTY`, from which glibc turns BTI on at runtime, when
+    every input object carries it. PHP 7.0-8.0 link OpenSSL 1.1.1w statically and its assembly
+    objects do not, so BTI is not enforced at runtime on those versions.
 - Every link uses `-z relro -z now -z noexecstack --as-needed --build-id=sha1`, plus
-  `-z pack-relative-relocs` (packed `DT_RELR` relocations) where the linker supports it.
+  `-z pack-relative-relocs` (packed `DT_RELR` relocations). lld links php and its extensions;
+  the PGO `.text.hot` assertion relies on it.
 - Wolfi's compiler wrappers add their own hardening spec and bake in `-mtune=sapphirerapids` (arm64:
   `neoverse-v2`). The PHP build turns the hardening spec and clang's default config off, and
   `php/cflags.sh` passes every hardening and `-march`/`-mtune` flag explicitly, vendored libraries

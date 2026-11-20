@@ -79,9 +79,9 @@ export EXTRA_LDFLAGS_PROGRAM="-pie"
 # amd64 v3: the SAPI executables refuse to start on a CPU without x86-64-v3
 # instead of dying later with SIGILL. php/isa-gate-x86-64-v3.c is a priority-101
 # constructor that checks __builtin_cpu_supports("x86-64-v3") and exits 127. The
-# loader is not involved: glibc 2.44 does not act on a GNU property note, gold
-# emits no PT_GNU_PROPERTY and lld emits one but drops the ISA-needed property,
-# so a note would enforce nothing.
+# loader is not involved: glibc 2.44 does not act on a GNU property note and
+# lld emits a PT_GNU_PROPERTY but drops the ISA-needed property, so a note would
+# enforce nothing.
 #
 # The gate is compiled here, separately, with the baseline (x86-64-v2) flags (no
 # v3 -march, no PGO, no LTO), so the code that runs before the check is baseline
@@ -423,8 +423,7 @@ CONFIGURE_CACHE_OVERRIDES="ax_cv_have_func_attribute_ifunc=no"
 # -freorder-functions/-freorder-blocks-and-partition are per-TU codegen flags and
 # still give a profile-guided gcc build a .text.hot section to discriminate on
 # (php/pgo/discriminator-control.sh). -fuse-ld is unset because the Dockerfile's
-# ld-shim already puts the right linker (gcc: gold, for the .text.hot fold) on
-# PATH.
+# ld-shim already puts lld, which folds the .text.hot.* input sections, on PATH.
 case "${COMPILER:-clang}" in
   clang)
     LTO_CFLAGS="-flto=thin -ffunction-sections"
@@ -435,14 +434,14 @@ case "${COMPILER:-clang}" in
     # binutils 2.47, -freorder-functions alone never emits a .text.hot.* input
     # section (php/pgo/discriminator-probe.c); the partition flag is what makes
     # gcc split a profiled-hot function's blocks into .text.hot.NAME /
-    # .text.unlikely.NAME. keep-text-section-prefix is a linker option (see the
-    # Dockerfile's ld-shim for why it needs gold), so it is not repeated here.
+    # .text.unlikely.NAME. -z keep-text-section-prefix makes lld fold those into
+    # .text.hot / .text.unlikely output sections.
     LTO_CFLAGS="-ffunction-sections -freorder-functions -freorder-blocks-and-partition"
     # Not on arm64: aarch64 gcc keeps block partitioning off by default because
     # its compact jump tables are label differences that cannot span .text and
     # .text.unlikely, and forcing it on fails in the assembler
     # (ext/standard/var_unserializer.c, 8.1/8.2). There -freorder-functions alone
-    # already puts profiled-hot functions in .text.hot.* (gcc 16.2, gold).
+    # already puts profiled-hot functions in .text.hot.* (gcc 16.2).
     if [ "$(bash "$HERE/arch.sh")" = arm64 ]; then
       LTO_CFLAGS="-ffunction-sections -freorder-functions"
     fi
@@ -911,9 +910,9 @@ assert_php_src_hardening() {
         # the gap that matters is "most entries" against "none", since gcc 16
         # without the openssf spec does not enable branch protection by default.
         # Like CET's IBT/SHSTK note on x86, the GNU_PROPERTY_AARCH64_FEATURE_1
-        # BTI/PAC note is not asserted: it is the AND over every input object,
-        # gold (the gcc path's linker) does not emit it, and its absence is not a
-        # property of php-src.
+        # BTI/PAC note is not asserted: it is the AND over every input object, so
+        # one input without it (a vendored static archive, hand-written assembly)
+        # clears it, and its absence is not a property of php-src.
         pct=$((100 * bti / total))
         [ "$pct" -ge 50 ] || {
           echo "FATAL: only $bti of $total php-src functions in $bin start with a BTI landing pad" \
@@ -923,7 +922,7 @@ assert_php_src_hardening() {
       *) pct=-1 ;;
     esac
 
-    # chk_src counts call sites in php-src's own functions. gold emits an IBT PLT
+    # chk_src counts call sites in php-src's own functions. lld emits an IBT PLT
     # when every input object carries the CET note, as on the modern era where all
     # linked libraries are system ones; objdump cannot name those stubs, so there
     # chk_src is 0 and says nothing. The binary's own dynamic relocations do name

@@ -353,12 +353,12 @@ ENV PHP_EXT_ENABLE=myext
 Measured on the shipped ELF binaries, not assumed from compiler flags: PIE, full RELRO
 (`GNU_RELRO` and `BIND_NOW`), non-executable stack, `-fstack-protector-strong`,
 `_FORTIFY_SOURCE=3`, and `-fcf-protection=full` on amd64. On arm64, PAC and BTI
-(`-mbranch-protection=standard`) are compiled in; BTI is not enforced at runtime on PHP 7.0-8.4,
-because gold writes no `PT_GNU_PROPERTY` header. The compilers
+(`-mbranch-protection=standard`) are compiled in, and lld writes the BTI property glibc enforces
+when every input carries it; PHP 7.0-8.0 link OpenSSL 1.1.1w statically, whose objects do not, so
+BTI is off there. The compilers
 also run with zero-initialized locals, no null-check deletion, wrapping signed overflow and no strict
-aliasing. Links use packed relative relocations
-(`-z pack-relative-relocs`, `DT_RELR`) where the linker supports it. Every setuid and setgid bit
-inherited from the base image is stripped. Busybox's raw-socket and interface applets
+aliasing. Links use packed relative relocations (`-z pack-relative-relocs`, `DT_RELR`).
+Every setuid and setgid bit inherited from the base image is stripped. Busybox's raw-socket and interface applets
 (`ping`, `netstat`, `traceroute` and the rest) are removed;
 `curl` stays. A derived image that runs `apk add` gets the busybox links back and can prune them
 again. PHP 7.0-8.4 build with GCC 16.2 (PGO, no LTO) and 8.5 with clang 19 (PGO

@@ -237,8 +237,8 @@ else
   # dying later with SIGILL, and a baseline binary must not carry the gate.
   # The gate is php/isa-gate-x86-64-v3.c, a priority-101 constructor linked
   # into php and php-fpm (php/build.sh): glibc 2.44 acts on no GNU property
-  # note and neither gold nor lld emits PT_GNU_PROPERTY, so there is no loader
-  # check to lean on.
+  # note and lld's PT_GNU_PROPERTY drops the ISA-needed property, so there is no
+  # loader check to lean on.
   #
   # First half: the gate is in the shipped binaries. Its message is a string in
   # .rodata, which strip keeps.

@@ -1223,15 +1223,12 @@ bash "$HERE/assert-elf-hardening.sh" --code "modules-$EXPECT" "${hard_files[@]}"
 echo "ok: code-level hardening holds on ${#hard_files[@]} shipped ELF files (${#opt_elf_files[@]} of them under /opt)"
 
 # Packed relative relocations (DT_RELR): php/ldflags.sh passes -z pack-relative-relocs
-# to every linker that accepts it. gold, which links the gcc era's php, rejects the
-# flag, so php itself is only held to it on the clang era; the vendored libraries are
-# linked by lld or GNU ld in every era.
+# to every link, and lld links php, its extensions and the vendored libraries in
+# every era.
 has_relr() { readelf -dW "$1" | grep -q '(RELRSZ)'; }
 # shellcheck disable=SC2206  # the list is a deliberate word-split
-relr_files=($im_libs)
-case "$VM_COMPILER" in
-  clang*) relr_files+=("$hard_dir/php" "$hard_dir"/ext/*.so); [ -f "$hard_dir/php-fpm" ] && relr_files+=("$hard_dir/php-fpm") ;;
-esac
+relr_files=($im_libs "$hard_dir/php" "$hard_dir"/ext/*.so)
+[ -f "$hard_dir/php-fpm" ] && relr_files+=("$hard_dir/php-fpm")
 relr_missing=""
 for f in "${relr_files[@]}"; do has_relr "$f" || relr_missing="$relr_missing $(basename "$f")"; done
 [ -z "$relr_missing" ] || { echo "FAIL: no DT_RELR (-z pack-relative-relocs did not take) in:$relr_missing"; exit 1; }
