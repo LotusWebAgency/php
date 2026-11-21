@@ -5,21 +5,34 @@
 #
 # <php-version> is a matrix.json key ("8.5", "7.0", ...); every era-specific
 # expectation below (release string, era, pgo, icu) is derived from it, never
-# a literal. <flavor> is fpm, cli, cli-builder or ext-builder -- also asserted against,
-# never inferred from the image tag, which a caller could always get wrong or
-# rename.
+# a literal. <flavor> is fpm, cli, cli-builder, ext-builder, fpm-slim or cli-slim --
+# also asserted against, never inferred from the image tag, which a caller could
+# always get wrong or rename.
+#
+# A -slim flavor runs everything its base flavor runs (FLAVOR below is the base
+# flavor; SLIM=1 marks the slim image). The checks that inherently need a tool the
+# slim image removes (the MariaDB client, curl) are skipped with a printed reason,
+# and the slim-only assertions (absence list, busybox link allowlist) run in their
+# own block near the end.
 set -euo pipefail
 IMAGE="${1:?usage: smoke.sh <image> <php-version> <flavor>}"
 EXPECT="${2:?usage: smoke.sh <image> <php-version> <flavor>}"
 FLAVOR="${3:?usage: smoke.sh <image> <php-version> <flavor>}"
+SLIM=0
 case "$FLAVOR" in
   fpm|cli|cli-builder|ext-builder) ;;
-  *) echo "FAIL: flavor '$FLAVOR' is not one of fpm, cli, cli-builder, ext-builder"; exit 1 ;;
+  fpm-slim|cli-slim) SLIM=1; FLAVOR="${FLAVOR%-slim}" ;;
+  *) echo "FAIL: flavor '$FLAVOR' is not one of fpm, cli, cli-builder, ext-builder, fpm-slim, cli-slim"; exit 1 ;;
 esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/docker-lib.sh
 . "$HERE/docker-lib.sh"
 ROOT="$(cd "$HERE/.." && pwd)"
+
+# The slim images keep a short busybox link allowlist (see SLIM_BUSYBOX_ALLOWED
+# below), and Wolfi's busybox cannot run a pruned name from `sh -c`, so every
+# in-container command outside that list goes through `busybox <applet>` (which
+# works on the full images too). `test` is the common one: `busybox test -f F`.
 
 # Refuse to run any check against an image that cannot prove it was built from
 # this tree: a green gate on a stale image proves nothing. Timestamps cannot
@@ -545,9 +558,9 @@ echo "ok: inspected the php binary and $n_ext_files shared extension .so file(s)
 # www-data, even though it printed every match it could reach; `|| true` is
 # scoped to that single command so a genuinely empty result still reads as
 # "found nothing".
-find_control=$(drun --rm "$IMAGE" sh -c "find / -xdev -name 'libc.so*' 2>/dev/null" || true)
+find_control=$(drun --rm "$IMAGE" sh -c "busybox find / -xdev -name 'libc.so*' 2>/dev/null" || true)
 [ -n "$find_control" ] || { echo "FAIL: image-wide find could not even locate libc.so -- the file-existence scan below would prove nothing"; exit 1; }
-stray_ssl=$(drun --rm "$IMAGE" sh -c "find / -xdev \\( \\( -name 'libssl.so.[13]*' -o -name 'libcrypto.so.[13]*' \\) -o \\( -path '/opt/*' -a \\( -name 'libssl.so*' -o -name 'libcrypto.so*' \\) \\) \\) 2>/dev/null" || true)
+stray_ssl=$(drun --rm "$IMAGE" sh -c "busybox find / -xdev \\( \\( -name 'libssl.so.[13]*' -o -name 'libcrypto.so.[13]*' \\) -o \\( -path '/opt/*' -a \\( -name 'libssl.so*' -o -name 'libcrypto.so*' \\) \\) \\) 2>/dev/null" || true)
 
 # 7.0-8.0 vendor OpenSSL statically (no-shared); 8.1+ link the system OpenSSL 4
 # dynamically by design (system packages). The boundary comes from matrix.json's
@@ -630,7 +643,7 @@ SHARED_EXTS=$(bash "$HERE/../php/build-shared-ext.sh" --list "$EXPECT")
 [ -n "$SHARED_EXTS" ] || { echo "FAIL: build-shared-ext.sh --list $EXPECT derived zero shared extensions -- every real version has at least one"; exit 1; }
 # extdir was captured near the top of this script and is reused here.
 for ext in $SHARED_EXTS; do
-  drun --rm "$IMAGE" test -f "$extdir/$ext.so" || { echo "FAIL: $ext.so missing"; exit 1; }
+  drun --rm "$IMAGE" busybox test -f "$extdir/$ext.so" || { echo "FAIL: $ext.so missing"; exit 1; }
 done
 echo "ok: shared modules present on disk"
 
@@ -734,7 +747,7 @@ else
     # opcache is compiled in and ships pre-activated (Dockerfile), so its .so
     # legitimately exists while never being a php-ext-enable subject.
     [ "$zx" = opcache ] && continue
-    if drun --rm "$IMAGE" test -f "$extdir/$zx.so"; then
+    if drun --rm "$IMAGE" busybox test -f "$extdir/$zx.so"; then
       echo "FAIL: $zx.so exists in extension_dir but is not in this version's derived shared set -- the derivation is wrong, so the zend_extension= path was skipped rather than genuinely absent"; exit 1
     fi
   done
@@ -770,11 +783,13 @@ root_err=$(drun --rm -u 0 "$IMAGE" php -r 'echo 1;' 2>&1 >/dev/null | grep -v '^
 echo "ok: php starts silent as root"
 
 # No perl in the runtime image: a distro package that depends on it would bring a
-# whole interpreter along. `apk info` lists every installed package name (glibc is
-# versioned, glibc-2.44). The control proves the query can see an installed package
-# at all -- an empty result is otherwise indistinguishable from an apk database
-# that cannot be read.
-apk_installed=$(drun --rm "$IMAGE" apk info 2>/dev/null || true)
+# whole interpreter along. The installed package names are read from the apk
+# database itself (the `P:` lines, which is what `apk info` prints), so the same
+# query works on the slim images, which ship the database but not the apk binary
+# (glibc is versioned, glibc-2.44). The control proves the query can see an
+# installed package at all -- an empty result is otherwise indistinguishable from
+# a database that cannot be read.
+apk_installed=$(drun --rm "$IMAGE" sed -n 's/^P://p' /lib/apk/db/installed 2>/dev/null || true)
 grep -qE '^glibc-[0-9]' <<<"$apk_installed" \
   || { echo "FAIL: apk info could not see glibc as installed -- the perl absence check below would prove nothing"; exit 1; }
 # cli-builder and ext-builder bring perl in on purpose (git's perl scripts,
@@ -804,23 +819,38 @@ krb_pkgs=$(grep -E '^(heimdal.*|cyrus-sasl-heimdal.*)$' <<<"$apk_installed" | tr
 echo "ok: libsasl2 is cyrus-sasl-mit-libs and no heimdal package ships"
 
 # Busybox's network applets (raw-socket and interface tools) are pruned from the
-# image; curl is the one network client that stays. The control proves the query
-# can see busybox applets at all.
-drun --rm "$IMAGE" sh -c 'command -v ls >/dev/null && command -v curl >/dev/null' \
-  || { echo "FAIL: control failed -- ls or curl is missing from the image"; exit 1; }
+# image; curl is the one network client that stays (the slim images drop it too).
+# The control proves the query can see busybox applets at all.
+if [ "$SLIM" = 1 ]; then
+  drun --rm "$IMAGE" sh -c 'command -v ls >/dev/null' \
+    || { echo "FAIL: control failed -- ls is missing from the image"; exit 1; }
+else
+  drun --rm "$IMAGE" sh -c 'command -v ls >/dev/null && command -v curl >/dev/null' \
+    || { echo "FAIL: control failed -- ls or curl is missing from the image"; exit 1; }
+fi
 # The list is the BUSYBOX_NET_APPLETS ARG at the top of the Dockerfile, the one source.
 busybox_net_applets=$(sed -n 's/^ARG BUSYBOX_NET_APPLETS="\(.*\)"$/\1/p' "$ROOT/Dockerfile")
 [ -n "$busybox_net_applets" ] || { echo "FAIL: BUSYBOX_NET_APPLETS not found in the Dockerfile"; exit 1; }
 net_applets=$(drun --rm "$IMAGE" sh -c 'for a in $1; do for d in /bin /sbin /usr/bin /usr/sbin; do [ -e "$d/$a" ] || [ -L "$d/$a" ] && echo "$d/$a"; done; done; true' sh "$busybox_net_applets" | tr '\n' ' ')
 [ -z "$net_applets" ] || { echo "FAIL: busybox network applets are still present ($net_applets)"; exit 1; }
-echo "ok: busybox network applets (ping, netstat, traceroute, arping, ...) are absent, curl is present"
+if [ "$SLIM" = 1 ]; then
+  echo "ok: busybox network applets (ping, netstat, traceroute, arping, ...) are absent"
+else
+  echo "ok: busybox network applets (ping, netstat, traceroute, arping, ...) are absent, curl is present"
+fi
 
 # The Wolfi base, asserted rather than assumed. The repository file is rewritten to
 # the public mirror, because the base image ships the vendor's authenticated one.
-apk_repos=$(drun --rm "$IMAGE" cat /etc/apk/repositories | tr -d '[:space:]')
-[ "$apk_repos" = "https://packages.wolfi.dev/os" ] \
-  || { echo "FAIL: /etc/apk/repositories is '$apk_repos', expected exactly https://packages.wolfi.dev/os"; exit 1; }
-echo "ok: /etc/apk/repositories is https://packages.wolfi.dev/os"
+# The slim images have no apk binary to read it, so a slim rootfs may leave it out;
+# if one is there it must say the same thing.
+if [ "$SLIM" = 1 ] && ! drun --rm "$IMAGE" busybox test -e /etc/apk/repositories; then
+  echo "skip: /etc/apk/repositories (the slim image carries no repositories file; no apk binary reads it)"
+else
+  apk_repos=$(drun --rm "$IMAGE" cat /etc/apk/repositories | tr -d '[:space:]')
+  [ "$apk_repos" = "https://packages.wolfi.dev/os" ] \
+    || { echo "FAIL: /etc/apk/repositories is '$apk_repos', expected exactly https://packages.wolfi.dev/os"; exit 1; }
+  echo "ok: /etc/apk/repositories is https://packages.wolfi.dev/os"
+fi
 
 # No Debian package manager, no apk cache, none of the glibc helper binaries that
 # Wolfi's base leaves out (they are packages of their own, and an absence here
@@ -838,66 +868,70 @@ echo "ok: the apk cache is empty"
 # One OpenSSL per process: every libssl/libcrypto the image carries is major 4.
 # (The loader scan above checks what each ELF resolves; this checks no 1.x or 3.x
 # copy sits in the image waiting for a future dlopen.)
-old_ssl=$(drun --rm "$IMAGE" sh -c 'find / -xdev \( -name "libssl.so.1*" -o -name "libssl.so.3*" -o -name "libcrypto.so.1*" -o -name "libcrypto.so.3*" \) 2>/dev/null; exit 0')
+old_ssl=$(drun --rm "$IMAGE" sh -c 'busybox find / -xdev \( -name "libssl.so.1*" -o -name "libssl.so.3*" -o -name "libcrypto.so.1*" -o -name "libcrypto.so.3*" \) 2>/dev/null; exit 0')
 [ -z "$old_ssl" ] || { echo "FAIL: the image carries a pre-4 OpenSSL library: $(tr '\n' ' ' <<<"$old_ssl")"; exit 1; }
 for pkg in libcrypto3 libssl3 openssl-3; do
   ! grep -qx "$pkg" <<<"$apk_installed" || { echo "FAIL: the apk package $pkg is installed"; exit 1; }
 done
 echo "ok: no libssl.so.3/libcrypto.so.3 (or older) and no OpenSSL 3 package in the image"
 
-# The MySQL client names are #!/bin/sh wrappers around the MariaDB tools (symlinks
-# would trip MariaDB's "Deprecated program name" warning on stderr); mariadb-dump,
-# mariadb-admin and mariadb-check are native binaries copied out of packages whose
-# perl dependency is not shipped. Each of the eight names must print a version with
-# an empty stderr (run past the entrypoint, whose sizing notice is on stderr), and the shell and the copied tools must be one server version.
-declare -A mysql_names=([mysql]=mariadb [mysqldump]=mariadb-dump [mysqladmin]=mariadb-admin [mysqlcheck]=mariadb-check)
-for name in mysql mysqldump mysqladmin mysqlcheck; do
-  target="${mysql_names[$name]}"
-  drun --rm "$IMAGE" test -x "/usr/bin/$target" || { echo "FAIL: /usr/bin/$target is missing or not executable"; exit 1; }
-  wrapper=$(drun --rm "$IMAGE" cat "/usr/bin/$name")
-  [ "$wrapper" = "$(printf '#!/bin/sh\nexec %s "$@"' "$target")" ] \
-    || { echo "FAIL: /usr/bin/$name is not the '#!/bin/sh; exec $target \"\$@\"' wrapper: $wrapper"; exit 1; }
-  for tool in "$name" "$target"; do
-    tool_err=$(mktemp)
-    tool_out=$(drun --rm --entrypoint "" "$IMAGE" "$tool" --version 2>"$tool_err") \
-      || { echo "FAIL: $tool --version failed: $(cat "$tool_err")"; rm -f "$tool_err"; exit 1; }
-    [ ! -s "$tool_err" ] || { echo "FAIL: $tool --version wrote to stderr: $(cat "$tool_err")"; rm -f "$tool_err"; exit 1; }
-    rm -f "$tool_err"
-    grep -q ' from [0-9][^ ]*-MariaDB' <<<"$tool_out" || { echo "FAIL: $tool --version printed no server version: $tool_out"; exit 1; }
+if [ "$SLIM" = 1 ]; then
+  echo "skip: MariaDB client checks (mysql*/mariadb* wrappers, versions, auth plugins, /etc/my.cnf) -- the slim image removes the client tools; their absence is asserted in the slim block below"
+else
+  # The MySQL client names are #!/bin/sh wrappers around the MariaDB tools (symlinks
+  # would trip MariaDB's "Deprecated program name" warning on stderr); mariadb-dump,
+  # mariadb-admin and mariadb-check are native binaries copied out of packages whose
+  # perl dependency is not shipped. Each of the eight names must print a version with
+  # an empty stderr (run past the entrypoint, whose sizing notice is on stderr), and the shell and the copied tools must be one server version.
+  declare -A mysql_names=([mysql]=mariadb [mysqldump]=mariadb-dump [mysqladmin]=mariadb-admin [mysqlcheck]=mariadb-check)
+  for name in mysql mysqldump mysqladmin mysqlcheck; do
+    target="${mysql_names[$name]}"
+    drun --rm "$IMAGE" busybox test -x "/usr/bin/$target" || { echo "FAIL: /usr/bin/$target is missing or not executable"; exit 1; }
+    wrapper=$(drun --rm "$IMAGE" cat "/usr/bin/$name")
+    [ "$wrapper" = "$(printf '#!/bin/sh\nexec %s "$@"' "$target")" ] \
+      || { echo "FAIL: /usr/bin/$name is not the '#!/bin/sh; exec $target \"\$@\"' wrapper: $wrapper"; exit 1; }
+    for tool in "$name" "$target"; do
+      tool_err=$(mktemp)
+      tool_out=$(drun --rm --entrypoint "" "$IMAGE" "$tool" --version 2>"$tool_err") \
+        || { echo "FAIL: $tool --version failed: $(cat "$tool_err")"; rm -f "$tool_err"; exit 1; }
+      [ ! -s "$tool_err" ] || { echo "FAIL: $tool --version wrote to stderr: $(cat "$tool_err")"; rm -f "$tool_err"; exit 1; }
+      rm -f "$tool_err"
+      grep -q ' from [0-9][^ ]*-MariaDB' <<<"$tool_out" || { echo "FAIL: $tool --version printed no server version: $tool_out"; exit 1; }
+    done
   done
-done
-mariadb_server_version() { sed -n 's/.* from \([0-9][^ ,]*\)-MariaDB.*/\1/p' <<<"$1"; }
-shell_version=$(mariadb_server_version "$(drun --rm "$IMAGE" mariadb --version)")
-[ -n "$shell_version" ] || { echo "FAIL: mariadb --version names no server version"; exit 1; }
-for tool in mariadb-dump mariadb-admin mariadb-check; do
-  tool_version=$(mariadb_server_version "$(drun --rm "$IMAGE" "$tool" --version)")
-  [ "$tool_version" = "$shell_version" ] \
-    || { echo "FAIL: $tool reports server version '$tool_version', mariadb reports '$shell_version'"; exit 1; }
-done
-echo "ok: mysql, mysqldump, mysqladmin and mysqlcheck wrap mariadb, mariadb-dump, mariadb-admin and mariadb-check; all eight print a version with empty stderr, one server version ($shell_version)"
+  mariadb_server_version() { sed -n 's/.* from \([0-9][^ ,]*\)-MariaDB.*/\1/p' <<<"$1"; }
+  shell_version=$(mariadb_server_version "$(drun --rm "$IMAGE" mariadb --version)")
+  [ -n "$shell_version" ] || { echo "FAIL: mariadb --version names no server version"; exit 1; }
+  for tool in mariadb-dump mariadb-admin mariadb-check; do
+    tool_version=$(mariadb_server_version "$(drun --rm "$IMAGE" "$tool" --version)")
+    [ "$tool_version" = "$shell_version" ] \
+      || { echo "FAIL: $tool reports server version '$tool_version', mariadb reports '$shell_version'"; exit 1; }
+  done
+  echo "ok: mysql, mysqldump, mysqladmin and mysqlcheck wrap mariadb, mariadb-dump, mariadb-admin and mariadb-check; all eight print a version with empty stderr, one server version ($shell_version)"
 
-# The MariaDB tools dlopen every auth plugin except mysql_native_password from
-# their compiled-in plugin dir. Without caching_sha2_password.so they cannot log
-# in to MySQL 8+ or Percona 8+ with a default account, and without
-# client_ed25519.so/parsec.so to MariaDB accounts using those. Each plugin must
-# exist there and load with the image's own OpenSSL 4.
-# Wolfi's compiled-in plugin dir follows the server series: /usr/lib/mariadb-13.1/plugin.
-plugin_dir="/usr/lib/mariadb-${shell_version%.*}/plugin"
-for p in caching_sha2_password sha256_password client_ed25519 parsec dialog mysql_clear_password; do
-  so="$plugin_dir/$p.so"
-  drun --rm "$IMAGE" test -f "$so" || { echo "FAIL: the MariaDB client auth plugin $so is missing"; exit 1; }
-  so_ldd=$(image_ldd "$so" 2>&1 || true)
-  [ -n "$so_ldd" ] || { echo "FAIL: the loader listed nothing for $so"; exit 1; }
-  ! grep -q 'not found' <<<"$so_ldd" || { echo "FAIL: $so has an unresolved NEEDED entry: $so_ldd"; exit 1; }
-  ssl_load_violations=""
-  scan_ssl_resolution "$so" "$so_ldd"
-  [ -z "$ssl_load_violations" ] || { printf 'FAIL: %s\n' "$ssl_load_violations"; exit 1; }
-done
-echo "ok: the MariaDB client auth plugins (caching_sha2_password, sha256_password, client_ed25519, parsec, dialog, mysql_clear_password) are in $plugin_dir and resolve against OpenSSL 4"
-mycnf=$(drun --rm "$IMAGE" sh -c 'sed -e "/^#/d" -e "/^$/d" /etc/my.cnf')
-[ "$mycnf" = "$(printf '[client-mariadb]\nssl-verify-server-cert = 0')" ] \
-  || { echo "FAIL: /etc/my.cnf is not the shipped TLS-preferred client config: $mycnf"; exit 1; }
-echo "ok: /etc/my.cnf makes the MariaDB client prefer TLS and fall back to plaintext"
+  # The MariaDB tools dlopen every auth plugin except mysql_native_password from
+  # their compiled-in plugin dir. Without caching_sha2_password.so they cannot log
+  # in to MySQL 8+ or Percona 8+ with a default account, and without
+  # client_ed25519.so/parsec.so to MariaDB accounts using those. Each plugin must
+  # exist there and load with the image's own OpenSSL 4.
+  # Wolfi's compiled-in plugin dir follows the server series: /usr/lib/mariadb-13.1/plugin.
+  plugin_dir="/usr/lib/mariadb-${shell_version%.*}/plugin"
+  for p in caching_sha2_password sha256_password client_ed25519 parsec dialog mysql_clear_password; do
+    so="$plugin_dir/$p.so"
+    drun --rm "$IMAGE" busybox test -f "$so" || { echo "FAIL: the MariaDB client auth plugin $so is missing"; exit 1; }
+    so_ldd=$(image_ldd "$so" 2>&1 || true)
+    [ -n "$so_ldd" ] || { echo "FAIL: the loader listed nothing for $so"; exit 1; }
+    ! grep -q 'not found' <<<"$so_ldd" || { echo "FAIL: $so has an unresolved NEEDED entry: $so_ldd"; exit 1; }
+    ssl_load_violations=""
+    scan_ssl_resolution "$so" "$so_ldd"
+    [ -z "$ssl_load_violations" ] || { printf 'FAIL: %s\n' "$ssl_load_violations"; exit 1; }
+  done
+  echo "ok: the MariaDB client auth plugins (caching_sha2_password, sha256_password, client_ed25519, parsec, dialog, mysql_clear_password) are in $plugin_dir and resolve against OpenSSL 4"
+  mycnf=$(drun --rm "$IMAGE" sh -c 'sed -e "/^#/d" -e "/^$/d" /etc/my.cnf')
+  [ "$mycnf" = "$(printf '[client-mariadb]\nssl-verify-server-cert = 0')" ] \
+    || { echo "FAIL: /etc/my.cnf is not the shipped TLS-preferred client config: $mycnf"; exit 1; }
+  echo "ok: /etc/my.cnf makes the MariaDB client prefer TLS and fall back to plaintext"
+fi
 case "$FLAVOR" in
   fpm|cli)
     if drun --rm "$IMAGE" sh -c 'command -v perl' >/dev/null 2>&1; then
@@ -915,7 +949,7 @@ www_group=$(drun --rm "$IMAGE" grep '^www-data:' /etc/group)
 [[ "$www_group" == www-data:x:33:* ]] || { echo "FAIL: www-data group entry is '$www_group', expected gid 33"; exit 1; }
 echo "ok: www-data is uid/gid 33 with /sbin/nologin and home /var/www"
 
-drun --rm "$IMAGE" test -x /usr/local/bin/php-fcgi || { echo "FAIL: /usr/local/bin/php-fcgi is missing or not executable"; exit 1; }
+drun --rm "$IMAGE" busybox test -x /usr/local/bin/php-fcgi || { echo "FAIL: /usr/local/bin/php-fcgi is missing or not executable"; exit 1; }
 # php-fcgi runs under this image's own `php -n`, so it has to parse on every version
 # the line ships (it is written in PHP 7.0 syntax).
 fcgi_lint=$(drun --rm "$IMAGE" php -l /usr/local/bin/php-fcgi 2>&1) \
@@ -928,7 +962,7 @@ echo "ok: php-fcgi is installed and passes php -l on PHP $EXPECT"
 # where a stray setuid binary would hide. The positive control plants a setuid
 # and a setgid file in a mode-0700 directory of a throwaway container and
 # requires the same scan to list both, or an empty result would mean nothing.
-suid_scan='find / -xdev -perm /6000 -type f 2>/dev/null; exit 0'
+suid_scan='busybox find / -xdev -perm /6000 -type f 2>/dev/null; exit 0'
 suid_control=$(drun --rm --user 0 "$IMAGE" sh -c "mkdir -m 700 /suid-control && : > /suid-control/u && : > /suid-control/g && chmod 4755 /suid-control/u && chmod 2755 /suid-control/g; $suid_scan")
 { grep -qx '/suid-control/u' <<<"$suid_control" && grep -qx '/suid-control/g' <<<"$suid_control"; } \
   || { echo "FAIL: the setuid/setgid scan did not find the setuid and setgid files planted in a root-only directory ($(tr '\n' ' ' <<<"$suid_control")) -- its empty result below would prove nothing"; exit 1; }
@@ -1524,7 +1558,7 @@ case "$FLAVOR" in
       drun --rm "$IMAGE" sh -c "command -v $tool" >/dev/null \
         || { echo "FAIL: ext-builder is missing $tool (Dockerfile's ext-builder stage should provide it)"; exit 1; }
     done
-    drun --rm "$IMAGE" test -f /usr/local/include/php/main/php.h \
+    drun --rm "$IMAGE" busybox test -f /usr/local/include/php/main/php.h \
       || { echo "FAIL: ext-builder has no PHP headers under /usr/local/include/php"; exit 1; }
     for tool in composer node npm; do
       if drun --rm "$IMAGE" sh -c "command -v $tool" >/dev/null 2>&1; then
@@ -1702,6 +1736,110 @@ for b in mariadbd mysqld mariadb-install-db mysql_install_db; do
   fi
 done
 echo "ok: mariadb-server binaries (mariadbd, mysqld, mariadb-install-db, mysql_install_db) absent from the runtime image"
+
+# The slim flavors (fpm-slim, cli-slim): the same php build and entrypoint contract as
+# the base flavor with the native tooling an attacker who reaches proc_open could use
+# removed. Everything above ran against it (the base flavor's checks, minus the ones
+# that need a removed tool); these are the assertions that only hold for slim. The
+# setuid/setgid scan above already covers slim: it runs as root over the whole image.
+#
+# The busybox links that stay. This is the one list in the test suite; it mirrors
+# the allowlist in scripts/slim-finalize.sh and the spec (true and false are there
+# because `flock -n <file> true` in the entrypoint execs it).
+SLIM_BUSYBOX_ALLOWED="env sh tr sed awk grep cut wc uniq tail cat id stat flock rm mkdir mktemp chmod mv ln touch true false ls head od timeout gzip sleep date nologin"
+if [ "$SLIM" = 1 ]; then
+  # Is each name (globs allowed) present in a PATH-ish directory? Prints the paths
+  # found, one per line, de-duplicated. /bin, /sbin and /usr/sbin are symlinks into
+  # /usr/bin on Wolfi, so one file shows up under several names. -L counts a
+  # dangling symlink as present. The probe is shell builtins only (the slim image
+  # has no find or sort); the de-duplication happens on the host.
+  slim_present() {  # slim_present <name>... -> paths found
+    drun --rm "$IMAGE" sh -c '
+      for n in "$@"; do
+        for d in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /usr/libexec/postgresql*; do
+          for f in "$d"/$n; do
+            [ -e "$f" ] || [ -L "$f" ] && echo "$f"
+          done
+        done
+      done
+      exit 0' sh "$@" | sort -u
+  }
+
+  # Positive controls first: an absence list is only worth anything if the same probe
+  # finds what is supposed to be there.
+  control_found=$(slim_present php php-fpm-healthcheck bash sh tini unzip bzip2 xz busybox | xargs -n1 basename | sort -u | tr '\n' ' ')
+  for want in php php-fpm-healthcheck bash sh tini unzip bzip2 xz busybox; do
+    case " $control_found" in
+      *" $want "*) ;;
+      *) [ "$want" = php-fpm-healthcheck ] && [ "$FLAVOR" != fpm ] && continue
+         echo "FAIL: slim: the absence probe cannot see $want, which must be in the image -- its empty results below would prove nothing (saw: $control_found)"; exit 1 ;;
+    esac
+  done
+  echo "ok: slim -- control: the absence probe finds php, bash, sh, tini, unzip, bzip2, xz and busybox"
+
+  # apk, curl, nano, less, procps, zip, zstd, the PostgreSQL client tools, the MariaDB
+  # client tools and the mysql* wrappers.
+  slim_absent_names="apk curl wcurl update-ca-certificates nano rnano less lessecho
+    ps top free pgrep pkill pidof pidwait pmap pwdx slabtop sysctl tload uptime vmstat w watch hugetop
+    zip zipcloak zipnote zipsplit zstd zstdcat zstdgrep zstdless zstdmt unzstd
+    psql pg_dump pg_dumpall pg_restore pg_basebackup pg_isready pg_amcheck pg_receivewal pg_recvlogical pg_verifybackup
+    createdb createuser dropdb dropuser clusterdb reindexdb vacuumdb
+    mysql* mariadb*"
+  # shellcheck disable=SC2086  # the name list is meant to word-split; the globs are expanded by the container's shell
+  slim_found=$(set -f; slim_present $slim_absent_names)
+  [ -z "$slim_found" ] || { echo "FAIL: slim: tools the slim flavor removes are present: $(tr '\n' ' ' <<<"$slim_found")"; exit 1; }
+  echo "ok: slim -- no apk, curl, nano, less, ps/procps, zip, zstd, psql/pg_dump (PostgreSQL client), mysql*/mariadb* in /bin, /sbin, /usr/bin, /usr/sbin, /usr/local/bin"
+
+  # The same names as packages: Trivy and the SBOM read the apk database, so a package
+  # that is still registered there is a finding even with its files gone.
+  stray_slim_pkgs=$(grep -E '^(apk-tools|curl|nano|less|procps|zip|zstd|mariadb-([0-9.]+-)?client.*|postgresql-([0-9]+-)?client.*)$' <<<"$apk_installed" | tr '\n' ' ' || true)
+  [ -z "$stray_slim_pkgs" ] || { echo "FAIL: slim: the apk database still lists packages the slim flavor removes: $stray_slim_pkgs"; exit 1; }
+  for pkg in wolfi-baselayout busybox bash tini tzdata ca-certificates-bundle 'glibc(-[0-9.]+)?-iconv' unzip bzip2 xz; do
+    grep -qxE "$pkg" <<<"$apk_installed" || { echo "FAIL: slim: the apk database does not list $pkg (listed: $(tr '\n' ' ' <<<"$apk_installed"))"; exit 1; }
+  done
+  grep -qE '^libldap-2\.7' <<<"$apk_installed" \
+    || { echo "FAIL: slim: the apk database lists no libldap-2.7 package (libpq must not resolve to libldap 2.6)"; exit 1; }
+  echo "ok: slim -- the apk database lists none of the removed packages and does list the base set (wolfi-baselayout, busybox, bash, tini, tzdata, ca-certificates-bundle, glibc-iconv, libldap-2.7, unzip, bzip2, xz)"
+
+  # The busybox links that remain are exactly the allowlist. A link is any entry in
+  # /bin, /sbin, /usr/bin or /usr/sbin that resolves to the busybox binary's inode
+  # (symlink or hard link); stat -L follows symlinks.
+  bb_links=$(drun --rm "$IMAGE" sh -c '
+    bb=$(stat -Lc %i /bin/busybox) || exit 1
+    for d in /bin /sbin /usr/bin /usr/sbin; do
+      for f in "$d"/*; do
+        [ -e "$f" ] || continue
+        n=${f##*/}
+        [ "$n" = busybox ] && continue
+        [ "$(stat -Lc %i "$f")" = "$bb" ] && echo "$n"
+      done
+    done
+    exit 0' | sort -u)
+  [ -n "$bb_links" ] || { echo "FAIL: slim: found no busybox link at all -- the link scan is broken, or sh itself is gone"; exit 1; }
+  want_links=$(printf '%s\n' $SLIM_BUSYBOX_ALLOWED | sort -u)
+  if [ "$bb_links" != "$want_links" ]; then
+    echo "FAIL: slim: the busybox links in /bin, /sbin, /usr/bin and /usr/sbin are not exactly the allowlist"
+    echo "  extra (present, not allowed): $(comm -13 <(echo "$want_links") <(echo "$bb_links") | tr '\n' ' ')"
+    echo "  missing (allowed, absent):    $(comm -23 <(echo "$want_links") <(echo "$bb_links") | tr '\n' ' ')"
+    exit 1
+  fi
+  echo "ok: slim -- the busybox links are exactly the allowlist ($(wc -l <<<"$bb_links") applets: $(tr '\n' ' ' <<<"$bb_links"))"
+
+  # Trivy and the BuildKit SBOM scanner identify the OS and its packages from these two
+  # files; without them a scan reports nothing and passes.
+  drun --rm "$IMAGE" busybox test -s /etc/os-release \
+    || { echo "FAIL: slim: /etc/os-release is missing or empty -- scanners cannot identify the OS"; exit 1; }
+  drun --rm "$IMAGE" busybox test -s /lib/apk/db/installed \
+    || { echo "FAIL: slim: /lib/apk/db/installed is missing or empty -- scanners see no packages"; exit 1; }
+  echo "ok: slim -- /etc/os-release and the apk database /lib/apk/db/installed are present ($(grep -c . <<<"$apk_installed") packages)"
+
+  # The image user. The setuid/setgid scan above covered the rest.
+  slim_user=$(docker inspect --format '{{.Config.User}}' "$IMAGE")
+  [ "$slim_user" = www-data ] || { echo "FAIL: slim: the image's USER is '$slim_user', expected www-data"; exit 1; }
+  slim_whoami=$(drun --rm "$IMAGE" id -un)
+  [ "$slim_whoami" = www-data ] || { echo "FAIL: slim: the container runs as '$slim_whoami', expected www-data"; exit 1; }
+  echo "ok: slim -- USER www-data, and the container runs as www-data"
+fi
 
 # test-entrypoint.sh runs once per flavor against the image under test; it gates
 # only its fpm-pool-specific assertions (`php-fpm -tt` does not exist outside

@@ -408,7 +408,7 @@ echo "$tt" | grep -q 'pm\.max_children = 4$' || fail "PHP_FPM_WORKER_MEMORY=64M 
 echo "ok: M-suffixed PHP_FPM_WORKER_MEMORY accepted"
 
 # also: a value that parses to zero must abort loudly, not silently
-if drun --rm -m 512m -e PHP_FPM_WORKER_MEMORY=0 "$IMAGE" true >/dev/null 2>&1; then
+if drun --rm -m 512m -e PHP_FPM_WORKER_MEMORY=0 "$IMAGE" busybox true >/dev/null 2>&1; then
   fail "PHP_FPM_WORKER_MEMORY=0 (division by zero) was not rejected"
 fi
 echo "ok: PHP_FPM_WORKER_MEMORY=0 rejected loudly"
@@ -508,7 +508,7 @@ echo "ok: a file planted at the old world-writable conf.d fallback path is ignor
 # 24. The private conf.d fallback directory must be mode 0700, not merely unused by
 # the attack above.
 perm=$(drun --rm --read-only --tmpfs /tmp -m 512m --entrypoint sh "$IMAGE" -c '
-  docker-php-entrypoint true >/dev/null 2>&1
+  docker-php-entrypoint busybox true >/dev/null 2>&1
   stat -c "%a %U" /tmp/php-conf.* 2>/dev/null | head -1
 ')
 echo "$perm" | grep -qE '^700 www-data$' || fail "private conf.d fallback directory is not mode 700 owned by www-data: $perm"
@@ -1218,7 +1218,7 @@ if [ "$FLAVOR" != cli-builder ]; then
 confd1_confd="/tmp/ep-f1-confd-$$"
 mkdir -p "$confd1_confd"
 chmod 777 "$confd1_confd"
-drun --rm -v "$confd1_confd":/out "$IMAGE" sh -c 'cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
+drun --rm -v "$confd1_confd":/out "$IMAGE" sh -c 'busybox cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
 rm -f "$confd1_confd/99-env.ini" "$confd1_confd/90-opcache-env.ini"
 confd1_probe='foreach (["ini_get","exec","system","dl"] as $f) { echo $f, "=", function_exists($f) ? "LIVE" : "gone", " "; }'
 out1=$(drun --rm -v "$confd1_confd":/usr/local/etc/php/conf.d \
@@ -1296,7 +1296,7 @@ echo "ok: $FLAVOR -- a later-sorting conf.d ini that replaces disable_functions 
 mine_persist="/tmp/ep-mine-persist-$$"
 mkdir -p "$mine_persist"
 chmod 777 "$mine_persist"
-drun --rm -v "$mine_persist":/out "$IMAGE" sh -c 'cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
+drun --rm -v "$mine_persist":/out "$IMAGE" sh -c 'busybox cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
 rm -f "$mine_persist/99-env.ini" "$mine_persist/90-opcache-env.ini"
 cp "$mine_dir/99-mine.ini" "$mine_persist/99-mine.ini"
 out=$(drun --rm -v "$mine_persist":/usr/local/etc/php/conf.d -e PHP_DISABLE_FUNCTIONS=proc_nice "$IMAGE" php -r "$mine_probe" 2>&1)
@@ -1340,10 +1340,10 @@ echo "ok: $FLAVOR -- an allowlisted name next to a real one in PHP_DISABLE_FUNCT
 # php while 15 entrypoints rewrite the generated file.
 set +e
 out=$(drun --rm -e PHP_DISABLE_FUNCTIONS=proc_open "$IMAGE" timeout 120 sh -c '
-docker-php-entrypoint true
-( for i in $(seq 1 100); do php -r "echo function_exists(\"proc_open\") ? \"L\" : \"g\";"; echo; done ) >/tmp/probe.out &
+docker-php-entrypoint busybox true
+( for i in $(busybox seq 1 100); do php -r "echo function_exists(\"proc_open\") ? \"L\" : \"g\";"; echo; done ) >/tmp/probe.out &
 sleep 0.3
-for i in $(seq 1 15); do docker-php-entrypoint true & done
+for i in $(busybox seq 1 15); do docker-php-entrypoint busybox true & done
 wait
 echo "LIVE=$(grep -c L /tmp/probe.out) TOTAL=$(wc -l </tmp/probe.out) STRAY=$(ls -A /usr/local/etc/php/conf.d | grep -c "pdf-probe\|\.tmp")"
 ' 2>&1)
@@ -1632,7 +1632,7 @@ for confd2w_case in zz-custom zzz-custom; do
   confd2w_confd="/tmp/ep-f2w-confd-$$"
   mkdir -p "$confd2w_confd"
   chmod 777 "$confd2w_confd"
-  drun --rm -v "$confd2w_confd":/out "$IMAGE" sh -c 'cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
+  drun --rm -v "$confd2w_confd":/out "$IMAGE" sh -c 'busybox cp /usr/local/etc/php/conf.d/*.ini /out/ 2>/dev/null' >/dev/null
   rm -f "$confd2w_confd/99-env.ini" "$confd2w_confd/90-opcache-env.ini"
   cat >"$confd2w_confd/$confd2w_case.ini" <<'CONF'
 disable_functions = get_current_user
