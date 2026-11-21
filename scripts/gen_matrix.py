@@ -48,6 +48,11 @@ def target_name(php, flavor, uarch):
     return f"php-{slug}-{flavor}{suffix}"
 
 
+def runtime_os(flavor):
+    """The Dockerfile's RUNTIME_OS for a flavor: the -slim flavors get their own root filesystem."""
+    return "slim" if flavor.endswith("-slim") else "full"
+
+
 def tags_for(matrix, php, flavor, uarch):
     image = matrix["image"]
     if uarch == "v3":
@@ -79,7 +84,7 @@ def corpus_tags(matrix):
 
 
 def build_targets(matrix):
-    """One entry per published image. 44 baseline + 8 v3 = 52."""
+    """One entry per published image. 66 baseline + 12 v3 = 78."""
     tags = corpus_tags(matrix)
     targets = []
     for php, spec in matrix["versions"].items():
@@ -91,6 +96,7 @@ def build_targets(matrix):
                     "release": spec["release"],
                     "era": spec["era"],
                     "flavor": flavor,
+                    "runtime_os": runtime_os(flavor),
                     "uarch": uarch,
                     "compiler": spec["compiler"],
                     "pgo": "true" if spec["pgo"] else "false",
@@ -132,12 +138,16 @@ def build_bootstrap_targets(matrix):
 # A flavor listed here is built in the same bake invocation as the flavor it
 # maps to, for the same php/uarch. ext-builder is `FROM cli` and copies out of
 # the same php-build stage, but each CI leg has its own cache scope and runner,
-# so a leg of its own would recompile PHP and re-run PGO.
-RIDES_WITH = {"ext-builder": "cli"}
+# so a leg of its own would recompile PHP and re-run PGO. fpm-slim (`FROM fpm`)
+# and cli-slim (`FROM cli`) share it the same way. A host carries at most one
+# rider, which keeps a leg's CI steps to one rider set: ext-builder takes the
+# cli leg, so cli-slim takes cli-builder's.
+RIDES_WITH = {"ext-builder": "cli", "fpm-slim": "fpm", "cli-slim": "cli-builder"}
 
 PR_SUBSET = {
     "php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm", "php-8_5-cli-builder",
     "php-8_5-cli", "php-8_5-ext-builder",
+    "php-8_5-fpm-slim", "php-8_5-cli-slim", "php-7_0-fpm-slim",
 }
 
 
@@ -161,6 +171,11 @@ def build_legs(targets):
             raise SystemExit(
                 f"{t['name']} rides with {host_flavor}, but there is no {host_flavor} target "
                 f"for php {t['php']} ({t['uarch']}) in this selection"
+            )
+        if host in riders:
+            raise SystemExit(
+                f"{t['name']} and {riders[host]['name']} both ride with {host[2]} "
+                f"for php {t['php']} ({t['uarch']}); a leg carries one rider"
             )
         riders[host] = t
     legs = []

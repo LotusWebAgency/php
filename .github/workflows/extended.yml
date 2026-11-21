@@ -97,7 +97,7 @@ on:
         type: string
         default: ""
       flavor:
-        description: "Flavors, comma separated: fpm, cli, cli-builder, ext-builder (empty: all)"
+        description: "Flavors, comma separated: fpm, cli, cli-builder, ext-builder, fpm-slim, cli-slim (empty: all)"
         type: string
         default: ""
       apps:
