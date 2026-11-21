@@ -102,14 +102,13 @@ extensions and ini, checked in CI) and the same entrypoint and healthcheck, in a
 about 45 MB smaller. Tags: `8.5-fpm-slim`, `8.5.13-cli-slim`, `8.5-fpm-slim-v3`.
 
 - Removed: `apk`, curl, nano, less, procps, zip, zstd, the PostgreSQL client, the MariaDB client and
-  `mysql*` wrappers. Kept: bash, `sh`, tini, unzip, bzip2, xz and a busybox applet
-  allowlist ([list](https://github.com/LotusWebAgency/php/blob/main/README.md#slim-flavors)).
+  `mysql*` wrappers, and every other native binary (no `openssl` command, memcached or tiff tools). Kept: bash,
+  `sh`, tini, unzip, bzip2, xz and a busybox applet allowlist ([list](https://github.com/LotusWebAgency/php/blob/main/README.md#slim-flavors)).
 - Not a sandbox: PHP still has curl, sockets, ftp, pcntl and posix, and `busybox <applet>` still
   reaches every applet; a pruned name only fails as a bare command.
 - No package manager, no curl for custom healthchecks, no `update-ca-certificates` (mount a CA
   bundle or set `openssl.cafile`). To add a runtime library, use the full flavor, or `apk add` in a
-  stage from the matching full tag and `COPY` the files (Trivy does not see copied libraries).
-- The apk database and `/etc/os-release` stay, so scanners still work.
+  stage from the matching full tag and `COPY` the files.
 
 ## Quick start
 

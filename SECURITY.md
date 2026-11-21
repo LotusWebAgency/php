@@ -48,7 +48,8 @@ or kept under `/opt` are tracked by hand through the pins in `deps/versions.lock
 PHP 8.1 to 8.5 use Wolfi's system OpenSSL 4, which `apk upgrade` updates with the rest of the base.
 
 `fpm-slim` and `cli-slim` have no `apk`, curl, procps, zip, zstd, PostgreSQL client or MariaDB client
-tools, and only a short allowlist of busybox applets (see
+tools, no native executable outside a short keep list (bash, tini, unzip, bzip2, xz) and only a short
+allowlist of busybox applets (see
 [Slim flavors](README.md#slim-flavors)). That reduces the native tooling reachable through
 `proc_open`; it is not a sandbox, because PHP still has curl, sockets, ftp, pcntl and posix compiled
 in, and `busybox <applet>` still runs a pruned applet. Their apk database and `/etc/os-release`

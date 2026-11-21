@@ -1784,7 +1784,9 @@ if [ "$SLIM" = 1 ]; then
     zip zipcloak zipnote zipsplit zstd zstdcat zstdgrep zstdless zstdmt unzstd
     psql pg_dump pg_dumpall pg_restore pg_basebackup pg_isready pg_amcheck pg_receivewal pg_recvlogical pg_verifybackup
     createdb createuser dropdb dropuser clusterdb reindexdb vacuumdb
-    mysql* mariadb*"
+    mysql* mariadb*
+    openssl memcat memcp memrm memflush memstat ziptool zipmerge zipcmp xsltproc tiffinfo tiffcp gdbmtool iconv iconvconfig ldconfig
+    tput tic infocmp"
   # shellcheck disable=SC2086  # the name list is meant to word-split; the globs are expanded by the container's shell
   slim_found=$(set -f; slim_present $slim_absent_names)
   [ -z "$slim_found" ] || { echo "FAIL: slim: tools the slim flavor removes are present: $(tr '\n' ' ' <<<"$slim_found")"; exit 1; }
@@ -1824,6 +1826,46 @@ if [ "$SLIM" = 1 ]; then
     exit 1
   fi
   echo "ok: slim -- the busybox links are exactly the allowlist ($(wc -l <<<"$bb_links") applets: $(tr '\n' ' ' <<<"$bb_links"))"
+
+  # Every other entry there is a native tool, and the set is exactly
+  # scripts/slim-native-keep.txt (the same file the rootfs stage keeps and
+  # slim-finalize.sh checks), so a package pulled in later cannot add one silently.
+  # Dotfiles and dangling symlinks count: stat -L fails on a dangling one, which is
+  # not the busybox inode.
+  native_bins=$(drun --rm "$IMAGE" sh -c '
+    bb=$(stat -Lc %i /bin/busybox) || exit 1
+    for d in /bin /sbin /usr/bin /usr/sbin; do
+      for f in "$d"/* "$d"/.[!.]*; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        n=${f##*/}
+        [ "$n" = busybox ] && continue
+        [ "$(stat -Lc %i "$f" 2>/dev/null)" = "$bb" ] || echo "$n"
+      done
+    done
+    exit 0' | sort -u)
+  want_native=$(sort -u "$HERE/../scripts/slim-native-keep.txt")
+  [ -n "$want_native" ] || { echo "FAIL: slim: scripts/slim-native-keep.txt is empty or missing"; exit 1; }
+  if [ "$native_bins" != "$want_native" ]; then
+    echo "FAIL: slim: the non-busybox executables in /bin, /sbin, /usr/bin and /usr/sbin are not exactly scripts/slim-native-keep.txt"
+    echo "  extra (present, not kept): $(comm -13 <(echo "$want_native") <(echo "$native_bins") | tr '\n' ' ')"
+    echo "  missing (kept, absent):    $(comm -23 <(echo "$want_native") <(echo "$native_bins") | tr '\n' ' ')"
+    exit 1
+  fi
+  echo "ok: slim -- the native executables are exactly the keep list ($(wc -l <<<"$native_bins") names: $(tr '\n' ' ' <<<"$native_bins"))"
+
+  # Positive controls for that check: a probe that lists nothing proves nothing.
+  slim_passwd=$(drun --rm "$IMAGE" cat /etc/passwd)
+  grep -qx 'root:x:0:0:root:/root:/bin/sh' <<<"$slim_passwd" \
+    || { echo "FAIL: slim: root's shell is not /bin/sh (the ash link is removed)"; exit 1; }
+  grep -qx 'nonroot:x:65532:65532:[^:]*:/home/nonroot:/bin/sh' <<<"$slim_passwd" \
+    || { echo "FAIL: slim: the nonroot user 65532 (home /home/nonroot) is missing"; exit 1; }
+  grep -qx 'nonroot:x:65532:' < <(drun --rm "$IMAGE" cat /etc/group) \
+    || { echo "FAIL: slim: the nonroot group 65532 is missing"; exit 1; }
+  slim_shells=$(drun --rm "$IMAGE" cat /etc/shells)
+  [ "$slim_shells" = /bin/sh ] || { echo "FAIL: slim: /etc/shells is not exactly /bin/sh: $slim_shells"; exit 1; }
+  slim_nonroot=$(drun --rm --user nonroot "$IMAGE" sh -c 'echo "$(id -u):$(id -g)"; stat -c %a /home/nonroot')
+  [ "$slim_nonroot" = $'65532:65532\n700' ] || { echo "FAIL: slim: --user nonroot does not run as 65532:65532 with a 0700 /home/nonroot: $slim_nonroot"; exit 1; }
+  echo "ok: slim -- root's shell is /bin/sh, /etc/shells lists only it, and --user nonroot (65532) works"
 
   # Trivy and the BuildKit SBOM scanner identify the OS and its packages from these two
   # files; without them a scan reports nothing and passes.

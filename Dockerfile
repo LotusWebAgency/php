@@ -683,6 +683,8 @@ RUN set -eux; \
 # zstd, the MariaDB and PostgreSQL clients; unzip, bzip2 and xz stay because
 # sp-upload-check needs them and busybox has no xz applet. The apk database and
 # /etc/os-release are kept so scanners can still read the package inventory.
+# root gets /bin/sh as its shell (the ash link is gone) and the nonroot user 65532
+# that the full flavors inherit from wolfi-base is added.
 FROM ${BASE_IMAGE} AS runtime-rootfs-slim
 COPY --from=php-build /tmp/runtime-packages.txt /tmp/runtime-packages.txt
 ARG WOLFI_INDEX_STATE=""
@@ -697,6 +699,34 @@ RUN set -eux; \
     find /out -xdev -perm /6000 -type f -exec chmod a-s {} +; \
     test -s /out/lib/apk/db/installed; \
     test -s /out/etc/os-release
+# Native tools are an allowlist, not a delete list: the packages above pull in
+# executables nobody asked for (openssl, the libmemcached clients, ziptool,
+# xsltproc, the libtiff tools, gdbmtool, iconv, ldconfig, ...), and a package added
+# later must not bring its tools along silently. /out/bin, /out/sbin and
+# /out/usr/sbin are symlinks into /out/usr/bin. What stays is the busybox binary and
+# its applet links (scripts/slim-finalize.sh prunes those to its own list) and the
+# names in scripts/slim-native-keep.txt.
+RUN --mount=type=bind,source=scripts/slim-native-keep.txt,target=/tmp/slim-native-keep.txt \
+    set -eux; \
+    for link in /out/bin /out/sbin /out/usr/sbin; do test -L "$link"; done; \
+    keep=" busybox $(tr '\n' ' ' < /tmp/slim-native-keep.txt)"; \
+    for entry in /out/usr/bin/* /out/usr/bin/.[!.]*; do \
+      [ -e "$entry" ] || [ -L "$entry" ] || continue; \
+      name="${entry##*/}"; \
+      case "$keep" in *" $name "*) continue ;; esac; \
+      case "$(readlink "$entry" || true)" in *busybox) continue ;; esac; \
+      rm -rf "$entry"; \
+    done; \
+    for name in $keep; do test -e "/out/usr/bin/$name"; done; \
+    sed -i 's|^root:\(.*\):/bin/ash$|root:\1:/bin/sh|' /out/etc/passwd; \
+    sed -i '\|^/bin/ash$|d' /out/etc/shells; \
+    grep -qx 'root:x:0:0:root:/root:/bin/sh' /out/etc/passwd; \
+    grep -qx /bin/sh /out/etc/shells; \
+    echo 'nonroot:x:65532:65532:Account created by apko:/home/nonroot:/bin/sh' >> /out/etc/passwd; \
+    echo 'nonroot:x:65532:' >> /out/etc/group; \
+    mkdir -p /out/home/nonroot; \
+    chown 65532:65532 /out/home/nonroot; \
+    chmod 700 /out/home/nonroot
 
 # --- runtime-os-slim ---
 # The base image's config (PATH, the CA bundle path) plus the UTF-8 locale
@@ -871,12 +901,14 @@ CMD ["php", "-a"]
 FROM fpm AS fpm-slim
 USER root
 RUN --mount=type=bind,source=scripts/slim-finalize.sh,target=/tmp/slim-finalize.sh \
+    --mount=type=bind,source=scripts/slim-native-keep.txt,target=/tmp/slim-native-keep.txt \
     bash /tmp/slim-finalize.sh
 USER www-data
 
 FROM cli AS cli-slim
 USER root
 RUN --mount=type=bind,source=scripts/slim-finalize.sh,target=/tmp/slim-finalize.sh \
+    --mount=type=bind,source=scripts/slim-native-keep.txt,target=/tmp/slim-native-keep.txt \
     bash /tmp/slim-finalize.sh
 USER www-data
 

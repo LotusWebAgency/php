@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Final trim of a slim image (fpm-slim, cli-slim): refuse an image that still has
-# apk, strip setuid bits and prune the busybox applet links to an allowlist.
+# apk, strip setuid bits, prune the busybox applet links to an allowlist and check
+# that the other executables in the binary directories are exactly the names in
+# scripts/slim-native-keep.txt (the runtime-rootfs-slim stage deleted the rest).
 # Every command goes through `busybox <applet>`, so the script does not depend on
 # the links it removes.
 set -euo pipefail
 
 bb=/usr/bin/busybox
+native_keep_file=/tmp/slim-native-keep.txt
 
 # Entrypoint and helper scripts: env sh tr sed awk grep cut wc uniq tail cat id
 # stat flock rm mkdir mktemp chmod mv ln touch (docker-php-entrypoint), true
@@ -16,6 +19,7 @@ bb=/usr/bin/busybox
 allowlist="env sh tr sed awk grep cut wc uniq tail cat id stat flock rm mkdir mktemp chmod mv ln touch true false ls head od timeout gzip sleep date nologin"
 
 [ -x "$bb" ] || { echo "error: $bb is missing" >&2; exit 1; }
+[ -s "$native_keep_file" ] || { echo "error: $native_keep_file is missing" >&2; exit 1; }
 
 for path in /sbin/apk /usr/sbin/apk /bin/apk /usr/bin/apk; do
   if [ -e "$path" ]; then
@@ -69,3 +73,22 @@ if [ "$want" != "$have" ]; then
   exit 1
 fi
 echo "ok: busybox links pruned to: $allowlist"
+
+# Every other entry in the binary directories is a native tool; /bin, /sbin and
+# /usr/sbin lead to /usr/bin, so one directory covers them.
+want_native="$("$bb" sort -u "$native_keep_file")"
+have_native="$(
+  for entry in /usr/bin/* /usr/bin/.[!.]*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    [ "${entry##*/}" = busybox ] && continue
+    [ "$("$bb" readlink -f "$entry")" = "$real_bb" ] && continue
+    echo "${entry##*/}"
+  done | "$bb" sort -u
+)"
+if [ "$want_native" != "$have_native" ]; then
+  echo "error: native executables in /usr/bin differ from scripts/slim-native-keep.txt" >&2
+  echo "keep list: ${want_native//$'\n'/ }" >&2
+  echo "present:   ${have_native//$'\n'/ }" >&2
+  exit 1
+fi
+echo "ok: native executables are exactly: ${want_native//$'\n'/ }"

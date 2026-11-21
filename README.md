@@ -172,13 +172,20 @@ underneath: slim has none of the native tools that code running inside PHP could
 Tags are `8.5-fpm-slim`, `8.5-cli-slim`, `8.5.13-fpm-slim` and so on for all 11 versions, plus
 `8.5-fpm-slim-v3` and `8.4-cli-slim-v3` on 8.4 and 8.5. There is no `slim` or `latest-slim` alias.
 
-- **Removed:** `apk`, curl, nano, less, procps, zip, zstd, the PostgreSQL client, and the MariaDB
-  client with its `mysql*` wrappers.
-- **Kept:** bash, `sh`, tini, unzip, bzip2, xz, `php-fcgi`, and these busybox applets: `env`, `sh`,
+- **Removed:** `apk`, curl, nano, less, procps, zip, zstd, the PostgreSQL client, the MariaDB
+  client with its `mysql*` wrappers, and every other native executable in `/usr/bin` and
+  `/usr/sbin` that is not on the list below: no `openssl` binary (the library stays), no
+  libmemcached, libzip, libxslt, libtiff or gdbm command-line tools, no `iconv` or `ldconfig`
+  binary.
+- **Kept:** the only native executables are `bash`, tini, `unzip`, `bzip2` (with `bunzip2` and
+  `bzcat`) and `xz` (with `unxz` and `xzcat`), listed in
+  [`scripts/slim-native-keep.txt`](scripts/slim-native-keep.txt), plus `php-fcgi`, the
+  `/usr/local` PHP tooling and these busybox applets: `env`, `sh`,
   `tr`, `sed`, `awk`, `grep`, `cut`, `wc`, `uniq`, `tail`, `cat`, `id`, `stat`, `flock`, `rm`,
   `mkdir`, `mktemp`, `chmod`, `mv`, `ln`, `touch`, `true`, `false`, `ls`, `head`, `od`, `timeout`,
   `gzip`, `sleep`, `date` and `nologin`. Every other busybox link is removed, so `adduser`, `find`
-  and `sort` are gone as well.
+  and `sort` are gone as well. `root` uses `/bin/sh` as its shell, and the `nonroot` user (65532)
+  of the full flavors exists here too.
 - **Not a sandbox.** PHP itself still has curl, sockets, ftp, pcntl and posix compiled in. Slim
   reduces the tooling around it, nothing more.
 - **Pruned applets are not removed from busybox.** A pruned name fails as a bare command, but
@@ -584,7 +591,7 @@ ENV PHP_EXT_ENABLE=myext
   `apk add` gets the busybox links back and can prune them again. The slim flavors keep only a short
   allowlist of applets and have no `apk` (see [Slim flavors](#slim-flavors)).
 - Baked ini defaults for fpm, cli and ext-builder: `zend.assertions = -1`, so `assert()` is compiled out
-  instead of executing in production. All four flavors set `session.upload_progress.enabled = 0`,
+  instead of executing in production. All six flavors set `session.upload_progress.enabled = 0`,
   `mysqli.allow_local_infile = 0` (PHP 7.0 compiles in 1, 8.x 0, so a hostile MySQL server cannot ask the
   client for its files on any version) and `fatal_error_backtraces = Off` (a PHP 8.5 directive that older
   versions ignore). cli-builder keeps assertions on for test suites. Override any of them with a drop-in
@@ -819,8 +826,8 @@ nothing. `tests/build-all.sh` sets the label; for a manual `bake`, set `INPUTS_H
 
 `smoke.sh` runs the per-image checks and calls the entrypoint, FPM health, read-only, PGO,
 Snuffleupagus and ELF-hardening tests. For a slim flavor it also asserts what is absent and that the
-busybox links equal the allowlist; `tests/test-slim-parity.sh SLIM_IMAGE FULL_IMAGE` compares it with
-its full flavor. Application suites (Laravel, WordPress, PrestaShop) are in
+busybox links and the other executables equal their lists; `tests/test-slim-parity.sh SLIM_IMAGE FULL_IMAGE`
+compares it with its full flavor (`--full-is-builder` when that is cli-builder, the host of `cli-slim`). Application suites (Laravel, WordPress, PrestaShop) are in
 [tests/apps/](tests/apps/README.md). Python unit tests live in `scripts/`, `ci/` and `tests/apps/`.
 
 `tests/extended.sh` runs the suites the main gate does not (`-v3` check, corpus-tier replay,
