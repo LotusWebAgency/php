@@ -21,7 +21,7 @@ ok()      { echo "ok: $*"; }
 fail()    { echo "FAIL: $*" >&2; FAILED+=("$*"); }
 
 # ---------------------------------------------------------- 1. matrix drift
-section "1/11 matrix.gen.hcl drift (scripts/gen_matrix.py --check)"
+section "1/12 matrix.gen.hcl drift (scripts/gen_matrix.py --check)"
 if python3 scripts/gen_matrix.py --check; then
   ok "matrix.gen.hcl matches matrix.json"
 else
@@ -29,7 +29,7 @@ else
 fi
 
 # -------------------------------------------------------------- 2. pgo tiers
-section "2/11 PGO corpus tiers (scripts/pgo_tiers.py check)"
+section "2/12 PGO corpus tiers (scripts/pgo_tiers.py check)"
 if python3 scripts/pgo_tiers.py check; then
   ok "every pgo=true version has a tier, every opt-out has a reason"
 else
@@ -37,7 +37,7 @@ else
 fi
 
 # --------------------------------------------------- 3. bake --print + COMPILER
-section "3/11 bake --print for every target and the pr subset (both platforms), COMPILER cross-check"
+section "3/12 bake --print for every target and the pr subset (both platforms), COMPILER cross-check"
 bake_print() {  # bake_print <group> -> the rendered JSON, or empty + FAIL on error
   local out
   if ! out=$(docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$1" --print 2>&1); then
@@ -132,7 +132,7 @@ print(f"pr legs: {len(legs)}, targets they bake: {len(ci)}, bake pr group: {len(
 fi
 
 # ------------------------------------------------------------- 4. shellcheck
-section "4/11 shellcheck on every shell file"
+section "4/12 shellcheck on every shell file"
 command -v shellcheck >/dev/null || fail "shellcheck not found on this host"
 if command -v shellcheck >/dev/null; then
   # rootfs's runtime scripts have no .sh extension (they ship as bare
@@ -195,7 +195,7 @@ if [ "${#php_files[@]}" -gt 0 ]; then
 fi
 
 # ----------------------------------------------------- 5. fetch-verified.sh
-section "5/11 deps/fetch-verified.sh (tests/test-fetch-verified.sh)"
+section "5/12 deps/fetch-verified.sh (tests/test-fetch-verified.sh)"
 if bash "$HERE/test-fetch-verified.sh"; then
   ok "test-fetch-verified.sh"
 else
@@ -203,7 +203,7 @@ else
 fi
 
 # --------------------------------------------- 6. python unit/lock-format tests
-section "6/11 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex, retry helper; tests/apps/: app cell planner)"
+section "6/12 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex, retry helper; tests/apps/: app cell planner)"
 # Covers, among others, the lock-file format checks:
 # scripts/test_versions_lock.py (deps/versions.lock), scripts/test_release_keys.py
 # (php/release-keys.asc), scripts/test_fetch_verified_sync.py (the two
@@ -238,7 +238,7 @@ else
 fi
 
 # ----------------------------------------------- 7. matrix <-> label consistency
-section "7/11 matrix.json <-> local image com.lotuswebagency.compiler labels (report-only for missing)"
+section "7/12 matrix.json <-> local image com.lotuswebagency.compiler labels (report-only for missing)"
 # Whatever fpm images already exist locally (from an earlier build-all.sh run,
 # or a one-off bake) get cross-checked against matrix.json right now, the same
 # comparison tests/smoke.sh makes per image at test time -- catching a stale
@@ -275,7 +275,7 @@ fi
 rm -f "$label_check_out"
 
 # --------------------------------- 8. build-all.sh vs bake --print target lists
-section "8/11 tests/build-all.sh's target list vs bake --print's target list"
+section "8/12 tests/build-all.sh's target list vs bake --print's target list"
 # tests/build-all.sh enumerates every image it builds from
 # scripts/gen_matrix.py --github targets -- the same source matrix.gen.hcl's
 # TARGETS variable is rendered from -- rather than naming a flavor or a count
@@ -314,7 +314,7 @@ else
 fi
 
 # ------------------------------------------------------------- 9. runners
-section "9/11 no ubuntu-slim runners in .github/workflows"
+section "9/12 no ubuntu-slim runners in .github/workflows"
 # ubuntu-slim runs jobs in a 1-vCPU container: a compile or test job there is
 # several times slower and a 180-minute build leg times out. Every runs-on and
 # matrix runner label must name a full VM image.
@@ -328,7 +328,7 @@ case "$slim_rc" in
 esac
 
 # ------------------------------------------------- 10. no Debian leftovers
-section "10/11 no apt, dpkg or Debian leftovers in the image sources"
+section "10/12 no apt, dpkg or Debian leftovers in the image sources"
 # The base is Wolfi: a Debian package manager command or a trixie reference in a
 # Dockerfile, test, script or CI helper is a leftover from the Debian era or a
 # command that cannot work. Each legitimate mention is allowlisted below by file
@@ -381,7 +381,7 @@ for ((i = 0; i < ${#DEBIAN_ALLOW[@]}; i += 3)); do
 done
 
 # ------------------------------------------------- 11. one wolfi-base digest
-section "11/11 every wolfi-base digest pin is identical"
+section "11/12 every wolfi-base digest pin is identical"
 # Renovate bumps all of them in one PR; a hand edit that misses one leaves
 # ci/sources.sh (it pulls the Dockerfile's default) on another base than bake.
 wolfi_pins="$(git grep -n -I --untracked -oE 'cgr\.dev/chainguard/wolfi-base(:[^@" ]+)?@sha256:[a-f0-9]{64}' \
@@ -393,6 +393,17 @@ elif [ "$(sed -E 's/^.*@(sha256:[a-f0-9]{64})$/\1/' <<<"$wolfi_pins" | sort -u |
   fail "wolfi-base digest pins differ between files (listed above); make them identical"
 else
   ok "all $(wc -l <<<"$wolfi_pins") wolfi-base pins carry $(sed -E 's/^.*@(sha256:[a-f0-9]{12}).*$/\1/' <<<"$wolfi_pins" | head -1)..."
+fi
+
+# ------------------------------------------------- 12. DOCKERHUB.md size
+section "12/12 DOCKERHUB.md stays under Docker Hub's 25,000-character limit"
+# The Hub rejects a longer overview, and the description sync in CI would fail
+# after the images were already published. Characters, not bytes, whatever the locale.
+dockerhub_chars="$(python3 -c 'import sys; print(len(open(sys.argv[1], encoding="utf-8").read()))' DOCKERHUB.md)"
+if [ "$dockerhub_chars" -ge 25000 ]; then
+  fail "DOCKERHUB.md is $dockerhub_chars characters; Docker Hub's limit is 25,000, so it must stay under"
+else
+  ok "DOCKERHUB.md is $dockerhub_chars characters (limit 25,000)"
 fi
 
 # ------------------------------------------------------------------ summary
