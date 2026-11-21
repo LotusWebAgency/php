@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Print the Wolfi packages owning every shared library the given trees link
-# against, one name per line. Avoids hardcoding version-suffixed package names
-# like libicu78, and resolves the owner by path because a soname alone is
-# ambiguous (libpq.so.5 comes from libpq-12 through libpq-18). Libraries under
-# /opt and /usr/local are vendored or built here and belong to no package.
+# against, one name per line, followed by one so:<soname> constraint per linked
+# library. Avoids hardcoding version-suffixed package names like libicu78, and
+# resolves the owner by path because a soname alone is ambiguous (libpq.so.5
+# comes from libpq-12 through libpq-18). The so: lines keep the runtime install,
+# which runs later against a newer index, on a version that still ships the
+# soname the binaries were linked with (yaml 0.2.6 dropped libyaml-0.so.2).
+# Libraries under /opt and /usr/local are vendored or built here and belong to
+# no package.
 set -euo pipefail
 
 # Wolfi ships no ldd; the dynamic loader lists a binary's libraries itself in
@@ -22,7 +26,7 @@ libs=$(
     find "$dir" -type f \( -perm -u+x -o -name '*.so' -o -name '*.so.*' \) -print0 2>/dev/null \
       | xargs -0 -r -n1 sh -c 'LD_TRACE_LOADED_OBJECTS=1 "$0" "$1" 2>/dev/null || true' "$loader" \
       | awk '/=> not found/ { print "notfound " $1 }
-             /=>/ && $3 ~ /^\// && $3 !~ /^\/(opt|usr\/local)\// { print $3 }'
+             /=>/ && $3 ~ /^\// && $3 !~ /^\/(opt|usr\/local)\// { print $3, $1 }'
   done | sort -u
 )
 
@@ -63,8 +67,9 @@ owner_of() {
 # A library under the system directories that no package owns would be missing
 # from the runtime image, so it is fatal; anything elsewhere only warns.
 owners=""
+sonames=""
 unowned=""
-while IFS= read -r lib; do
+while read -r lib soname; do
   real="$(readlink -f "$lib")" || continue
   if ! owner="$(owner_of "$real")"; then
     case "$real" in
@@ -74,6 +79,12 @@ while IFS= read -r lib; do
     continue
   fi
   owners+="$owner"$'\n'
+  # arm64's loader lists itself by path (/lib/ld-linux-aarch64.so.1 => ...),
+  # which is no soname apk can resolve; its owner, glibc, is listed above.
+  case "$soname" in
+    */*) ;;
+    *) sonames+="so:$soname"$'\n' ;;
+  esac
 done <<<"$libs"
 
 if [ -n "$unowned" ]; then
@@ -83,3 +94,4 @@ if [ -n "$unowned" ]; then
 fi
 
 printf '%s' "$owners" | sed -E 's/-[0-9][^-]*-r[0-9]+$//' | sort -u
+printf '%s' "$sonames" | sort -u
