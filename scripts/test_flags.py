@@ -295,6 +295,8 @@ class TestRuntimeLibs(unittest.TestCase):
             self.assertTrue(result.stdout.strip(), "runtime-libs.sh printed no packages")
             for name in result.stdout.split():
                 self.assertNotRegex(name, r"-[0-9][^-]*-r[0-9]+$")
+            # every linked library also pins its soname, so a later install cannot pick a version without it
+            self.assertIn("so:libc.so.6", result.stdout.split())
 
     @unittest.skipUnless(shutil.which("gcc") and shutil.which("apk"),
                           "requires gcc to build the test fixture and apk to resolve ownership")
