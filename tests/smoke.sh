@@ -271,6 +271,164 @@ foreach (["heic", "avif"] as $ext) {
   || { echo "FAIL: Imagick did not decode the HEIC/AVIF fixtures correctly (got: $heif_out)"; exit 1; }
 echo "ok: imagick decodes HEIC and AVIF (red|blue fixtures)"
 
+# The baked ImageMagick security policy (conf/imagemagick-policy.xml): the limits
+# are in force, the raster formats, solid-color and gradient pseudo-formats, frame
+# numbering and animated GIFs the image is for still work (HEIC/AVIF decode is the
+# run above, which also goes through the policy), and the coders and paths a hostile
+# upload could use are refused.
+imagick_policy_php=$(cat <<'PHP'
+$res = [];
+$check = function ($name, $ok, $detail = "") use (&$res) {
+  $res[] = $name . ":" . ($ok ? "ok" : "bad (" . $detail . ")");
+};
+$refuse = function ($name, $open, $need = null, $forbid = null) use ($check) {
+  try {
+    $open();
+    $check($name, false, "accepted");
+  } catch (Exception $e) {
+    $m = $e->getMessage();
+    $check($name, ($need === null || strpos($m, $need) !== false)
+      && ($forbid === null || strpos($m, $forbid) === false), $m);
+  }
+};
+$dir = sys_get_temp_dir() . "/imp";
+mkdir($dir);
+
+$cfg = (new Imagick())->getConfigureOptions("CONFIGURE_PATH");
+$policy = $cfg["CONFIGURE_PATH"] . "policy.xml";
+$check("policy-path", $cfg["CONFIGURE_PATH"] === "/opt/imagemagick/etc/ImageMagick-7/" && is_file($policy), $cfg["CONFIGURE_PATH"]);
+$check("policy-mode", is_file($policy) && fileowner($policy) === 0 && (fileperms($policy) & 0777) === 0644);
+
+$limits = [
+  "memory" => [Imagick::RESOURCETYPE_MEMORY, 256 * 1048576],
+  "map" => [Imagick::RESOURCETYPE_MAP, 512 * 1048576],
+  "disk" => [Imagick::RESOURCETYPE_DISK, 1073741824],
+  "area" => [Imagick::RESOURCETYPE_AREA, 128000000],
+  "width" => [Imagick::RESOURCETYPE_WIDTH, 16000],
+  "height" => [Imagick::RESOURCETYPE_HEIGHT, 16000],
+  "list-length" => [Imagick::RESOURCETYPE_LISTLENGTH, 256],
+  "time" => [Imagick::RESOURCETYPE_TIME, 120],
+  "thread" => [Imagick::RESOURCETYPE_THREAD, 1],
+];
+foreach ($limits as $name => $l) {
+  $got = Imagick::getResourceLimit($l[0]);
+  $check("limit-" . $name, $got == $l[1], "got " . $got);
+}
+
+$src = new Imagick();
+$src->newImage(64, 48, "red");
+foreach (["jpeg", "png", "webp", "gif", "tiff", "bmp"] as $fmt) {
+  try {
+    $im = clone $src;
+    $im->setImageFormat($fmt);
+    $back = new Imagick();
+    $back->readImageBlob($im->getImageBlob());
+    $check("blob-" . $fmt, $back->getImageWidth() === 64 && $back->getImageHeight() === 48);
+  } catch (Exception $e) {
+    $check("blob-" . $fmt, false, $e->getMessage());
+  }
+}
+foreach (["jpg", "jpeg", "png", "webp", "gif", "tif", "tiff", "bmp", "ico"] as $ext) {
+  try {
+    $im = clone $src;
+    $im->writeImage($dir . "/x." . $ext);
+    $back = new Imagick($dir . "/x." . $ext);
+    $check("file-" . $ext, $back->getImageWidth() > 0);
+  } catch (Exception $e) {
+    $check("file-" . $ext, false, $e->getMessage());
+  }
+}
+
+foreach (["xc:white", "canvas:white", "gradient:red-blue", "radial-gradient:red-blue"] as $spec) {
+  try {
+    $px = new Imagick();
+    $px->newPseudoImage(4, 4, $spec);
+    $check("pseudo-" . $spec, $px->getImageWidth() === 4 && $px->getImageHeight() === 4);
+  } catch (Exception $e) {
+    $check("pseudo-" . $spec, false, $e->getMessage());
+  }
+}
+foreach (["pattern:checkerboard", "plasma:"] as $spec) {
+  $refuse("pseudo-" . $spec, function () use ($spec) { $px = new Imagick(); $px->newPseudoImage(4, 4, $spec); }, "NotAuthorized");
+}
+
+try {
+  $pages = new Imagick();
+  for ($i = 0; $i < 3; $i++) {
+    $pages->addImage(clone $src);
+  }
+  $pages->setImageFormat("png");
+  $pages->writeImages($dir . "/page-%d.png", false);
+  $check("write-frame-numbers", is_file($dir . "/page-0.png") && is_file($dir . "/page-1.png")
+    && is_file($dir . "/page-2.png") && !file_exists($dir . "/page-%d.png"));
+} catch (Exception $e) {
+  $check("write-frame-numbers", false, $e->getMessage());
+}
+
+$frames = [];
+foreach ([40, 300] as $count) {
+  $set = new Imagick();
+  foreach (range(1, $count) as $_) {
+    $frame = new Imagick();
+    $frame->newPseudoImage(4, 4, "xc:white");
+    $frame->setImageFormat("gif");
+    $set->addImage($frame);
+  }
+  $set->setImageFormat("gif");
+  $frames[$count] = $set->getImagesBlob();
+}
+try {
+  $back = new Imagick();
+  $back->readImageBlob($frames[40]);
+  $check("gif-40-frames", $back->getNumberImages() === 40, $back->getNumberImages());
+} catch (Exception $e) {
+  $check("gif-40-frames", false, $e->getMessage());
+}
+$refuse("gif-300-frames", function () use ($frames) { $big = new Imagick(); $big->readImageBlob($frames[300]); }, "ListLengthExceedsLimit");
+
+$mvg = "push graphic-context\nviewbox 0 0 10 10\nfill red\nrectangle 0 0 5 5\npop graphic-context\n";
+$svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\"/></svg>";
+file_put_contents($dir . "/t.mvg", $mvg);
+file_put_contents($dir . "/t.svg", $svg);
+file_put_contents($dir . "/t.eps", "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 10 10\n0 0 10 10 rectfill\nshowpage\n");
+file_put_contents($dir . "/t.pdf", "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n");
+file_put_contents($dir . "/t.msl", "<?xml version=\"1.0\"?><image><read filename=\"/etc/passwd\"/></image>");
+
+// url-php and mvg-file also hold without the policy (the extension rejects a bare URL
+// before ImageMagick sees it, and a .mvg extension has no decoder); mvg-prefix covers MVG.
+// With the policy the denied URL delegates fall through to a file open (UnableToOpenBlob);
+// without it they fail as DelegateFailed (curl) or NoDecodeDelegateForThisImageFormat.
+$refuse("url-php", function () { new Imagick("https://example.com/x.png"); });
+foreach (["https", "http", "ftp"] as $scheme) {
+  $refuse("url-" . $scheme, function () use ($scheme) {
+    $r = new Imagick();
+    $r->readImage($scheme . ":" . $scheme . "://example.com/x.png");
+  }, "UnableToOpenBlob", "DelegateFailed");
+}
+$refuse("mvg-file", function () use ($dir) { new Imagick($dir . "/t.mvg"); });
+$refuse("mvg-prefix", function () use ($dir) { new Imagick("mvg:" . $dir . "/t.mvg"); }, "NotAuthorized");
+$refuse("msl", function () use ($dir) { new Imagick("msl:" . $dir . "/t.msl"); }, "NotAuthorized");
+$refuse("label-indirect", function () { new Imagick("label:@/etc/passwd"); }, "NotAuthorized");
+$refuse("text", function () { new Imagick("text:/etc/passwd"); }, "NotAuthorized");
+$refuse("indirect-read", function () { new Imagick("png:@/etc/passwd"); }, "NotAuthorized");
+$refuse("path-etc", function () { new Imagick("png:/etc/hostname"); }, "NotAuthorized");
+$refuse("stdin", function () { $r = new Imagick(); $r->readImage("png:-"); }, "NotAuthorized");
+$refuse("fd", function () { $r = new Imagick(); $r->readImage("png:fd:0"); }, "NotAuthorized");
+$refuse("svg-file", function () use ($dir) { new Imagick($dir . "/t.svg"); }, "NotAuthorized");
+$refuse("svg-blob", function () use ($svg) { $r = new Imagick(); $r->readImageBlob($svg); }, "NotAuthorized");
+$refuse("eps", function () use ($dir) { new Imagick($dir . "/t.eps"); }, "NotAuthorized");
+$refuse("pdf", function () use ($dir) { new Imagick($dir . "/t.pdf"); }, "NotAuthorized");
+
+echo implode("\n", $res), "\n";
+PHP
+)
+policy_out=$(drun --rm "$IMAGE" php -r "$imagick_policy_php") \
+  || { echo "FAIL: the ImageMagick policy checks did not run (see the PHP error above): $policy_out"; exit 1; }
+policy_bad=$(grep -v ':ok$' <<<"$policy_out" || true)
+[ -z "$policy_bad" ] && [ "$(grep -c ':ok$' <<<"$policy_out")" -ge 52 ] \
+  || { echo "FAIL: the ImageMagick security policy is not in force as shipped:"; echo "${policy_bad:-$policy_out}"; exit 1; }
+echo "ok: imagick policy enforces the resource limits, keeps the raster formats, xc:/gradient: and animated GIFs and refuses URL, MVG/MSL, indirect, SVG, EPS and PDF input"
+
 # ImageMagick is built with --disable-openmp; confirm that holds once imagick
 # links it into the php binary -- OpenMP spawns a thread per core per request if
 # it sneaks back in under FPM.
@@ -786,6 +944,31 @@ for pair in "expose_php:" "display_errors:" "allow_url_include:"; do
 done
 echo "ok: php.ini hardened"
 
+# session.upload_progress.enabled is off everywhere. zend.assertions is -1
+# (assert() compiled out) on fpm and cli, which ext-builder inherits; cli-builder
+# keeps the compiled default 1 because test suites rely on assertions.
+up=$(drun --rm "$IMAGE" php -r "echo ini_get('session.upload_progress.enabled') ?: '0';")
+[[ "$up" == "0" ]] || { echo "FAIL: session.upload_progress.enabled is '$up', expected off"; exit 1; }
+za=$(drun --rm "$IMAGE" php -r "echo ini_get('zend.assertions');")
+case "$FLAVOR" in
+  cli-builder) want_za=1 ;;
+  *) want_za=-1 ;;
+esac
+[[ "$za" == "$want_za" ]] || { echo "FAIL: $FLAVOR zend.assertions is '$za', expected $want_za"; exit 1; }
+echo "ok: session.upload_progress off, zend.assertions=$za on $FLAVOR"
+# PHP 7.0 compiles mysqli.allow_local_infile in as 1 and 8.x as 0; the baked ini
+# pins it off so every version agrees.
+infile=$(drun --rm "$IMAGE" php -r "echo ini_get('mysqli.allow_local_infile') ?: '0';")
+[[ "$infile" == "0" ]] || { echo "FAIL: mysqli.allow_local_infile is '$infile' on $FLAVOR, expected off"; exit 1; }
+echo "ok: mysqli.allow_local_infile off on $FLAVOR"
+# fatal_error_backtraces exists from 8.5; older versions ignore the unknown
+# directive (php starts silent above), so only 8.5 can read it back.
+if ! version_lt "$EXPECT" 8.5; then
+  fb=$(drun --rm "$IMAGE" php -r "echo ini_get('fatal_error_backtraces') ?: '0';")
+  [[ "$fb" == "0" ]] || { echo "FAIL: fatal_error_backtraces is '$fb' on PHP $EXPECT, expected off"; exit 1; }
+  echo "ok: fatal_error_backtraces off on PHP $EXPECT"
+fi
+
 # proc_open must stay enabled: composer and symfony/process need it. Builder
 # (conf/php-builder.ini) drops disable_functions entirely -- build tooling
 # legitimately needs shell_exec/exec too -- so shell_exec is only required to
@@ -921,7 +1104,7 @@ esac
 # command line, or ignored by the target. This measures the result.
 #
 # Everything in the image that this build produced is covered, not just `php`:
-# the FPM binary, the chmod shim, and every shared extension .so -- 18 of them
+# the FPM binary, the chmod shim, the healthcheck probe, and every shared extension .so -- 18 of them
 # on 8.5 -- because a shared module is loaded into the same address space and
 # an executable stack or a writable GOT in any one of them is the whole
 # process's problem.
@@ -930,6 +1113,7 @@ trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -f "$tmp_php"; rm -rf "$ha
 hcid=$(docker create --pull never "$IMAGE")
 docker cp "$hcid:/usr/local/bin/php" "$hard_dir/php" >/dev/null
 docker cp "$hcid:/usr/local/lib/php-chmod-sanitize.so" "$hard_dir/php-chmod-sanitize.so" >/dev/null
+docker cp "$hcid:/usr/local/bin/php-fpm-healthcheck" "$hard_dir/php-fpm-healthcheck" >/dev/null
 mkdir -p "$hard_dir/ext"
 docker cp "$hcid:$extdir/." "$hard_dir/ext" >/dev/null
 # ImageMagick's libraries ship in every flavor (Dockerfile stages them via
@@ -1002,7 +1186,7 @@ assert_compiler_comment "php-$EXPECT" "$hard_dir/php"
 # shellcheck disable=SC2046  # the .so list is meant to word-split
 im_libs=$(find "$hard_dir/im" -maxdepth 1 -type f -name '*.so.*' 2>/dev/null | tr '\n' ' ')
 [ -n "$im_libs" ] || { echo "FAIL: no ImageMagick libraries extracted -- they ship in every flavor, so an empty set means the copy failed"; exit 1; }
-module_files=("$hard_dir/php-chmod-sanitize.so")
+module_files=("$hard_dir/php-chmod-sanitize.so" "$hard_dir/php-fpm-healthcheck")
 [ -f "$hard_dir/php-fpm" ] && module_files+=("$hard_dir/php-fpm")
 # shellcheck disable=SC2206  # both are deliberate globs/word-splits
 module_files+=("$hard_dir"/ext/*.so $im_libs)
@@ -1031,28 +1215,26 @@ for lib in $im_libs; do
     || { echo "FAIL: the /opt ELF walk missed $rel, which the library glob found"; exit 1; }
 done
 
-# Code-level hardening (--code) on every shipped ELF: the chmod shim, php-fpm,
+# Code-level hardening (--code) on every shipped ELF: the chmod shim, the healthcheck probe, php-fpm,
 # the shared extensions and everything under /opt (which includes the libraries
 # in im_libs). Each file is held to the canary, _FORTIFY_SOURCE and
 # the CET/branch-protection landing pads only where it can show them (the rule
 # is documented in assert-elf-hardening.sh). The php binary gets the stricter
 # whole-binary version above.
-hard_files=("$hard_dir/php-chmod-sanitize.so")
+hard_files=("$hard_dir/php-chmod-sanitize.so" "$hard_dir/php-fpm-healthcheck")
 [ -f "$hard_dir/php-fpm" ] && hard_files+=("$hard_dir/php-fpm")
 hard_files+=("$hard_dir"/ext/*.so "${opt_elf_files[@]}")
 bash "$HERE/assert-elf-hardening.sh" --code "modules-$EXPECT" "${hard_files[@]}" || exit 1
 echo "ok: code-level hardening holds on ${#hard_files[@]} shipped ELF files (${#opt_elf_files[@]} of them under /opt)"
 
 # Packed relative relocations (DT_RELR): php/ldflags.sh passes -z pack-relative-relocs
-# to every linker that accepts it. gold, which links the gcc era's php, rejects the
-# flag, so php itself is only held to it on the clang era; the vendored libraries are
-# linked by lld or GNU ld in every era.
+# to every link: lld links php and its extensions, GNU ld links the vendored libraries
+# (ImageMagick and the deps stages). The chmod shim and php-fpm-healthcheck take the same
+# flags but are not asserted: a small object can have no relative relocations to pack.
 has_relr() { readelf -dW "$1" | grep -q '(RELRSZ)'; }
 # shellcheck disable=SC2206  # the list is a deliberate word-split
-relr_files=($im_libs)
-case "$VM_COMPILER" in
-  clang*) relr_files+=("$hard_dir/php" "$hard_dir"/ext/*.so); [ -f "$hard_dir/php-fpm" ] && relr_files+=("$hard_dir/php-fpm") ;;
-esac
+relr_files=($im_libs "$hard_dir/php" "$hard_dir"/ext/*.so)
+[ -f "$hard_dir/php-fpm" ] && relr_files+=("$hard_dir/php-fpm")
 relr_missing=""
 for f in "${relr_files[@]}"; do has_relr "$f" || relr_missing="$relr_missing $(basename "$f")"; done
 [ -z "$relr_missing" ] || { echo "FAIL: no DT_RELR (-z pack-relative-relocs did not take) in:$relr_missing"; exit 1; }
@@ -1416,22 +1598,22 @@ case "$FLAVOR" in
     done
     echo "ok: cli-builder's npm and corepack caches are writable as the image user"
     # Node is the apk nodejs-26 package; npm is not an apk package here. The
-    # node-tools stage installs npm 12.2.2 under /usr/local (Wolfi's npm package
+    # node-tools stage installs npm 12.2.3 under /usr/local (Wolfi's npm package
     # lags it and only bootstraps that install). The finished tree must hold
     # exactly one npm of its own; the copy semantic-release carries for
     # @semantic-release/npm is a dependency of that package and expected. The
     # pattern is the exact node_modules/npm path, so
     # @semantic-release/npm/package.json is not a match.
     npm_version=$(drun --rm "$IMAGE" npm --version)
-    [ "$npm_version" = "12.2.2" ] || { echo "FAIL: cli-builder: npm --version is '$npm_version', expected 12.2.2"; exit 1; }
+    [ "$npm_version" = "12.2.3" ] || { echo "FAIL: cli-builder: npm --version is '$npm_version', expected 12.2.3"; exit 1; }
     npm_pkgs=$(drun --rm "$IMAGE" find /usr/local/lib/node_modules -path '*/node_modules/npm/package.json' -not -path '/usr/local/lib/node_modules/semantic-release/*')
     [ "$npm_pkgs" = "/usr/local/lib/node_modules/npm/package.json" ] \
       || { echo "FAIL: cli-builder: expected exactly one npm outside semantic-release's own tree, found: $npm_pkgs"; exit 1; }
     npm_pkg_version=$(drun --rm "$IMAGE" node -p 'require("/usr/local/lib/node_modules/npm/package.json").version')
-    [ "$npm_pkg_version" = "12.2.2" ] || { echo "FAIL: cli-builder: the installed npm package.json says $npm_pkg_version, expected 12.2.2"; exit 1; }
+    [ "$npm_pkg_version" = "12.2.3" ] || { echo "FAIL: cli-builder: the installed npm package.json says $npm_pkg_version, expected 12.2.3"; exit 1; }
     sr_npm=$(drun --rm "$IMAGE" find /usr/local/lib/node_modules/semantic-release -path '*/node_modules/npm/package.json')
     [ -n "$sr_npm" ] || { echo "FAIL: cli-builder: the control find saw no npm inside semantic-release's tree -- the exclusion above is untested, so its result proves nothing"; exit 1; }
-    echo "ok: cli-builder's npm is 12.2.2 and the only npm outside semantic-release's tree (control: its own nested copy is found)"
+    echo "ok: cli-builder's npm is 12.2.3 and the only npm outside semantic-release's tree (control: its own nested copy is found)"
     # VEX drift: vex/php.openvex.json names the bundled npm packages we accepted a
     # finding in, by exact version (purl). When an npm or semantic-release bump
     # moves them, the statement describes a package that is gone or a version

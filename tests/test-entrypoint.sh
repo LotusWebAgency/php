@@ -284,6 +284,119 @@ for v in 2 maybe TRUEX; do
 done
 echo "ok: PHP_CHMOD_SHIM rejects ambiguous values instead of silently treating them as off"
 
+# --- opcache segment sizing and huge pages -----------------------------------
+# The interned strings buffer is carved out of the opcache segment, so the segment
+# floor is 128MB and the buffer scales with it. PHP 7.0-7.2 cannot allocate more than
+# 16MB of it, and fails to start opcache with more than a fifth of a small segment.
+# ini_get() alone proves nothing here: opcache is not initialized in the CLI unless
+# enabled, and a bad pair kills it at startup, so every case also requires opcache to
+# come up with the computed values.
+PHP_MM=$(drun --rm "$IMAGE" php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;' 2>/dev/null)
+case "$PHP_MM" in 7.0|7.1|7.2) legacy_opcache=1 ;; *) legacy_opcache=0 ;; esac
+if [ "$legacy_opcache" = 1 ]; then interned_cap=16; else interned_cap=32; fi
+opcache_sizes() {
+  drun --rm "$@" "$IMAGE" php -d opcache.enable_cli=1 -r 'echo ini_get("opcache.memory_consumption"), " ", ini_get("opcache.interned_strings_buffer"), " ", (opcache_get_status(false)["opcache_enabled"] ?? false) === true ? "started" : "stopped";' 2>/dev/null || true
+}
+
+got=$(opcache_sizes -m 256m)
+[ "$got" = "128 16 started" ] || fail "256m: opcache memory/interned/state is '$got', expected '128 16 started' (the floor is 128MB, interned an eighth of it)"
+got=$(opcache_sizes -m 4g)
+[ "$got" = "512 $interned_cap started" ] || fail "4g: opcache memory/interned/state is '$got', expected '512 $interned_cap started'"
+echo "ok: opcache segment is at least 128MB, the interned strings buffer scales with it, and opcache starts ($got at 4g)"
+
+got=$(opcache_sizes -m 4g -e PHP_OPCACHE_MEMORY=64M)
+[ "$got" = "64 8 started" ] || fail "PHP_OPCACHE_MEMORY=64M: opcache memory/interned/state is '$got', expected '64 8 started' (an explicit size is used exactly)"
+echo "ok: an explicit PHP_OPCACHE_MEMORY below the floor is used exactly and starts"
+
+got=$(opcache_sizes -m 4g -e PHP_OPCACHE_INTERNED_STRINGS=12)
+[ "$got" = "512 12 started" ] || fail "PHP_OPCACHE_INTERNED_STRINGS=12: opcache memory/interned/state is '$got', expected '512 12 started'"
+got=$(opcache_sizes -m 4g -e PHP_OPCACHE_INTERNED_STRINGS=40)
+if [ "$legacy_opcache" = 1 ]; then want_interned=16; else want_interned=40; fi
+[ "$got" = "512 $want_interned started" ] || fail "PHP_OPCACHE_INTERNED_STRINGS=40: opcache memory/interned/state is '$got', expected '512 $want_interned started' on PHP $PHP_MM"
+echo "ok: PHP_OPCACHE_INTERNED_STRINGS overrides the buffer, capped at 16MB before PHP 7.3, and opcache starts"
+
+if [ "$legacy_opcache" = 1 ]; then want_tiny="8 1 started"; else want_tiny="8 4 started"; fi
+got=$(opcache_sizes -e PHP_OPCACHE_MEMORY=8)
+[ "$got" = "$want_tiny" ] || fail "PHP_OPCACHE_MEMORY=8: opcache memory/interned/state is '$got', expected '$want_tiny' on PHP $PHP_MM (the derived buffer is capped below the segment size)"
+echo "ok: a tiny PHP_OPCACHE_MEMORY starts opcache with a capped interned strings buffer ($got)"
+
+if [ "$legacy_opcache" = 1 ]; then want_cap_mb=6; else want_cap_mb=16; fi
+want_capped="32 $want_cap_mb started"
+got=$(opcache_sizes -e PHP_OPCACHE_MEMORY=32 -e PHP_OPCACHE_INTERNED_STRINGS=40)
+[ "$got" = "$want_capped" ] || fail "PHP_OPCACHE_MEMORY=32 + PHP_OPCACHE_INTERNED_STRINGS=40: opcache memory/interned/state is '$got', expected '$want_capped' on PHP $PHP_MM"
+err=$(drun --rm -e PHP_OPCACHE_MEMORY=32 -e PHP_OPCACHE_INTERNED_STRINGS=40 "$IMAGE" php -v 2>&1 >/dev/null)
+echo "$err" | grep -q "PHP_OPCACHE_INTERNED_STRINGS=40 exceeds .*using ${want_cap_mb} instead" || fail "PHP_OPCACHE_INTERNED_STRINGS=40 over the cap for 32MB logged no warning naming both numbers: $err"
+echo "ok: an explicit PHP_OPCACHE_INTERNED_STRINGS over the cap for the segment is lowered, with a warning, and opcache starts"
+
+for v in 0 abc 8M -4 1.5 18446744073709551617; do
+  set +e
+  out=$(drun --rm -e "PHP_OPCACHE_INTERNED_STRINGS=${v}" "$IMAGE" php -v 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "PHP_OPCACHE_INTERNED_STRINGS=${v} was not rejected"
+  echo "$out" | grep -q "invalid PHP_OPCACHE_INTERNED_STRINGS=${v}" || fail "PHP_OPCACHE_INTERNED_STRINGS=${v} rejected for the wrong reason: $out"
+done
+echo "ok: PHP_OPCACHE_INTERNED_STRINGS rejects anything but a positive integer of up to 6 digits (20 digits wrap to 1 in bash arithmetic)"
+
+# Huge pages are opt-in. Whether opcache.huge_code_pages exists is a property of the
+# build, so a build without it must start, warn and skip; the entrypoint's own
+# probe decides. Where it exists, its default is 0 (PHP's own; no baked ini sets it).
+huge_probe='$v = ini_get("opcache.huge_code_pages"); echo $v === false ? "absent" : $v;'
+got=$(drun --rm "$IMAGE" php -r "$huge_probe" 2>/dev/null)
+if [ "$got" = absent ]; then
+  echo "ok: this build has no opcache.huge_code_pages; PHP_OPCACHE_HUGE_CODE_PAGES is skipped"
+else
+  [ "$got" = 0 ] || fail "opcache.huge_code_pages is '$got' by default, expected 0"
+  for v in 1 true TRUE yes on; do
+    got=$(drun --rm -e "PHP_OPCACHE_HUGE_CODE_PAGES=${v}" "$IMAGE" php -r "$huge_probe" 2>/dev/null)
+    [ "$got" = 1 ] || fail "PHP_OPCACHE_HUGE_CODE_PAGES=${v} gave opcache.huge_code_pages='$got', expected 1"
+  done
+  for v in 0 false FALSE no off; do
+    got=$(drun --rm -e "PHP_OPCACHE_HUGE_CODE_PAGES=${v}" "$IMAGE" php -r "$huge_probe" 2>/dev/null)
+    [ "$got" = 0 ] || fail "PHP_OPCACHE_HUGE_CODE_PAGES=${v} gave opcache.huge_code_pages='$got', expected 0"
+  done
+  echo "ok: PHP_OPCACHE_HUGE_CODE_PAGES is off by default and takes the boolean spellings"
+fi
+
+for v in true TRUE yes on 1; do
+  out=$(drun --rm -e "PHP_ZEND_ALLOC_HUGE_PAGES=${v}" "$IMAGE" env 2>/dev/null)
+  echo "$out" | grep -qx 'USE_ZEND_ALLOC_HUGE_PAGES=1' || fail "PHP_ZEND_ALLOC_HUGE_PAGES=${v} did not export USE_ZEND_ALLOC_HUGE_PAGES=1: $out"
+done
+for v in 0 false no off; do
+  out=$(drun --rm -e "PHP_ZEND_ALLOC_HUGE_PAGES=${v}" "$IMAGE" env 2>/dev/null)
+  echo "$out" | grep -q '^USE_ZEND_ALLOC_HUGE_PAGES=' && fail "PHP_ZEND_ALLOC_HUGE_PAGES=${v} unexpectedly exported USE_ZEND_ALLOC_HUGE_PAGES: $out"
+done
+out=$(drun --rm "$IMAGE" env 2>/dev/null)
+echo "$out" | grep -q '^USE_ZEND_ALLOC_HUGE_PAGES=' && fail "USE_ZEND_ALLOC_HUGE_PAGES is exported by default: $out"
+echo "ok: PHP_ZEND_ALLOC_HUGE_PAGES exports USE_ZEND_ALLOC_HUGE_PAGES=1 only when on"
+
+for var in PHP_OPCACHE_HUGE_CODE_PAGES PHP_ZEND_ALLOC_HUGE_PAGES; do
+  for v in 2 maybe TRUEX; do
+    set +e
+    out=$(drun --rm -e "${var}=${v}" "$IMAGE" php -v 2>&1 >/dev/null)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "${var}=${v} (neither on nor off) was not rejected"
+    echo "$out" | grep -qi "invalid ${var}=${v}" || fail "${var}=${v} rejected for the wrong reason: $out"
+  done
+done
+echo "ok: the huge page switches reject ambiguous values"
+
+# A host with transparent huge pages set to never makes both switches inert: one
+# warning, then the container starts. The sysfs file is replaced with a bind mount.
+thp_dir=$(mktemp -d)
+echo "always madvise [never]" > "$thp_dir/enabled"
+chmod 755 "$thp_dir"; chmod 644 "$thp_dir/enabled"
+set +e
+out=$(drun --rm -e PHP_ZEND_ALLOC_HUGE_PAGES=1 -v "$thp_dir/enabled:/sys/kernel/mm/transparent_hugepage/enabled:ro" "$IMAGE" php -r 'echo "started";' 2>&1)
+rc=$?
+set -e
+rm -rf "$thp_dir"
+[ "$rc" -eq 0 ] || fail "a host with THP=never refused to start: $out"
+echo "$out" | grep -q "transparent huge pages are 'never'" || fail "THP=never did not log the warning: $out"
+[ "$(echo "$out" | grep -c "transparent huge pages are 'never'")" -eq 1 ] || fail "THP=never warning was not exactly one line: $out"
+echo "ok: THP=never on the host logs one warning and the container still starts"
+
 # --- autotuning and input validation ----------------------------------------
 
 if [ "$FLAVOR" = fpm ]; then
@@ -1553,4 +1666,75 @@ CONF
   fi
 done
 fi
+# disable_functions in the baked 10-php.ini is only taken as the resolved value when
+# it is a plain list. A ${name} reference resolves from a directive an earlier ini
+# parsed, which the baked-only read cannot see: skipping the resolved read there
+# would start with a shorter list than the one php applies.
+if [ "$FLAVOR" != cli-builder ]; then
+varref_dir="/tmp/ep-varref-$$"
+mkdir -p "$varref_dir"
+printf 'disable_functions = ${my_df}\n' >"$varref_dir/10-php.ini"
+printf 'my_df = "exec,system,getmyuid"\n' >"$varref_dir/05-vars.ini"
+chmod 755 "$varref_dir"
+chmod 644 "$varref_dir"/*.ini
+out=$(drun --rm -e PHP_DISABLE_FUNCTIONS=getmypid \
+  -v "$varref_dir/10-php.ini":/usr/local/etc/php/conf.d/10-php.ini:ro \
+  -v "$varref_dir/05-vars.ini":/usr/local/etc/php/conf.d/05-vars.ini:ro \
+  "$IMAGE" php -r 'echo ini_get("disable_functions"), "|", function_exists("exec") ? "LIVE" : "gone";' 2>/dev/null)
+rm -rf "$varref_dir"
+[ "$out" = "exec,system,getmyuid,getmypid|gone" ] \
+  || fail "$FLAVOR: a \${name} reference in the baked disable_functions line, resolved from an earlier ini, gave '$out' instead of 'exec,system,getmyuid,getmypid|gone'"
+echo "ok: $FLAVOR -- a baked disable_functions line that references an ini variable is resolved through the full ini set, not read on its own"
+
+# A FIFO named *.ini in a scanned directory is not a file php parses; the entrypoint
+# must not open it (that blocks until a writer shows up, so start-up would hang).
+fifo_dir="/tmp/ep-fifo-$$"
+fifo_name="ep-fifo-$$"
+fifo_out="$fifo_dir/out"
+mkdir -p "$fifo_dir"
+chmod 755 "$fifo_dir"
+mkfifo "$fifo_dir/50-x.ini"
+drun --rm --name "$fifo_name" -e PHP_DISABLE_FUNCTIONS=getmypid \
+  -v "$fifo_dir/50-x.ini":/usr/local/etc/php/conf.d/50-x.ini:ro \
+  "$IMAGE" php -r 'echo ini_get("disable_functions");' >"$fifo_out" 2>&1 &
+fifo_pid=$!
+for _ in $(seq 1 60); do
+  kill -0 "$fifo_pid" 2>/dev/null || break
+  sleep 0.5
+done
+if kill -0 "$fifo_pid" 2>/dev/null; then
+  command docker rm -f "$fifo_name" >/dev/null 2>&1 || true
+  kill "$fifo_pid" 2>/dev/null || true
+  rm -rf "$fifo_dir"
+  fail "$FLAVOR: a FIFO at conf.d/50-x.ini hung the entrypoint (still not started after 30s)"
+fi
+wait "$fifo_pid" || { out=$(cat "$fifo_out"); rm -rf "$fifo_dir"; fail "$FLAVOR: a FIFO at conf.d/50-x.ini made the start fail: $out"; }
+out=$(cat "$fifo_out")
+rm -rf "$fifo_dir"
+echo "$out" | grep -qw getmypid || fail "$FLAVOR: with a FIFO at conf.d/50-x.ini the effective disable_functions lost getmypid: $out"
+echo "ok: $FLAVOR -- a FIFO named *.ini in conf.d does not block start-up"
+fi
+
+# /usr/local/etc/php/php-major-minor is trusted only when it is a regular file whose
+# MAJOR.MINOR agrees with the PHP_VERSION the environment carries; otherwise the
+# entrypoint asks php. A wrong value would emit JIT settings php 7.x rejects, or drop
+# them on 8.x. PHP_VERSION is passed explicitly: the image's own ENV does not carry it.
+case "$PHP_MM" in 8.*|9.*|[1-9][0-9].*) want_jit=1; wrong_mm=7.0 ;; *) want_jit=0; wrong_mm=8.5 ;; esac
+mm_dir="/tmp/ep-mm-$$"
+mkdir -p "$mm_dir/dir"
+printf '%s\n' "$wrong_mm" >"$mm_dir/php-major-minor"
+chmod -R a+rX "$mm_dir"
+jit_lines=$(drun --rm -e "PHP_VERSION=${PHP_MM}" \
+  -v "$mm_dir/php-major-minor":/usr/local/etc/php/php-major-minor:ro \
+  "$IMAGE" sh -c 'grep -c "^opcache.jit" /usr/local/etc/php/conf.d/90-opcache-env.ini || true' 2>/dev/null)
+if [ "$want_jit" = 1 ]; then
+  [ "$jit_lines" -ge 1 ] || fail "$FLAVOR: a php-major-minor saying $wrong_mm in a $PHP_MM image dropped the JIT settings from the generated opcache ini"
+else
+  [ "$jit_lines" -eq 0 ] || fail "$FLAVOR: a php-major-minor saying $wrong_mm in a $PHP_MM image wrote JIT settings into the generated opcache ini"
+fi
+echo "ok: $FLAVOR -- a php-major-minor that disagrees with PHP_VERSION is ignored and php is asked"
+err=$(drun --rm -v "$mm_dir/dir":/usr/local/etc/php/php-major-minor:ro "$IMAGE" php -r 'echo "";' 2>&1 >/dev/null || true)
+rm -rf "$mm_dir"
+echo "$err" | grep -qi "read error" && fail "$FLAVOR: a directory at php-major-minor made the entrypoint print a read error: $err"
+echo "ok: $FLAVOR -- a directory at php-major-minor is skipped without a read error"
 echo "ENTRYPOINT TESTS PASSED"

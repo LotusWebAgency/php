@@ -15,7 +15,7 @@
 # wp-config.php; PrestaShop's domain is pure database state read by Shop/Context
 # on every request, so the fix has to update that state.
 #
-# Schema: every PrestaShop built here (9.2.0 on the 8.5 tier, 8.2.8 on the 7.2,
+# Schema: every PrestaShop built here (9.2.1 on the 8.5 tier, 8.2.9 on the 7.2,
 # 8.1, 8.2 and 8.4 tiers; corpus.lock has the pins) is on the 1.7+/Symfony-admin
 # line, which has carried ps_shop_url and the PS_SHOP_DOMAIN* configuration
 # mirror with the same columns throughout. The 1.6 line (7.0 tier) is not covered;

@@ -15,7 +15,7 @@
 # That target also adds com.lotuswebagency.bootstrap=true and a
 # "-cli-builder-bootstrap" tag suffix; this image carries the same label so it
 # cannot be mistaken for a release image.
-ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:24f549a7fcace88e69b9557941168c74645688ecc4acf7fb6d734a6b74e9019d
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:71f52fd289650f1d021d60ba11235550b1b5ce124f3797bd254ca70c4cef39f9
 FROM ${BASE_IMAGE}
 ARG INPUTS_HASH=""
 

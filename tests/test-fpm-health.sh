@@ -8,7 +8,33 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 name="fpm-health-$$"
 downname="fpm-health-down-$$"
 shimname="fpm-health-shim-$$"
-trap 'docker rm -f "$name" "$downname" "$shimname" >/dev/null 2>&1 || true' EXIT
+portname="fpm-health-port-$$"
+sockname="fpm-health-sock-$$"
+v6name="fpm-health-v6-$$"
+trap 'docker rm -f "$name" "$downname" "$shimname" "$portname" "$sockname" "$v6name" >/dev/null 2>&1 || true' EXIT
+
+wait_healthy() {
+  local cname="$1" st=none
+  for _ in $(seq 1 30); do
+    st=$(docker inspect --format='{{.State.Health.Status}}' "$cname" 2>/dev/null || echo none)
+    [ "$st" = healthy ] && return 0
+    sleep 1
+  done
+  docker logs "$cname" >&2 || true
+  fail "$cname never became healthy (status=$st)"
+}
+
+# probe <container> [VAR=value]...: runs php-fpm-healthcheck with the given
+# environment; sets probe_rc and probe_err (stderr).
+probe() {
+  local cname="$1" args=()
+  shift
+  for kv in "$@"; do args+=(-e "$kv"); done
+  set +e
+  probe_err="$(docker exec "${args[@]}" "$cname" php-fpm-healthcheck 2>&1 >/dev/null)"
+  probe_rc=$?
+  set -e
+}
 
 drun -d --name "$name" "$IMAGE" >/dev/null
 for i in $(seq 1 30); do
@@ -26,9 +52,8 @@ echo "ok: clean startup log"
 # The healthcheck has to prove the negative too, not just the positive --
 # override the entrypoint so php-fpm never starts. HEALTHCHECK is baked into
 # the image and keeps running inside the container regardless of what its
-# own command is, so this still exercises the real vendored
-# php-fpm-healthcheck against a pool that is genuinely down (php-fcgi
-# refusing to connect), not a mock.
+# own command is, so this still exercises the real php-fpm-healthcheck against a
+# pool that is genuinely down (connection refused), not a mock.
 drun -d --name "$downname" --entrypoint sleep "$IMAGE" 300 >/dev/null
 status=none
 for i in $(seq 1 60); do
@@ -38,6 +63,152 @@ for i in $(seq 1 60); do
 done
 [ "$status" = unhealthy ] || { docker logs "$downname"; fail "healthcheck never reported unhealthy with the pool down (status=$status after ${i}s)"; }
 echo "ok: healthcheck reports unhealthy when the pool is down (after ${i}s)"
+
+# The probe itself, run by hand against the live pool and the dead one: exit
+# codes and the one-line stderr message the HEALTHCHECK log shows.
+probe "$name"
+[ "$probe_rc" -eq 0 ] && [ -z "$probe_err" ] || fail "php-fpm-healthcheck against the live pool exited $probe_rc: $probe_err"
+echo "ok: php-fpm-healthcheck exits 0 silently against a healthy pool"
+
+probe "$downname"
+[ "$probe_rc" -eq 1 ] && grep -q 'did not answer' <<<"$probe_err" || fail "php-fpm-healthcheck against a stopped pool: rc=$probe_rc, stderr '$probe_err'"
+echo "ok: php-fpm-healthcheck exits 1 against a stopped pool"
+
+probe "$name" PHP_FPM_PING_RESPONSE=not-the-response
+[ "$probe_rc" -eq 1 ] && grep -q 'unexpected ping response' <<<"$probe_err" || fail "a wrong expected response: rc=$probe_rc, stderr '$probe_err'"
+[ "$(wc -l <<<"$probe_err")" -eq 1 ] || fail "the failure message is not one line: '$probe_err'"
+echo "ok: php-fpm-healthcheck exits 1 with a one-line message on a wrong expected response"
+
+probe "$name" PHP_FPM_PING_PATH=/no-such-ping
+[ "$probe_rc" -eq 1 ] || fail "an unknown ping path exited $probe_rc, expected 1"
+echo "ok: php-fpm-healthcheck exits 1 when the pool does not answer the ping path"
+
+# 200 bytes is past 127, so the path goes out in the four-byte FastCGI length form.
+long_ping_path="/$(head -c 200 /dev/zero | tr '\0' p)"
+probe "$name" "PHP_FPM_PING_PATH=$long_ping_path"
+[ "$probe_rc" -eq 1 ] && [ "$(wc -l <<<"$probe_err")" -eq 1 ] && [ -n "$probe_err" ] || fail "a 201-byte ping path: rc=$probe_rc, stderr '$probe_err'"
+echo "ok: php-fpm-healthcheck sends a ping path over 127 bytes and exits 1 with one stderr line"
+
+for listen in 0.0.0.0:9000 9000 '[::]:9000' localhost:9000; do
+  probe "$name" "PHP_FPM_LISTEN=$listen"
+  [ "$probe_rc" -eq 0 ] || fail "PHP_FPM_LISTEN=$listen against the live pool exited $probe_rc: $probe_err"
+done
+echo "ok: php-fpm-healthcheck reaches the pool through 0.0.0.0:PORT, PORT, [::]:PORT and HOST:PORT"
+
+probe "$name" PHP_FPM_LISTEN=127.0.0.1:9999
+[ "$probe_rc" -eq 1 ] || fail "a port nothing listens on exited $probe_rc, expected 1"
+echo "ok: php-fpm-healthcheck exits 1 on a port nobody listens on"
+
+# A pool bound to [::]: the probe must reach it through [::1], not only the v4 loopback.
+if docker exec "$name" grep -q '^00000000000000000000000000000001 ' /proc/net/if_inet6; then
+  drun -d --name "$v6name" -e 'PHP_FPM_LISTEN=[::]:9124' "$IMAGE" >/dev/null
+  wait_healthy "$v6name"
+  probe "$v6name" 'PHP_FPM_LISTEN=[::1]:9124'
+  [ "$probe_rc" -eq 0 ] || fail "[::1]:9124 against a pool on [::]:9124 exited $probe_rc: $probe_err"
+  echo "ok: php-fpm-healthcheck reaches a [::]:PORT pool through [::1]:PORT"
+else
+  echo "skip: no IPv6 loopback in the container, [::1]:PORT case not run"
+fi
+
+# A pool on a custom port and one on a unix socket: the baked HEALTHCHECK reads the
+# same PHP_FPM_LISTEN the pool does, so both must go healthy on their own.
+drun -d --name "$portname" -e PHP_FPM_LISTEN=127.0.0.1:9123 "$IMAGE" >/dev/null
+wait_healthy "$portname"
+probe "$portname"
+[ "$probe_rc" -eq 0 ] || fail "custom port pool: php-fpm-healthcheck exited $probe_rc: $probe_err"
+probe "$portname" PHP_FPM_LISTEN=127.0.0.1:9000
+[ "$probe_rc" -eq 1 ] || fail "custom port pool: the default port answered ($probe_rc)"
+echo "ok: php-fpm-healthcheck follows a custom PHP_FPM_LISTEN port"
+
+drun -d --name "$sockname" -e PHP_FPM_LISTEN=/tmp/fpm.sock "$IMAGE" >/dev/null
+wait_healthy "$sockname"
+probe "$sockname"
+[ "$probe_rc" -eq 0 ] || fail "unix socket pool: php-fpm-healthcheck exited $probe_rc: $probe_err"
+probe "$sockname" PHP_FPM_LISTEN=unix:/tmp/fpm.sock
+[ "$probe_rc" -eq 0 ] || fail "unix socket pool, unix: prefix: exited $probe_rc: $probe_err"
+probe "$sockname" PHP_FPM_LISTEN=/tmp/no-such.sock
+[ "$probe_rc" -eq 1 ] || fail "a missing unix socket exited $probe_rc, expected 1"
+echo "ok: php-fpm-healthcheck speaks to a unix socket listen"
+
+# A stand-in FastCGI server for what the live pool never does: stall, and answer
+# in several records with padding. It reads the request up to the empty STDIN
+# record, then plays MODE.
+docker exec -i "$name" sh -c "cat > /tmp/fake-fcgi.php" <<'PHP'
+<?php
+list(, $port, $mode) = $argv;
+$server = stream_socket_server("tcp://127.0.0.1:$port");
+$conn = stream_socket_accept($server, 8);
+if ($conn === false) {
+    exit;
+}
+if ($mode === 'stall') {
+    sleep(8);
+    exit;
+}
+function readn($conn, $want)
+{
+    $buf = '';
+    while (strlen($buf) < $want) {
+        $chunk = fread($conn, $want - strlen($buf));
+        if ($chunk === false || $chunk === '') {
+            exit;
+        }
+        $buf .= $chunk;
+    }
+    return $buf;
+}
+while (true) {
+    $h = unpack('Cver/Ctype/nid/nlen/Cpad/Cres', readn($conn, 8));
+    if ($h['len'] + $h['pad'] > 0) {
+        readn($conn, $h['len'] + $h['pad']);
+    }
+    if ($h['type'] === 5 && $h['len'] === 0) {
+        break;
+    }
+}
+function rec($type, $data, $pad = 0)
+{
+    return pack('CCnnCC', 1, $type, 1, strlen($data), $pad, 0) . $data . str_repeat("\0", $pad);
+}
+$end = rec(3, pack('NCCCCCC', 0, 0, 0, 0, 0, 0, 0));
+if ($mode === 'split-match') {
+    $out = rec(6, "Content-type: text/plain\r\n\r\npo") . rec(7, 'a warning', 7) . rec(6, 'ng') . rec(6, '') . $end;
+} else {
+    $first = $mode === 'multi-match' ? "Content-type: text/plain\r\n\r\npong" : "Content-type: text/plain\r\n\r\nnope";
+    $out = rec(6, $first, 5);
+    for ($i = 0; $i < 4; $i++) {
+        $out .= rec(6, str_repeat('x', 65535), 1);
+    }
+    $out .= rec(7, 'a warning', 7) . rec(6, '') . $end;
+}
+fwrite($conn, $out);
+fclose($conn);
+PHP
+fake_probe() {
+  local mode="$1"
+  set +e
+  probe_out="$(docker exec "$name" sh -c "timeout 15 php -n /tmp/fake-fcgi.php 9100 $mode & sleep 1; start=\$(date +%s); \
+    PHP_FPM_LISTEN=127.0.0.1:9100 php-fpm-healthcheck 2>&1; echo rc=\$? secs=\$((\$(date +%s) - start)); wait" 2>&1)"
+  set -e
+}
+
+fake_probe stall
+grep -q 'rc=1 ' <<<"$probe_out" && grep -q 'did not answer' <<<"$probe_out" || fail "a server that never answers: $probe_out"
+secs="$(sed -n 's/.*secs=//p' <<<"$probe_out")"
+[ "$secs" -le 3 ] || fail "a stalled server held the probe for $secs s, over the 3 s HEALTHCHECK timeout"
+echo "ok: php-fpm-healthcheck gives up on a stalled server within the HEALTHCHECK timeout (${secs}s)"
+
+fake_probe multi-match
+grep -q '^rc=0 ' <<<"$probe_out" || fail "a padded multi-record response with the text in the first record: $probe_out"
+echo "ok: php-fpm-healthcheck reads padded multi-record responses (over 256 KB) to END_REQUEST"
+
+fake_probe split-match
+grep -q '^rc=0 ' <<<"$probe_out" || fail "the expected text split across two STDOUT records: $probe_out"
+echo "ok: php-fpm-healthcheck matches text split across STDOUT records"
+
+fake_probe multi-miss
+grep -q 'rc=1 ' <<<"$probe_out" && grep -q 'unexpected ping response' <<<"$probe_out" || fail "an oversized response without the text: $probe_out"
+echo "ok: php-fpm-healthcheck rejects an oversized response without the expected text"
 
 # The shim has to be proven in an actual FPM worker, not the CLI SAPI: `docker run
 # -e PHP_CHMOD_SHIM=1 "$IMAGE" php -r '...'` overrides CMD and execs the php binary

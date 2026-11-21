@@ -242,7 +242,7 @@ fi
 
 drun -d --name "$name" "${RO[@]}" -e PHP_MEMORY_LIMIT=300M -e PHP_EXT_ENABLE=bz2 -e PHP_CHMOD_SHIM=true "${sp_env[@]}" "$IMAGE" >/dev/null
 wait_healthy "$name"
-echo "ok: fpm -- starts read-only and php-fpm-healthcheck (php-fcgi ping) answers"
+echo "ok: fpm -- starts read-only and php-fpm-healthcheck answers"
 resp=$(fpm_probe "$name" /tmp)
 wait_healthy "$name"
 logs=$(docker logs "$name" 2>&1)

@@ -1,6 +1,6 @@
 {
   "image": "lotuswebagency/php",
-  "base": "cgr.dev/chainguard/wolfi-base:latest@sha256:24f549a7fcace88e69b9557941168c74645688ecc4acf7fb6d734a6b74e9019d",
+  "base": "cgr.dev/chainguard/wolfi-base:latest@sha256:71f52fd289650f1d021d60ba11235550b1b5ce124f3797bd254ca70c4cef39f9",
   "default_version": "8.5",
   "flavors": ["fpm", "cli", "cli-builder", "ext-builder"],
   "platforms": ["linux/amd64", "linux/arm64"],
@@ -16,9 +16,9 @@
     "7.4": {"release": "7.4.33", "era": "legacy", "compiler": "gcc", "pgo": true, "icu": "70.1", "uarch": ["baseline"], "support": "end-of-life", "eol_date": "2022-11-28"},
     "8.0": {"release": "8.0.30", "era": "legacy", "compiler": "gcc", "pgo": true, "icu": "70.1", "uarch": ["baseline"], "support": "end-of-life", "eol_date": "2023-11-26"},
     "8.1": {"release": "8.1.34", "era": "modern", "compiler": "gcc", "pgo": true, "icu": null, "uarch": ["baseline"], "support": "end-of-life", "eol_date": "2025-12-31"},
-    "8.2": {"release": "8.2.35", "era": "modern", "compiler": "gcc", "pgo": true, "icu": null, "uarch": ["baseline"], "support": "security", "eol_date": "2026-12-31"},
-    "8.3": {"release": "8.3.36", "era": "modern", "compiler": "gcc", "pgo": true, "icu": null, "uarch": ["baseline"], "support": "security", "eol_date": "2027-12-31"},
-    "8.4": {"release": "8.4.27", "era": "modern", "compiler": "gcc", "pgo": true, "icu": null, "uarch": ["baseline", "v3"], "support": "active", "eol_date": "2028-12-31"},
-    "8.5": {"release": "8.5.12", "era": "modern", "compiler": "clang", "pgo": true, "icu": null, "uarch": ["baseline", "v3"], "support": "active", "eol_date": "2029-12-31"}
+    "8.2": {"release": "8.2.36", "era": "modern", "compiler": "gcc", "pgo": true, "icu": null, "uarch": ["baseline"], "support": "security", "eol_date": "2026-12-31"},
+    "8.3": {"release": "8.3.37", "era": "modern", "compiler": "gcc", "pgo": true, "icu": null, "uarch": ["baseline"], "support": "security", "eol_date": "2027-12-31"},
+    "8.4": {"release": "8.4.28", "era": "modern", "compiler": "gcc", "pgo": true, "icu": null, "uarch": ["baseline", "v3"], "support": "active", "eol_date": "2028-12-31"},
+    "8.5": {"release": "8.5.13", "era": "modern", "compiler": "clang", "pgo": true, "icu": null, "uarch": ["baseline", "v3"], "support": "active", "eol_date": "2029-12-31"}
   }
 }

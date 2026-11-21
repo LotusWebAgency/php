@@ -36,10 +36,10 @@ come from `matrix.json` and are carried on every image as the `com.lotuswebagenc
 | `7.4` | 7.4.33 | gcc | no | end-of-life | 2022-11-28 |
 | `8.0` | 8.0.30 | gcc | no | end-of-life | 2023-11-26 |
 | `8.1` | 8.1.34 | gcc | no | end-of-life | 2025-12-31 |
-| `8.2` | 8.2.35 | gcc | no | security | 2026-12-31 |
-| `8.3` | 8.3.36 | gcc | no | security | 2027-12-31 |
-| `8.4` | 8.4.27 | gcc | yes | active | 2028-12-31 |
-| `8.5` | 8.5.12 | clang | yes | active | 2029-12-31 |
+| `8.2` | 8.2.36 | gcc | no | security | 2026-12-31 |
+| `8.3` | 8.3.37 | gcc | no | security | 2027-12-31 |
+| `8.4` | 8.4.28 | gcc | yes | active | 2028-12-31 |
+| `8.5` | 8.5.13 | clang | yes | active | 2029-12-31 |
 
 End-of-life tags are still published and rebuilt weekly for base-image and package updates. The PHP
 interpreter in them gets no upstream fixes. See [SUPPORT.md](SUPPORT.md) and
@@ -50,7 +50,7 @@ interpreter in them gets no upstream fixes. See [SUPPORT.md](SUPPORT.md) and
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
 | `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64-v2` / `armv8-a` baseline. 8.4 and 8.5 only. |
 | `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image (`default_version` in `matrix.json`, currently 8.5). |
-| `{release}-{flavor}[-v3]` | `8.5.12-fpm` | Full patch version. Read from the built image (`PHP_VERSION`) after tests and the Trivy gate, so a tag cannot name a version the image does not contain. |
+| `{release}-{flavor}[-v3]` | `8.5.13-fpm` | Full patch version. Read from the built image (`PHP_VERSION`) after tests and the Trivy gate, so a tag cannot name a version the image does not contain. |
 
 `-v3` images need a newer CPU. On amd64 older than Haswell/Excavator they refuse to start: a startup
 check in the `php` and `php-fpm` binaries exits 127 with
@@ -120,9 +120,9 @@ These caveats apply to the end-of-life tags. PHP 8.2 and later have none of them
 
 | Flavor | Contents |
 |---|---|
-| `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` (`php-fpm-healthcheck`) that needs no web server. |
+| `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` (`php-fpm-healthcheck`, a small native probe) that needs no web server. |
 | `cli` | `php -a` by default. Scripts, cron jobs, queue workers. |
-| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, Node.js 26 with npm 12.2.2 and corepack, semantic-release and [Composer](https://getcomposer.org/) (installed with signature verification). No compiler. For build stages. |
+| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, Node.js 26 with npm 12.2.3 and corepack, semantic-release and [Composer](https://getcomposer.org/) (installed with signature verification). No compiler. For build stages. |
 | `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize` / `php-config`. Runs as root, no Composer, no Node.js. Wolfi's openssf compiler wrappers stay on, so extensions built here get Wolfi's hardening flags. They also take Wolfi's default `-march`/`-mtune`, not the generic tuning the PHP build uses; `-v3` presets `CFLAGS` and `CXXFLAGS` with the `-v3` `-march`/`-mtune` instead. For build stages. |
 
 All images use `tini` as PID 1. All but `ext-builder` run as `www-data` (UID and GID 33).
@@ -147,8 +147,12 @@ a MySQL 5.7 built against OpenSSL 1.0.x (the official `mysql:5.7` image) offers 
 to it fails with a handshake error: connect with `--skip-ssl`.
 
 `php-fcgi` is a small FastCGI client, written in PHP, that sends one request to a pool and prints the
-body. The fpm healthcheck uses it, since Wolfi has no `cgi-fcgi`. Usage is in the header of
-[`rootfs/usr/local/bin/php-fcgi`](rootfs/usr/local/bin/php-fcgi).
+body, since Wolfi has no `cgi-fcgi`. Usage is in the header of
+[`rootfs/usr/local/bin/php-fcgi`](rootfs/usr/local/bin/php-fcgi). The fpm healthcheck does not use it:
+`php-fpm-healthcheck` is a small C binary ([`shim/fpm-ping.c`](shim/fpm-ping.c)) that sends the
+ping request itself and exits 0 when the response contains `pong`. It reads `PHP_FPM_LISTEN` (TCP or a
+unix socket), `PHP_FPM_PING_PATH` and `PHP_FPM_PING_RESPONSE` (matched as a literal substring, not a
+pattern), and gives up after 2 s.
 
 There is no apt, dpkg, `ldd`, `getent`, `useradd` or other shadow tool. `fpm` and `cli` have no perl;
 `cli-builder` and `ext-builder` do, because git and autoconf need it. Setuid and setgid bits are
@@ -200,7 +204,7 @@ every tag unless the row says otherwise.
 | User | `www-data`, UID and GID 33. `ext-builder` runs as root. |
 | Working directory | `/app`, owned by `www-data`. |
 | Port | `fpm`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
-| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed). |
+| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed; `PHP_FPM_PING_RESPONSE` is a literal substring). |
 | Stop signal | `fpm`: `SIGQUIT` (graceful). |
 | Logs | stderr only; no log files. |
 | Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |
@@ -230,11 +234,14 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_DISPLAY_ERRORS` | `Off` | `display_errors`. Errors go to stderr regardless. |
 | `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec` (the variable's baked value). cli, ext-builder: the variable is unset; the same list is baked into `10-php.ini`. cli-builder: none | Names to disable in addition to the baked list and any `disable_functions` in a mounted ini. Never replaces either. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
-| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 64-512 MB | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. |
+| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 128-512 MB | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. |
+| `PHP_OPCACHE_INTERNED_STRINGS` | one eighth of the opcache memory, clamped to 8-32 MB (at most half the opcache memory, also when set; on PHP 7.0-7.2 at most a fifth of it and 16 MB, which is what those versions can start with) | `opcache.interned_strings_buffer`, carved out of the opcache segment. A bare number, in MB. |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS` | `1` | `opcache.validate_timestamps`. Set `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_REVALIDATE_FREQ` | `2` | `opcache.revalidate_freq` |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
 | `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing`, `64M` | `opcache.jit`, `opcache.jit_buffer_size`. PHP 8.1+, and 8.0 on amd64. 8.0 on arm64 has no JIT: its opcache builds one for x86 only. |
+| `PHP_OPCACHE_HUGE_CODE_PAGES` | off | `1`, `true`, `yes` or `on` sets `opcache.huge_code_pages=1`. `0`, `false`, `no`, `off` leave it off. Anything else is refused. See the huge pages paragraph below. |
+| `PHP_ZEND_ALLOC_HUGE_PAGES` | off | Same spellings. On exports `USE_ZEND_ALLOC_HUGE_PAGES=1`, which php-fpm passes to its workers. |
 | `PHP_EXT_ENABLE` | unset | Comma-separated shared extensions to load. See [Extensions](#extensions). |
 | `PHP_SNUFFLEUPAGUS` | unset | Ruleset name to load. See [Hardening](#hardening). |
 | `PHP_CHMOD_SHIM` | `0` | `1`, `true`, `yes` or `on` preloads the [chmod shim](#hardening). `0`, `false`, `no`, `off` disable it. Anything else is refused. |
@@ -253,8 +260,15 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_FPM_STATUS_PATH` | `/fpm-status` | `pm.status_path` |
 | `PHP_FPM_ACCESS_LOG` | `/proc/self/fd/2` | `access.log` |
 | `PHP_FPM_SLOWLOG_TIMEOUT` | `10s` | `request_slowlog_timeout` |
+| `PHP_FPM_REQUEST_TERMINATE_TIMEOUT` | `600s` | `request_terminate_timeout`, a wall-clock cap per request. `max_execution_time` does not count time blocked on I/O, so only this stops a hung worker. |
 
 The ping endpoint is fixed at `/fpm-ping` (response `pong`) and is what the healthcheck uses.
+
+**Huge pages.** Both switches are off by default and need transparent huge pages in `madvise` or `always`
+mode on the host (`/sys/kernel/mm/transparent_hugepage/enabled`). With `never` the entrypoint logs one
+warning and starts anyway, and the request has no effect. The gain depends on the workload, so measure
+it. `PHP_ZEND_ALLOC_HUGE_PAGES` also raises the resident memory of every worker. A PHP build without
+`opcache.huge_code_pages` ignores that switch with a warning.
 
 **Pool autotuning.** The entrypoint reads the container memory limit from cgroup. Without a limit it
 assumes 512 MB and logs that. It reserves opcache memory plus 64 MB and divides 80% of the rest by
@@ -435,7 +449,8 @@ the smoke test's assertions, and lists each extension's source, linkage, PHP ran
 
 - **53 are compiled in** and need nothing to use: the usual core set plus `igbinary`, `redis`,
   `imagick`, `memcached`, `apcu` and `zstd`. `imagick` reads HEIC and AVIF (static libheif,
-  libde265 and dav1d inside ImageMagick) but does not write them.
+  libde265 and dav1d inside ImageMagick) but does not write them. A baked security policy limits
+  it to raster formats (see [Hardening](#hardening)).
 - **19 are shared modules**, built but not loaded. Load them with `PHP_EXT_ENABLE: "ldap,uuid"`:
   `amqp`, `brotli`, `bz2`, `event`, `ffi` (7.4+), `ldap`, `lz4`, `mcrypt` (7.x),
   `mongodb` (8.1+), `msgpack`, `pcov` (7.1+), `protobuf` (8.2+), `snuffleupagus` (7.2+),
@@ -510,14 +525,14 @@ ENV PHP_EXT_ENABLE=myext
 - **Control-flow protection**, checked on php-src's own functions (the vendored static libraries
   would otherwise hide a gap):
   - amd64 (`-fcf-protection=full`): at least half of the function entries start with an `endbr64`
-    landing pad. The loader-enforced IBT/SHSTK property note is not claimed, because it is absent
-    from these binaries.
+    landing pad.
   - arm64 (`-mbranch-protection=standard`): at least half of the entries start with `bti` or a
-    `paciasp`/`pacibsp` instruction, so PAC and BTI are compiled in. On PHP 7.0-8.4 (gcc, linked with
-    gold) BTI is not enforced at runtime: gold writes no `PT_GNU_PROPERTY` header, and glibc turns BTI
-    on from that header.
+    `paciasp`/`pacibsp` instruction, so PAC and BTI are compiled in.
+  - lld writes the GNU property note that lets the loader enforce BTI (arm64) and marks IBT/SHSTK
+    (amd64) only when every linked object carries it, and the images do not assert that note.
 - Every link uses `-z relro -z now -z noexecstack --as-needed --build-id=sha1`, plus
-  `-z pack-relative-relocs` (packed `DT_RELR` relocations) where the linker supports it.
+  `-z pack-relative-relocs` (packed `DT_RELR` relocations). lld links php and its extensions. Shared
+  objects from these images use packed relocations and need glibc 2.36 or newer.
 - Wolfi's compiler wrappers add their own hardening spec and bake in `-mtune=sapphirerapids` (arm64:
   `neoverse-v2`). The PHP build turns the hardening spec and clang's default config off, and
   `php/cflags.sh` passes every hardening and `-march`/`-mtune` flag explicitly, vendored libraries
@@ -531,6 +546,44 @@ ENV PHP_EXT_ENABLE=myext
 - Busybox's network applets (`ping`, `netstat`, `traceroute`, `arping`, `microcom` and the rest of
   the raw-socket and interface set) are removed; `curl` stays. A derived image that runs
   `apk add` gets the busybox links back and can prune them again.
+- Baked ini defaults for fpm, cli and ext-builder: `zend.assertions = -1`, so `assert()` is compiled out
+  instead of executing in production. All four flavors set `session.upload_progress.enabled = 0`,
+  `mysqli.allow_local_infile = 0` (PHP 7.0 compiles in 1, 8.x 0, so a hostile MySQL server cannot ask the
+  client for its files on any version) and `fatal_error_backtraces = Off` (a PHP 8.5 directive that older
+  versions ignore). cli-builder keeps assertions on for test suites. Override any of them with a drop-in
+  `99-*.ini`.
+
+**ImageMagick policy.** Every image ships `/opt/imagemagick/etc/ImageMagick-7/policy.xml` (source:
+`conf/imagemagick-policy.xml`, derived from upstream's `policy-secure` and `policy-websafe`
+templates). Without a policy ImageMagick sizes its memory limit from the host's RAM and opens every
+coder, so one hostile upload could exhaust the container or reach the network and local files.
+
+- **Limits:** memory 256MiB, map 512MiB, disk 1GiB, area 128MP, width and height 16KP, list-length
+  256, time 120 s, thread 1, max-memory-request 256MiB, file 768, profile size 16MiB (16 profiles).
+  Frames beyond the list-length are refused. With the 256MiB memory limit, large images spill the
+  pixel cache to `/tmp`, up to the 1GiB disk limit, so a read-only deployment that processes large
+  images should size its `/tmp` tmpfs accordingly.
+- **Coders:** all denied, then read and write for GIF, JPEG, PNG, WEBP, TIFF, BMP and ICO (with their
+  aliases such as `JPG`, `PNG8`, `TIF`, `GIF87`, `BMP3`) and read-only for HEIC, HEIF and AVIF. URL,
+  HTTP, HTTPS, FTP, MVG, MSVG, MSL, SVG, EPHEMERAL, LABEL, CAPTION, TEXT, TXT, INLINE, PS, EPS, PDF,
+  XPS and PCL are denied again after the allow list, so widening it cannot re-enable them.
+  The pseudo-formats `xc:`, `canvas:`, `gradient:` and `radial-gradient:` are allowed for reading (they
+  read no files and no network); `pattern:`, `plasma:` and the other pseudo-formats are refused.
+  `Imagick::queryFormats()` still lists every compiled coder: the policy decides at read and write.
+- **Delegates, filters and paths:** every delegate and filter is denied, as are the paths `-`, `@*`
+  (indirect reads), file-descriptor paths (`fd:` and `FD:`), `|*` (pipes), `/etc/*`, `/proc/*` and
+  `/sys/*`.
+
+To replace the policy, mount your own file over that path. It is one file; keep it root-owned and
+world-readable. It replaces the whole policy, so start from a copy of the shipped one
+(`docker run --rm lotuswebagency/php:8.5-fpm cat /opt/imagemagick/etc/ImageMagick-7/policy.xml`):
+
+```yaml
+volumes:
+  - ./policy.xml:/opt/imagemagick/etc/ImageMagick-7/policy.xml:ro
+```
+
+`tests/smoke.sh` asserts the limits, the formats and the refusals above.
 
 **Snuffleupagus.** [Virtual patching](https://github.com/jvoisin/snuffleupagus) is compiled in but
 not loaded by default. Four rulesets are baked into `/usr/local/etc/php/snuffleupagus/`: `default`,
@@ -605,11 +658,11 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
 
   | Tier floor | Serves | PrestaShop | Laravel skeleton | Symfony | WordPress | Drupal |
   |---|---|---|---|---|---|---|
-  | 8.5 | 8.5 | 9.2.0 | 12.12.2 | 7 | 7.1.4 | 11.4.11 |
-  | 8.4 | 8.4 | 8.2.8 | 12.12.2 | 7 | 7.1.4 | 11.4.11 |
-  | 8.2 | 8.2, 8.3 | 8.2.8 | 12.12.2 | 7 | 7.1.4 | none |
-  | 8.1 | 8.1 | 8.2.8 | 10.3.3 | 6.4 | 7.1.4 | none |
-  | 7.2 | 7.2-8.0 | 8.2.8 | 6.20.1 | 5.4 | 6.9.11 | none |
+  | 8.5 | 8.5 | 9.2.1 | 12.12.2 | 7 | 7.1.5 | 11.4.11 |
+  | 8.4 | 8.4 | 8.2.9 | 12.12.2 | 7 | 7.1.5 | 11.4.11 |
+  | 8.2 | 8.2, 8.3 | 8.2.9 | 12.12.2 | 7 | 7.1.5 | none |
+  | 8.1 | 8.1 | 8.2.9 | 10.3.3 | 6.4 | 7.1.5 | none |
+  | 7.2 | 7.2-8.0 | 8.2.9 | 6.20.1 | 5.4 | 6.9.12 | none |
   | 7.1 | 7.1 | 1.7.8.11 | 5.8.35 | 4.4 | 6.5.14 | none |
   | 7.0 | 7.0 | 1.6.1.24 | 5.5.28 | 3.4 | 6.5.14 | none |
 
@@ -767,9 +820,9 @@ Only the promotion and the description-sync jobs use the Docker Hub credentials,
 | `docker-bake.hcl`, `matrix.json`, `matrix.gen.hcl` | Build targets. `matrix.gen.hcl` is generated from `matrix.json`. |
 | `php/` | Extension registry (`ext.json`), pinned sources (`php-src.lock`, `pecl.lock`), build and flag scripts, PGO training (`pgo/`). |
 | `deps/` | Vendored library builds (`versions.lock`, `build-*.sh`), checksum-verified fetch, [source patches](deps/patches/README.md). |
-| `conf/` | Baked ini files, FPM pool config, Snuffleupagus rulesets. |
-| `rootfs/usr/local/bin/` | `docker-php-entrypoint`, `php-ext-enable`, `php-fpm-healthcheck`, `php-fcgi` (FastCGI client the healthcheck uses), `sp-upload-check` (upload validator for Snuffleupagus). |
-| `shim/` | Source of the `chmod(0)` `LD_PRELOAD` shim. |
+| `conf/` | Baked ini files, FPM pool config, Snuffleupagus rulesets, ImageMagick security policy. |
+| `rootfs/usr/local/bin/` | `docker-php-entrypoint`, `php-ext-enable`, `php-fcgi` (FastCGI client), `sp-upload-check` (upload validator for Snuffleupagus). |
+| `shim/` | Sources of the `chmod(0)` `LD_PRELOAD` shim and of `php-fpm-healthcheck` (`fpm-ping.c`). |
 | `scripts/`, `ci/` | Matrix generation, inputs hash, PGO tier checks; release, attestation, verification and VEX scripts. Both have unit tests. |
 | `vex/` | OpenVEX statements for accepted findings. |
 | `tests/` | Smoke, entrypoint, read-only, PGO, ext-builder and extended suites; `tests/apps/` application tests. |

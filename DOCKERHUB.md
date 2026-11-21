@@ -41,13 +41,12 @@ dates are upstream's ([php.net](https://www.php.net/supported-versions.php)) and
 | `8.5` | clang | yes | active | 2029-12-31 |
 
 End-of-life tags are still published and rebuilt weekly for base-image and package updates, but their PHP
-interpreter gets no upstream fixes. Policy:
+interpreter (8.1 and below) gets no upstream security fixes. Policy:
 [SUPPORT.md](https://github.com/LotusWebAgency/php/blob/main/SUPPORT.md).
 
 ### Older PHP versions
 
-- 8.1 and below get no upstream security fixes. 7.0-8.0 link a vendored OpenSSL 1.1.1w, ICU,
-  libxml2 and libxslt statically.
+- 7.0-8.0 link a vendored OpenSSL 1.1.1w, ICU, libxml2 and libxslt statically.
 - mysqli/PDO support `caching_sha2_password` from 7.4. 7.1-7.3 need `mysql_native_password`
   accounts on MySQL 8 and cannot reach MySQL 9. 7.0 also needs the server's default plugin set to
   `mysql_native_password`. 7.0 and 7.1 speak TLS 1.0 only, which MySQL 8.4 and MariaDB 11 refuse.
@@ -60,19 +59,17 @@ Every caveat and workaround: [Older PHP versions](https://github.com/LotusWebAge
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
 | `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64-v2` / `armv8-a` baseline. 8.4 and 8.5 only. |
 | `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image. |
-| `{release}-{flavor}[-v3]` | `8.5.12-fpm` | Full patch version, read from the built image after tests and the Trivy gate. |
+| `{release}-{flavor}[-v3]` | `8.5.13-fpm` | Full patch version, read from the built image after tests and the Trivy gate. |
 
-`-v3` needs a newer CPU. On older amd64 the image refuses to start (a startup
-check prints `this build requires an x86-64-v3 CPU`, exit 127). On arm64 there is no check and an unsupported core
+`-v3` needs a newer CPU. On older amd64 the image refuses to start
+(`this build requires an x86-64-v3 CPU`, exit 127). On arm64 there is no check and an unsupported core
 gets SIGILL: `armv9-a` code needs Neoverse N2/V2-class cores (Graviton4, Axion, Cobalt 100, Grace),
 not Graviton2/3, Ampere Altra or Apple silicon. Use the baseline tag on a Mac.
 
 The amd64 baseline is `x86-64-v2` (SSE4.2 and POPCNT; Intel Nehalem and newer, AMD Bulldozer and
 newer), not plain `x86-64`, because Wolfi's packages are built for it. Both baselines and amd64
-`-v3` tune generic; arm64 `-v3` tunes for `neoverse-v2`. The vendored ImageMagick and heif stack (libheif, libde265, dav1d) are
+`-v3` tune generic; arm64 `-v3` tunes for `neoverse-v2`. The vendored ImageMagick and heif stack are
 baseline builds in every image, `-v3` included.
-
-`8.4-fpm` moves with each 8.4 patch release. Pin the digest for reproducible builds.
 
 ## Flavors
 
@@ -80,7 +77,7 @@ baseline builds in every image, `-v3` included.
 |---|---|
 | `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` that needs no web server. |
 | `cli` | `php -a` by default. Scripts, cron jobs, queue workers. |
-| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, Node.js 26 with npm 12.2.2 and corepack, semantic-release and Composer. No compiler. For build stages. |
+| `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, Node.js 26 with npm 12.2.3 and corepack, semantic-release and Composer. No compiler. For build stages. |
 | `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize`. Runs as root. Extensions take Wolfi's default `-march`/`-mtune`; `-v3` presets `CFLAGS`/`CXXFLAGS`. For build stages. |
 
 All images run `tini` as PID 1. All but `ext-builder` run as `www-data` (UID and GID 33).
@@ -93,8 +90,8 @@ bzip2, the PostgreSQL 18 client (`psql`, `pg_dump`, `pg_restore`) and the MariaD
 `mysql`, `mysqldump`, `mysqladmin` and `mysqlcheck` are wrapper scripts that `exec` `mariadb`,
 `mariadb-dump`, `mariadb-admin` and `mariadb-check`. They log in with every MySQL, Percona and
 MariaDB password plugin, including `caching_sha2_password`, and use TLS when the server offers it
-(`/etc/my.cnf`; `--ssl-verify-server-cert` to verify). The fpm healthcheck uses `php-fcgi`, a small
-FastCGI client shipped in every flavor, since Wolfi has no `cgi-fcgi`.
+(`/etc/my.cnf`; `--ssl-verify-server-cert` to verify). `php-fcgi` is a FastCGI client
+in every flavor (Wolfi has no `cgi-fcgi`).
 
 There is no apt, dpkg, `ldd`, `getent`, `useradd` or other shadow tool. `fpm` and `cli` have no perl;
 `cli-builder` and `ext-builder` do, because git and autoconf need it.
@@ -137,7 +134,7 @@ every tag unless the row says otherwise.
 | User | `www-data`, UID and GID 33. `ext-builder` runs as root. |
 | Working directory | `/app`, owned by `www-data`. |
 | Port | `fpm`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
-| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed). |
+| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed; `PHP_FPM_PING_RESPONSE` is a literal substring). |
 | Stop signal | `fpm`: `SIGQUIT` (graceful). |
 | Logs | stderr only; no log files. |
 | Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |
@@ -164,10 +161,12 @@ variable that is set but empty, or contains a newline, stops the container with 
 | `PHP_DISPLAY_ERRORS` | `Off` | `display_errors`. Errors go to stderr regardless. |
 | `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec`. cli, ext-builder: unset; the same list is baked into `10-php.ini`. cli-builder: none | Adds to the baked and mounted-ini lists, never replaces them. `proc_open` stays enabled for Composer. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
-| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, 64-512 MB | `opcache.memory_consumption` |
+| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, 128-512 MB | `opcache.memory_consumption` |
+| `PHP_OPCACHE_INTERNED_STRINGS` | opcache memory / 8, 8-32 MB (max half of it, even when set; 7.0-7.2: a fifth, max 16) | `opcache.interned_strings_buffer` |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS`, `PHP_OPCACHE_REVALIDATE_FREQ` | `1`, `2` | Set validation to `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
 | `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing`, `64M` | PHP 8.1+, and 8.0 on amd64 (8.0 on arm64 has no JIT). |
+| `PHP_OPCACHE_HUGE_CODE_PAGES`, `PHP_ZEND_ALLOC_HUGE_PAGES` | off | `true` sets `opcache.huge_code_pages=1` / `USE_ZEND_ALLOC_HUGE_PAGES=1`. The host needs transparent huge pages in `madvise` or `always` mode; [details](https://github.com/LotusWebAgency/php#configuration). |
 | `PHP_EXT_ENABLE` | unset | Comma-separated shared extensions to load, for example `ldap,uuid`. |
 | `PHP_SNUFFLEUPAGUS` | unset | `default`, `wordpress`, `prestashop`, `laravel`, or a custom ruleset name. |
 | `PHP_CHMOD_SHIM` | `0` | `true` enables the PrestaShop `chmod(0)` cache-bug shim. |
@@ -175,7 +174,7 @@ variable that is set but empty, or contains a newline, stops the container with 
 
 `fpm` only: `PHP_FPM_PM` (`dynamic`), `PHP_FPM_MAX_REQUESTS` (`1000`), `PHP_FPM_LISTEN`
 (`0.0.0.0:9000`), `PHP_FPM_STATUS_PATH` (`/fpm-status`), `PHP_FPM_ACCESS_LOG` (`/proc/self/fd/2`),
-`PHP_FPM_SLOWLOG_TIMEOUT` (`10s`). `PHP_FPM_MAX_CHILDREN`, `PHP_FPM_START_SERVERS`,
+`PHP_FPM_SLOWLOG_TIMEOUT` (`10s`), `PHP_FPM_REQUEST_TERMINATE_TIMEOUT` (`600s`). `PHP_FPM_MAX_CHILDREN`, `PHP_FPM_START_SERVERS`,
 `PHP_FPM_MIN_SPARE` and `PHP_FPM_MAX_SPARE` are autotuned from the container memory limit and
 `PHP_FPM_WORKER_MEMORY` (default `64` MB per worker). A value you set is used exactly and the
 others adjust to stay consistent. Without a memory limit the entrypoint assumes 512 MB and says so.
@@ -202,11 +201,9 @@ directory when `conf.d` is not writable). Size it for the largest upload times c
 plus sessions; it counts against the memory limit. `cli-builder` needs
 `/tmp:exec,size=256m` because `npx` runs packages from `/tmp`.
 
-Without a writable `/tmp`, `PHP_EXT_ENABLE` and `PHP_SNUFFLEUPAGUS` refuse to start,
-and the other `PHP_*` ini variables are ignored with a warning naming each one. Your application's
-own writes (PrestaShop `var/cache`, Laravel `storage`, WordPress uploads) need their own volume. A
-FastCGI unix socket needs a writable directory. Use `docker exec <container> docker-php-entrypoint php ...` to
-see the env-driven ini; plain `php ...` does not. Details:
+Without a writable `/tmp`, `PHP_EXT_ENABLE` and `PHP_SNUFFLEUPAGUS` refuse to start, and the other
+`PHP_*` ini variables are ignored with a warning naming each one. The application's own writes and a
+FastCGI unix socket need their own writable mounts. Details:
 [README](https://github.com/LotusWebAgency/php#read-only-root-filesystem).
 
 ## Hardened deployment
@@ -266,28 +263,25 @@ the code (`./:/app:ro`) works too.
 What each setting needs:
 
 - **`read_only` and `/tmp`.** `/tmp` is the only path the image writes. `noexec` is fine for `fpm`
-  and `cli`; `cli-builder` needs `exec` for `npx`. Without a writable `/tmp`, `PHP_SNUFFLEUPAGUS` and
-  `PHP_EXT_ENABLE` refuse to start. See [Read-only root filesystem](https://github.com/LotusWebAgency/php#read-only-root-filesystem).
+  and `cli`; `cli-builder` needs `exec` for `npx`. See [Read-only root filesystem](https://github.com/LotusWebAgency/php#read-only-root-filesystem).
 - **`cap_drop: [ALL]`.** Nothing in `fpm` or `cli` needs a capability. The FPM master already runs as
   `www-data`, so the log notes that the pool's `user` and `group` lines are ignored; that is expected.
   Keep `PHP_FPM_LISTEN` on a port above 1024.
-- **`no-new-privileges`.** No setuid binary is left to gain privileges with; this closes the path for
-  anything added later.
+- **`no-new-privileges`.** No setuid binary is left; this closes the path for anything added later.
 - **Snuffleupagus.** Pick the ruleset that matches the application, or start a custom one from
   `default` (see [Hardening](https://github.com/LotusWebAgency/php#hardening)). Rulesets are for serving: run Composer and other build
   steps in `cli-builder` without one. Snuffleupagus hooks the executor, so PHP turns the JIT off
-  while it is loaded and logs a startup warning. `PHP_OPCACHE_JIT=disable` says so up front and
-  removes the warning; `off` does not, because it keeps the JIT buffer.
+  and logs a startup warning. `PHP_OPCACHE_JIT=disable` removes the warning; `off` does not, because it keeps the JIT buffer.
 - **`PHP_DISABLE_FUNCTIONS`.** Adds names to the baked list and a mounted ini's (as in PHP, only the
-  last mounted `disable_functions` counts), for example `proc_open` when the application never
-  starts processes (Laravel queues, Symfony Process and Composer need it). It refuses to
+  last mounted `disable_functions` counts), for example `proc_open` when nothing starts processes
+  (Composer, Symfony Process and Laravel queues do). It refuses to
   start if a name does not end up disabled: a later-sorting ini replaces the list, or a bare
   `--read-only` has no writable `/tmp`. `php -n`, `-c` or `-d disable_functions=` bypasses the check.
 - **Limits.** `pids_limit` bounds runaway forks; the memory limit bounds the container and drives FPM
-  and opcache autotuning (512 MB without one).
+  and opcache autotuning.
 - **Network.** `fpm` speaks FastCGI on 9000 and should only be reachable by the web server. Never
   publish 9000 to the host.
-- **Errors.** `PHP_DISPLAY_ERRORS` stays `Off` (the default); errors go to stderr.
+- **Errors.** `PHP_DISPLAY_ERRORS` stays `Off`; errors go to stderr.
 
 The `docker run` flags and the Kubernetes `securityContext` for the same setup are in the
 [README](https://github.com/LotusWebAgency/php#hardened-deployment).
@@ -305,8 +299,9 @@ and `zstd`. **19 are shared modules**, loaded with `PHP_EXT_ENABLE`: `amqp`, `br
 `uuid`, `xdebug`, `xmlrpc` (7.x), `yaml`. An unknown or unavailable name is refused with a list of
 what the image has.
 
-`imagick` reads HEIC and AVIF (static libheif, libde265 and dav1d inside ImageMagick) but does not
-write them. There is no `ssh2` extension: use [phpseclib](https://phpseclib.com/) for SSH and SFTP,
+`imagick` reads HEIC and AVIF but does not write them. Its [policy](https://github.com/LotusWebAgency/php#hardening)
+caps resources and allows rasters only; replace `/opt/imagemagick/etc/ImageMagick-7/policy.xml`.
+There is no `ssh2` extension: use [phpseclib](https://phpseclib.com/) for SSH and SFTP,
 or compile `ssh2` in an `ext-builder` stage.
 
 ### Adding your own extension
@@ -350,19 +345,20 @@ ENV PHP_EXT_ENABLE=myext
 
 ## Hardening
 
-Measured on the shipped ELF binaries, not assumed from compiler flags: PIE, full RELRO
-(`GNU_RELRO` and `BIND_NOW`), non-executable stack, `-fstack-protector-strong`,
-`_FORTIFY_SOURCE=3`, and `-fcf-protection=full` on amd64. On arm64, PAC and BTI
-(`-mbranch-protection=standard`) are compiled in; on PHP 7.0-8.4 (gcc, gold) BTI is not enforced at
-runtime, because gold writes no `PT_GNU_PROPERTY` header and glibc enforces BTI from it. The compilers
-also run with zero-initialized locals, no null-check deletion, wrapping signed overflow and no strict
-aliasing. Links use packed relative relocations
-(`-z pack-relative-relocs`, `DT_RELR`) where the linker supports it. Every setuid and setgid bit
-inherited from the base image is stripped. Busybox's network applets (`ping`, `netstat`,
-`traceroute`, `arping`, `microcom` and the rest of the raw-socket and interface set) are removed;
-`curl` stays. A derived image that runs `apk add` gets the busybox links back and can prune them
-again. PHP 7.0-8.4 build with GCC 16.2 (PGO, no LTO) and 8.5 with clang 19 (PGO
-and ThinLTO), both from Wolfi packages.
+Measured on the shipped ELF binaries, not assumed from compiler flags: PIE, full RELRO (`GNU_RELRO`
+and `BIND_NOW`), non-executable stack, `-fstack-protector-strong`, `_FORTIFY_SOURCE=3`, and
+`-fcf-protection=full` on amd64. On arm64, PAC and BTI (`-mbranch-protection=standard`) are compiled
+in.
+
+lld writes the GNU property note for BTI (arm64) and IBT/SHSTK (amd64) only if every input has it;
+the images do not assert it. The compilers run with zero-initialized locals, no null-check deletion,
+wrapping signed overflow and no strict aliasing. Links use packed relative relocations (`-z
+pack-relative-relocs`, `DT_RELR`). Every setuid and setgid bit inherited from the base image is
+stripped. Busybox's raw-socket and interface applets (`ping`, `netstat`, `traceroute` and the rest)
+are removed; `curl` stays. A derived image that runs `apk add` gets the busybox links back and can
+prune them again. PHP 7.0-8.4 build with GCC 16.2 (PGO, no LTO) and 8.5 with clang 19 (PGO and
+ThinLTO), both from Wolfi packages. The baked ini sets `zend.assertions=-1` (not on cli-builder),
+`session.upload_progress.enabled=0`, `mysqli.allow_local_infile=0` and, on PHP 8.5, `fatal_error_backtraces=Off`.
 
 Snuffleupagus is compiled in but off. `PHP_SNUFFLEUPAGUS=<ruleset>` turns it on. For your own
 rules, mount `/usr/local/etc/php/snuffleupagus/<name>.rules` read-only and set `PHP_SNUFFLEUPAGUS=<name>`
@@ -385,7 +381,7 @@ cosign verify \
 Use cosign 3. Signatures and attestations are created in the GHCR staging repository
 `ghcr.io/lotuswebagency/php/release` and copied to Docker Hub with the image, digest for digest,
 before any tag moves, so they verify on `lotuswebagency/php`. The test-result and OpenVEX attestation
-commands and the details of what each contains are in the
+commands are in the
 [README](https://github.com/LotusWebAgency/php#verifying-images).
 
 CI verifies the base image's Chainguard cosign signature before building on it, and every image
@@ -397,8 +393,8 @@ findings are accepted, both without an upstream fix: CVE-2026-93687 (braces 3.0.
 semantic-release, HIGH) and CVE-2026-15534 (perl 5.44.0 in `ext-builder`, MEDIUM); see
 [Accepted findings](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md#accepted-findings).
 They are suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan
-without that file shows them. Trivy reads the apk database, so it cannot see libraries built from source and
-linked statically or kept under `/opt`: ImageMagick (with static libheif, libde265 and dav1d) in
+without that file shows them. Trivy reads the apk database, so it cannot see libraries built from source
+(static or under `/opt`): ImageMagick in
 every image, OpenSSL 1.1.1w, ICU,
 libxml2 and libxslt in the 7.0-8.0 builds (the last two are Debian trixie's 2.9.14 and 1.1.35 with
 Debian's security patches), curl in 7.0-7.2. Those are tracked by hand through `deps/versions.lock`, as are the

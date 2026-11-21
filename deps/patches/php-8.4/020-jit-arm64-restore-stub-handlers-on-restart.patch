@@ -1,0 +1,66 @@
+Source: php-src pull request #24273 ("Fix JIT stub veneers being reused after an OPcache restart on AArch64"), commit 0c9d9df691, applied verbatim with this release's line numbers. The pull request targets PHP-8.4 and is not merged yet; its test (ext/opcache/tests/jit/restart_stub_veneers.phpt) is left out because the image ships no tests.
+
+On AArch64 a conditional branch from JIT code reaches only +-1 MB, so once the JIT buffer holds more than that, IR emits a veneer next to the new code and zend_jit_commit_veneers() replaces the stub's address in zend_jit_stub_handlers[] (kept in the JIT buffer, shared by every FPM worker) with the veneer's. An OPcache restart (opcache_reset(), or an out-of-memory restart) rewinds the buffer below those veneers but keeps the table, so traces compiled afterwards branch to addresses that new code has overwritten: workers die with SIGSEGV or spin at full CPU when they take an exception, leave a function, or handle an interrupt through a stub. PrestaShop's cache clear calls opcache_reset(). x86-64 has no veneers and is not affected. The fix keeps the original stub addresses in a third block of the table and restores them in zend_jit_restart().
+
+diff --color -ru a/ext/opcache/jit/zend_jit.c b/ext/opcache/jit/zend_jit.c
+--- a/ext/opcache/jit/zend_jit.c
++++ b/ext/opcache/jit/zend_jit.c
+@@ -3714,8 +3714,8 @@
+ 		*dasm_ptr = (void**)*dasm_ptr + sizeof(zend_jit_stubs) / sizeof(zend_jit_stubs[0]);
+ #elif defined(IR_TARGET_AARCH64)
+ 		zend_jit_stub_handlers = dasm_buf;
+-		*dasm_ptr = (void**)*dasm_ptr + (sizeof(zend_jit_stubs) / sizeof(zend_jit_stubs[0])) * 2;
+-		memset(zend_jit_stub_handlers, 0, (sizeof(zend_jit_stubs) / sizeof(zend_jit_stubs[0])) * 2 * sizeof(void*));
++		*dasm_ptr = (void**)*dasm_ptr + (sizeof(zend_jit_stubs) / sizeof(zend_jit_stubs[0])) * 3;
++		memset(zend_jit_stub_handlers, 0, (sizeof(zend_jit_stubs) / sizeof(zend_jit_stubs[0])) * 3 * sizeof(void*));
+ #endif
+ 		*dasm_ptr = (void*)ZEND_MM_ALIGNED_SIZE_EX(((size_t)(*dasm_ptr)), 16);
+ 		zend_jit_protect();
+@@ -3898,6 +3898,9 @@
+ 
+ 		/* restore JIT buffer pos */
+ 		dasm_ptr[0] = dasm_ptr[1];
++#if defined(IR_TARGET_AARCH64)
++		zend_jit_restore_stub_handlers();
++#endif
+ 
+ 		zend_jit_trace_restart();
+ 
+diff --color -ru a/ext/opcache/jit/zend_jit_ir.c b/ext/opcache/jit/zend_jit_ir.c
+--- a/ext/opcache/jit/zend_jit_ir.c
++++ b/ext/opcache/jit/zend_jit_ir.c
+@@ -458,6 +458,24 @@
+ 		zend_jit_stub_handlers[count + i] = NULL;
+ 	}
+ }
++
++/* zend_jit_commit_veneers() replaces the address of a stub by the address of a veneer emitted
++ * after it. zend_jit_restart() rewinds the buffer below such veneers, so it restores the
++ * original addresses, kept after the pending veneers. */
++static void zend_jit_save_stub_handlers(void)
++{
++	int count = sizeof(zend_jit_stubs) / sizeof(zend_jit_stubs[0]);
++
++	memcpy(zend_jit_stub_handlers + count * 2, zend_jit_stub_handlers, count * sizeof(void*));
++}
++
++static void zend_jit_restore_stub_handlers(void)
++{
++	int count = sizeof(zend_jit_stubs) / sizeof(zend_jit_stubs[0]);
++
++	memcpy(zend_jit_stub_handlers, zend_jit_stub_handlers + count * 2, count * sizeof(void*));
++	memset(zend_jit_stub_handlers + count, 0, count * sizeof(void*));
++}
+ #endif
+ 
+ static bool zend_jit_prefer_const_addr_load(zend_jit_ctx *jit, uintptr_t addr)
+@@ -2995,6 +3013,9 @@
+ 		}
+ 		zend_jit_free_ctx(&jit);
+ 	}
++#if defined(IR_TARGET_AARCH64)
++	zend_jit_save_stub_handlers();
++#endif
+ }
+ 
+ #define REGISTER_HELPER(n)  \

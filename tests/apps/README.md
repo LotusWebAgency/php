@@ -122,7 +122,7 @@ image as built. `tests/test-snuffleupagus.sh` takes `SP_RULES_OVERRIDE` for
 the same thing.
 
 **WordPress, its plugins and its object cache.** Four releases, each on the
-PHP versions `sets` lists: 4.9.35, 5.9.20, 6.9.11 and 7.1.4. Every one is
+PHP versions `sets` lists: 4.9.35, 5.9.20, 6.9.12 and 7.1.5. Every one is
 installed with WooCommerce, Akismet, Contact Form 7, Yoast SEO, Classic Editor,
 Wordfence, WPForms Lite and All-in-One WP Migration, plus Redis Object Cache with
 its `object-cache.php` drop-in (phpredis at host `redis`, igbinary). Each plugin
@@ -236,7 +236,7 @@ APPTEST_FIXTURE_REPO=ghcr.io/lotuswebagency/php/apptest ./tests/apps/run.sh lotu
 
 PrestaShop 1.6 to 8.2 are the official GitHub release zips, pinned by sha256
 (`prestashop-zip` rows; the release asset is a zip in a zip, which
-`prestashop/fixture/unpack.php` opens, restoring the unix modes). 9.2.0 has no
+`prestashop/fixture/unpack.php` opens, restoring the unix modes). 9.2.1 has no
 zip anywhere, so its tree is unpacked out of the vendor's Docker image, pinned
 by digest: that pin is a multi-arch index, so `host-prep.sh` asks for
 `linux/amd64` explicitly (nothing in it executes the image, it is only

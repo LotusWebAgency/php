@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 # One Dockerfile for every published tag; docker-bake.hcl feeds it the matrix.
-ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:24f549a7fcace88e69b9557941168c74645688ecc4acf7fb6d734a6b74e9019d
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:71f52fd289650f1d021d60ba11235550b1b5ce124f3797bd254ca70c4cef39f9
 ARG PHP_ERA=modern
 # Declared before any FROM so `FROM toolchain-select-${COMPILER}` can resolve it.
 # The toolchain-base stage redeclares it for use inside the stage.
@@ -42,7 +42,7 @@ ARG NM_COMPILER=llvm-nm
 # path that keeps that dispatch.
 # upgrade: the digest-pinned base can hold a library older than the -dev package the
 # deps stages install next (sqlite-libs 3.54.0 beside sqlite-dev 3.54.1, whose
-# libsqlite3.so names a file only 3.54.1 ships), and gold, unlike GNU ld, fails the
+# libsqlite3.so names a file only 3.54.1 ships), and lld, unlike GNU ld, fails the
 # link on that dangling symlink. WOLFI_INDEX_STATE re-runs this layer whenever the
 # index stamp changes instead of replaying a cached upgrade.
 ARG WOLFI_INDEX_STATE=""
@@ -51,7 +51,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     && echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
     && apk upgrade --cache-dir /var/cache/apk -U \
     && apk add --cache-dir /var/cache/apk \
-      build-base clang-19 lld-19 llvm-19 binutils-gold ccache pkgconf ca-certificates curl \
+      build-base clang-19 lld-19 llvm-19 ccache pkgconf ca-certificates curl \
       bash coreutils findutils grep sed gawk diffutils \
       autoconf automake libtool bison re2c patch xz file \
       gpg gpg-agent python3 linux-headers \
@@ -288,7 +288,7 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     && { [ -n "$(find /usr/lib/llvm-* -name 'libclang_rt.profile*' -print -quit)" ] \
          || { echo "no libclang_rt.profile under /usr/lib/llvm-*; -fprofile-generate cannot link" >&2; exit 1; }; }
 
-# `ld` means lld (clang) or gold (gcc) in this stage, via a PATH shim.
+# `ld` means lld in this stage, via a PATH shim.
 # -fuse-ld=lld in LDFLAGS is not enough: libtool forwards only flags it knows
 # (-O*, -flto*, -fstack-protector*, ...) to its shared-library link template, so
 # opcache.la was linked by /usr/bin/ld, which cannot read ThinLTO bitcode:
@@ -300,32 +300,29 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
 # -Wc,-fuse-ld=lld would reach libtool's compiler flags, but ./configure's own
 # probes call clang directly, where it is an unknown argument; every probe would
 # fail and autoconf would read that as a feature answer.
-# gcc needs gold for a different reason: its profile-guided hot/cold split puts
-# hot functions in .text.hot.* input sections, and the default bfd ld
-# (binutils 2.47) does not fold them into a .text.hot output section,
-# so assert_profile_reached_the_link would measure nothing. gold does. A
-# -fuse-ld=gold flag fails for the same libtool reason as lld.
+# gcc links through lld as well. GNU ld also accepts -z pack-relative-relocs; lld adds
+# the .text.hot fold: with -z keep-text-section-prefix it folds gcc's profile-guided
+# .text.hot.* input sections into a .text.hot output section, which
+# assert_profile_reached_the_link measures (GNU ld 2.47 does not), and it writes the
+# GNU property note when every input carries it.
 # Wolfi's gcc does not look at PATH for ld: collect2 takes the first ld in
 # COMPILER_PATH, which ends with /usr/x86_64-pc-linux-gnu/bin (binutils' own
 # target directory). The PATH shim alone leaves gcc on bfd, so for gcc that
 # private ld is replaced as well and the check asks gcc which ld it will run.
 RUN set -eux; \
     mkdir -p /usr/local/lib/php-docker-ld; \
-    case "$COMPILER" in \
-      clang) ln -sf /usr/bin/ld.lld /usr/local/lib/php-docker-ld/ld ;; \
-      gcc)   ln -sf /usr/bin/ld.gold /usr/local/lib/php-docker-ld/ld; \
-             gcc_ld="$(gcc -print-prog-name=ld)"; \
-             case "$gcc_ld" in /*) ;; *) echo "FATAL: gcc -print-prog-name=ld printed '$gcc_ld', not an absolute path; the private ld cannot be replaced" >&2; exit 1 ;; esac; \
-             ln -sf /usr/bin/ld.gold "$gcc_ld" ;; \
-    esac; \
+    ln -sf /usr/bin/ld.lld /usr/local/lib/php-docker-ld/ld; \
+    if [ "$COMPILER" = gcc ]; then \
+      gcc_ld="$(gcc -print-prog-name=ld)"; \
+      case "$gcc_ld" in /*) ;; *) echo "FATAL: gcc -print-prog-name=ld printed '$gcc_ld', not an absolute path; the private ld cannot be replaced" >&2; exit 1 ;; esac; \
+      ln -sf /usr/bin/ld.lld "$gcc_ld"; \
+    fi; \
     PATH=/usr/local/lib/php-docker-ld:$PATH; \
     if [ "$COMPILER" = gcc ]; then v="$("$(gcc -print-prog-name=ld)" --version | head -1)"; \
     else v="$(ld --version | head -1)"; fi; \
-    case "$COMPILER:$v" in \
-      clang:*LLD*) echo "ok: ld on PATH is '$v'" ;; \
-      clang:*) echo "FATAL: ld on PATH is '$v', not lld; ThinLTO shared-object links will fail" >&2; exit 1 ;; \
-      gcc:*GNU\ gold*) echo "ok: ld run by gcc is '$v'" ;; \
-      gcc:*) echo "FATAL: ld run by gcc is '$v', not gold; profile-guided .text.hot would not survive the link" >&2; exit 1 ;; \
+    case "$v" in \
+      *LLD*) echo "ok: ld run by $COMPILER is '$v'" ;; \
+      *) echo "FATAL: ld run by $COMPILER is '$v', not lld; the profile-guided .text.hot fold and ThinLTO shared-object links need it" >&2; exit 1 ;; \
     esac
 ENV PATH=/usr/local/lib/php-docker-ld:$PATH
 
@@ -446,6 +443,17 @@ RUN set -eux; \
       -o /usr/local/lib/php-chmod-sanitize.so /build/shim/chmod-sanitize.c -ldl; \
     strip --strip-unneeded /usr/local/lib/php-chmod-sanitize.so
 
+# fpm-ping: compiles the HEALTHCHECK probe, a native FastCGI client, and installs it
+# as php-fpm-healthcheck. Same flags as the shim, plus -pie for an executable, and in
+# its own step after the PHP build so editing it does not invalidate that cache.
+COPY shim/fpm-ping.c /build/shim/fpm-ping.c
+RUN set -eux; \
+    CFLAGS="$(bash /build/php/cflags.sh "$UARCH")"; \
+    LDFLAGS="$(bash /build/php/ldflags.sh)"; \
+    $CC $CFLAGS $LDFLAGS -pie -Wall -Wextra \
+      -o /usr/local/bin/php-fpm-healthcheck /build/shim/fpm-ping.c; \
+    strip --strip-unneeded /usr/local/bin/php-fpm-healthcheck
+
 # Trim /deps-stage to what a running php loads; the COPY out of this stage sees
 # the final view, so removing here keeps these files out of the runtime layer.
 # php links only MagickWand and MagickCore (imagick is static), so the Magick++
@@ -531,6 +539,16 @@ RUN set -eux; \
     install -m 0644 /tmp/my.cnf /stage/etc/my.cnf; \
     rm -f /tmp/my.cnf
 
+# ImageMagick security policy, at the configure path the /opt/imagemagick build
+# reads (tests/smoke.sh checks it against Imagick::getConfigureOptions). One
+# root-owned, world-readable file in every flavor and era; operators replace it
+# by mounting their own over this path.
+COPY conf/imagemagick-policy.xml /tmp/imagemagick-policy.xml
+RUN set -eux; \
+    install -d -m 0755 /stage/opt/imagemagick/etc/ImageMagick-7; \
+    install -m 0644 /tmp/imagemagick-policy.xml /stage/opt/imagemagick/etc/ImageMagick-7/policy.xml; \
+    rm -f /tmp/imagemagick-policy.xml
+
 # --- runtime-payload ---
 # Build-only, in two halves so runtime-base needs two COPYs (two layers), split by
 # change rate: this one holds the tens of MB (php, extensions, vendored libraries),
@@ -550,6 +568,9 @@ COPY --from=php-build /usr/local/lib/php /usr/local/lib/php
 COPY --from=php-build /usr/local/share/php-build /usr/local/share/php-build
 # chmod-sanitize.so: in every flavor, opt-in via PHP_CHMOD_SHIM in the entrypoint.
 COPY --from=php-build /usr/local/lib/php-chmod-sanitize.so /usr/local/lib/php-chmod-sanitize.so
+# php-fpm-healthcheck: native FastCGI ping probe, in every flavor like the rootfs
+# scripts it replaces; only the fpm flavor's HEALTHCHECK runs it.
+COPY --from=php-build /usr/local/bin/php-fpm-healthcheck /usr/local/bin/php-fpm-healthcheck
 
 # php-build's own /usr/local/etc/php first, then everything runtime-conf baked on
 # top of it (later wins). runtime-base copies this half last.
@@ -658,6 +679,11 @@ RUN set -eux; \
     grep -q '^www-data:' /etc/group || addgroup -S -g "$WWW_GID" www-data; \
     grep -q '^www-data:' /etc/passwd || adduser -S -D -H -u "$WWW_UID" -G www-data -h /var/www -s /sbin/nologin www-data; \
     mkdir -p /app /usr/local/etc/php/conf.d; \
+# docker-php-entrypoint reads MAJOR.MINOR from this file instead of starting php to
+# ask on every container start; the build refuses a value php does not report.
+    [ "$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;')" = "$PHP_VERSION" ] \
+      || { echo "FATAL: PHP_VERSION=$PHP_VERSION is not the MAJOR.MINOR this php reports" >&2; exit 1; }; \
+    printf '%s\n' "$PHP_VERSION" > /usr/local/etc/php/php-major-minor; \
     install -d -o www-data -g www-data /var/www; \
     chown -R www-data:www-data /app; \
 # php-ext-enable writes here as whatever user runs the container (the flavors set
@@ -713,6 +739,7 @@ ENV PHP_FPM_PM=dynamic \
     PHP_FPM_STATUS_PATH=/fpm-status \
     PHP_FPM_ACCESS_LOG=/proc/self/fd/2 \
     PHP_FPM_SLOWLOG_TIMEOUT=10s \
+    PHP_FPM_REQUEST_TERMINATE_TIMEOUT=600s \
     PHP_DISABLE_FUNCTIONS="passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec"
 # One RUN for everything that edits or verifies the files above.
 RUN set -eux; \
@@ -778,9 +805,9 @@ RUN set -eux; \
     php-fpm -t
 EXPOSE 9000
 STOPSIGNAL SIGQUIT
-# php-fpm-healthcheck (vendored) speaks FastCGI to the pool's ping.path
-# (conf/www.conf) via php-fcgi, so no front web server or extra HTTP port is
-# needed. It runs as www-data, like the main command.
+# php-fpm-healthcheck (shim/fpm-ping.c) speaks FastCGI to the pool's ping.path
+# (conf/www.conf), so no front web server or extra HTTP port is needed. It runs as
+# www-data, like the main command.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
   CMD php-fpm-healthcheck || exit 1
 USER www-data
@@ -795,7 +822,7 @@ CMD ["php", "-a"]
 # so the apk-managed Node (nodejs-26, /usr/bin/node) carries no npm of its own and
 # the pinned npm is the only one outside semantic-release's tree.
 #
-# The pin is npm 12.2.2, the newest release and one whose bundled
+# The pin is npm 12.2.3, the newest release and one whose bundled
 # brace-expansion, undici, ip-address, http-cache-semantics and
 # postcss-selector-parser carry their fixes (12.2.0 does not). Wolfi's npm package
 # lags it. The apk npm is only the bootstrap that installs it and never ships.
@@ -811,8 +838,8 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
     apk upgrade --cache-dir /var/cache/apk -U; \
     apk add --cache-dir /var/cache/apk nodejs-26 npm; \
     node -v; \
-    npm install -g --prefix /usr/local npm@12.2.2; \
-    [ "$(/usr/local/bin/npm -v)" = "12.2.2" ]; \
+    npm install -g --prefix /usr/local npm@12.2.3; \
+    [ "$(/usr/local/bin/npm -v)" = "12.2.3" ]; \
     /usr/local/bin/npm install -g --prefix /usr/local semantic-release; \
     /usr/local/bin/npm cache clean --force; \
     test -x /usr/local/bin/semantic-release; \

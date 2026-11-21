@@ -21,7 +21,7 @@
 # query string (?controller=x&id_y=n -> ?id_y=n&controller=x), which is why
 # verify.sh and train.sh follow redirects (curl -L) for every app.
 #
-# One file serves every PrestaShop the tiers pin (9.2.0, 8.2.8, 1.7.8.11,
+# One file serves every PrestaShop the tiers pin (9.2.1, 8.2.9, 1.7.8.11,
 # 1.6.1.24), so an expected substring may list alternatives separated by '|': 1.6's
 # demo catalog puts Women/Tops/"Faded Short Sleeves T-shirt"/"Printed Dress" at
 # the IDs where 1.7+ has Clothes/Accessories/Hummingbird/Framed poster. There is no
