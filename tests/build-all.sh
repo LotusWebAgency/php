@@ -49,7 +49,7 @@ usage() {
 usage: build-all.sh [--only V[,V...]] [--flavor F[,F...]] [--platform P[,P...]] [--dry-run]
 
   --only V[,V...]      only these matrix.json versions, e.g. --only 8.4,8.5 (repeatable)
-  --flavor F[,F...]    only these flavors: fpm, cli, cli-builder, ext-builder (repeatable)
+  --flavor F[,F...]    only these flavors: fpm, cli, cli-builder, ext-builder, fpm-slim, cli-slim (repeatable)
   --platform P[,P...]  bake platform(s) to build for, default linux/amd64 (arm64 is opt-in)
   --dry-run            print the ordered plan (corpus tiers -> images) and build nothing
 EOF

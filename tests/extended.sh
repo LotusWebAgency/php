@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The tests CI does not run, against the images develop CI already tested and
 # pushed to GHCR (ghcr.io/lotuswebagency/php/dev), instead of a from-source
-# rebuild of all 52 targets on this machine.
+# rebuild of all 78 targets on this machine.
 #
 #   tests/extended.sh pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--no-corpus]
 #   tests/extended.sh uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
@@ -104,7 +104,7 @@ usage: tests/extended.sh <subcommand> [options]
   --sha REF          pull: the commit whose images to pull (default: git rev-parse HEAD)
   --latest           pull: the floating tags, i.e. the last fully green develop run
   --only V[,V...]    only these matrix.json versions (repeatable)
-  --flavor F[,F...]  only these flavors: fpm, cli, cli-builder, ext-builder (repeatable)
+  --flavor F[,F...]  only these flavors: fpm, cli, cli-builder, ext-builder, fpm-slim, cli-slim (repeatable)
   --platform P       pull: linux/amd64 or linux/arm64, must be this daemon's architecture
   --jobs N           pull: parallel pulls (default 4)
   --skip-pull        all: do not pull first
