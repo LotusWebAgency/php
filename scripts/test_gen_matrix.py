@@ -16,8 +16,8 @@ class TestTargets(unittest.TestCase):
         self.matrix = json.loads((ROOT / "matrix.json").read_text())
         self.targets = gen_matrix.build_targets(self.matrix)
 
-    def test_fifty_two_image_targets(self):
-        self.assertEqual(len(self.targets), 52)
+    def test_seventy_eight_image_targets(self):
+        self.assertEqual(len(self.targets), 78)
 
     def test_v3_only_for_84_and_85(self):
         v3 = {t["php"] for t in self.targets if t["uarch"] == "v3"}
@@ -46,7 +46,7 @@ class TestTargets(unittest.TestCase):
         names = {t["name"] for t in json.loads(out)["include"]}
         self.assertEqual(names, {"php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm",
                                  "php-8_5-cli-builder", "php-8_5-cli"})
-        self.assertEqual(len(names), 5, "ext-builder rides with cli, so it adds no leg")
+        self.assertEqual(len(names), 5, "ext-builder and the slim flavors ride with a host, so they add no leg")
 
     def run_github(self, which):
         out = subprocess.run([sys.executable, str(GEN), "--github", which],
@@ -60,14 +60,14 @@ class TestTargets(unittest.TestCase):
             covered += leg["bake"].split()
             self.assertEqual(leg["bake"].split()[0], leg["name"])
         self.assertEqual(sorted(covered), sorted(t["name"] for t in self.targets))
-        self.assertEqual(len(legs), 52 - len(self.matrix["versions"]) - 2)
+        self.assertEqual(len(legs), 39)
+        self.assertEqual(len(legs), len(self.targets) - 3 * (len(self.matrix["versions"]) + 2))
 
     def test_ext_builder_rides_with_cli_not_alone(self):
         legs = self.run_github("build")
         self.assertNotIn("ext-builder", {leg["flavor"] for leg in legs})
-        riding = [leg for leg in legs if leg["rider_name"]]
+        riding = [leg for leg in legs if leg["rider_flavor"] == "ext-builder"]
         self.assertEqual({leg["flavor"] for leg in riding}, {"cli"})
-        self.assertEqual({leg["rider_flavor"] for leg in riding}, {"ext-builder"})
         self.assertEqual(len(riding), len(self.matrix["versions"]) + 2)
         self.assertEqual({leg["uarch"] for leg in riding if leg["php"] in ("8.4", "8.5")},
                          {"baseline", "v3"})
@@ -76,6 +76,60 @@ class TestTargets(unittest.TestCase):
             self.assertEqual(leg["rider_name"], leg["name"].replace("-cli", "-ext-builder"))
             self.assertEqual(leg["rider_tag"], f"lotuswebagency/php:{leg['php']}-ext-builder{suffix}")
             self.assertEqual(leg["bake"], f"{leg['name']} {leg['rider_name']}")
+
+    def test_slim_flavors_ride_with_their_host_leg(self):
+        legs = self.run_github("build")
+        self.assertFalse({"fpm-slim", "cli-slim"} & {leg["flavor"] for leg in legs})
+        for host, slim in (("fpm", "fpm-slim"), ("cli-builder", "cli-slim")):
+            riding = [leg for leg in legs if leg["flavor"] == host]
+            self.assertEqual(len(riding), len(self.matrix["versions"]) + 2)
+            for leg in riding:
+                suffix = "-v3" if leg["uarch"] == "v3" else ""
+                self.assertEqual(leg["rider_flavor"], slim)
+                self.assertEqual(leg["rider_name"], leg["name"].replace(f"-{host}", f"-{slim}"))
+                self.assertEqual(leg["rider_tag"], f"lotuswebagency/php:{leg['php']}-{slim}{suffix}")
+                self.assertEqual(leg["bake"], f"{leg['name']} {leg['rider_name']}")
+
+    def test_every_leg_has_at_most_one_rider(self):
+        legs = self.run_github("build")
+        for leg in legs:
+            self.assertLessEqual(len(leg["bake"].split()), 2, leg["name"])
+
+    def test_two_riders_on_one_host_are_rejected(self):
+        one = [t for t in self.targets if t["php"] == "8.5" and t["uarch"] == "baseline"]
+        clash = [dict(t, flavor="ext-builder", name="php-8_5-ext-builder-twin")
+                 if t["flavor"] == "fpm-slim" else t for t in one]
+        with self.assertRaises(SystemExit):
+            gen_matrix.build_legs(clash)
+
+    def test_slim_targets(self):
+        slim = [t for t in self.targets if t["flavor"].endswith("-slim")]
+        self.assertEqual(len(slim), 2 * (len(self.matrix["versions"]) + 2))
+        for t in slim:
+            self.assertEqual(t["runtime_os"], "slim", t["name"])
+        for t in self.targets:
+            if not t["flavor"].endswith("-slim"):
+                self.assertEqual(t["runtime_os"], "full", t["name"])
+
+    def test_slim_names_and_tags(self):
+        by_name = {t["name"]: t for t in self.targets}
+        self.assertEqual(by_name["php-8_5-fpm-slim"]["tags"], ["lotuswebagency/php:8.5-fpm-slim"])
+        self.assertEqual(by_name["php-8_5-fpm-slim-v3"]["tags"], ["lotuswebagency/php:8.5-fpm-slim-v3"])
+        self.assertEqual(by_name["php-7_0-cli-slim"]["tags"], ["lotuswebagency/php:7.0-cli-slim"])
+        self.assertEqual(by_name["php-8_4-cli-slim-v3"]["tags"], ["lotuswebagency/php:8.4-cli-slim-v3"])
+        self.assertNotIn("php-8_3-fpm-slim-v3", by_name)
+
+    def test_slim_has_no_alias(self):
+        for t in self.targets:
+            if t["flavor"].endswith("-slim"):
+                for tag in t["tags"]:
+                    self.assertRegex(tag, r":\d+\.\d+-(fpm|cli)-slim(-v3)?$")
+                self.assertEqual(len(t["tags"]), 1, t["name"])
+
+    def test_slim_shares_its_hosts_cache_scope(self):
+        by_name = {t["name"]: t for t in self.targets}
+        self.assertEqual(by_name["php-8_5-fpm-slim"]["cache_flavor"], "fpm")
+        self.assertEqual(by_name["php-8_5-cli-slim-v3"]["cache_flavor"], "cli-builder")
 
     def test_legs_without_a_rider_carry_empty_rider_strings(self):
         for leg in self.run_github("build"):
@@ -88,18 +142,24 @@ class TestTargets(unittest.TestCase):
         with self.assertRaises(SystemExit):
             gen_matrix.build_legs(only_ext)
 
-    def test_pr_subset_covers_every_flavor_incl_the_ext_builder_rider(self):
+    def test_pr_subset_covers_every_flavor_incl_the_riders(self):
         legs = self.run_github("pr")
         baked = {n for leg in legs for n in leg["bake"].split()}
         self.assertIn("php-8_5-ext-builder", baked)
         self.assertEqual(baked, gen_matrix.PR_SUBSET)
+        self.assertEqual({t["flavor"] for t in self.targets if t["name"] in baked},
+                         set(self.matrix["flavors"]))
+        self.assertEqual(
+            {"php-8_5-fpm-slim", "php-8_5-cli-slim", "php-7_0-fpm-slim"},
+            {n for n in baked if n.endswith("-slim")})
 
-    def test_every_version_has_four_flavors_per_uarch(self):
+    def test_every_version_has_every_flavor_per_uarch(self):
         for ver, spec in self.matrix["versions"].items():
             for uarch in spec["uarch"]:
                 flavors = {t["flavor"] for t in self.targets
                            if t["php"] == ver and t["uarch"] == uarch}
-                self.assertEqual(flavors, {"fpm", "cli", "cli-builder", "ext-builder"}, f"{ver} {uarch}")
+                self.assertEqual(flavors, {"fpm", "cli", "cli-builder", "ext-builder", "fpm-slim", "cli-slim"},
+                                 f"{ver} {uarch}")
 
     def test_default_version_carries_aliases(self):
         default = self.matrix["default_version"]

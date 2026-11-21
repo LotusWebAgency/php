@@ -2,7 +2,7 @@
   "image": "lotuswebagency/php",
   "base": "cgr.dev/chainguard/wolfi-base:latest@sha256:71f52fd289650f1d021d60ba11235550b1b5ce124f3797bd254ca70c4cef39f9",
   "default_version": "8.5",
-  "flavors": ["fpm", "cli", "cli-builder", "ext-builder"],
+  "flavors": ["fpm", "cli", "cli-builder", "ext-builder", "fpm-slim", "cli-slim"],
   "platforms": ["linux/amd64", "linux/arm64"],
   "uarch": {
     "baseline": {"amd64": "x86-64-v2", "arm64": "armv8-a"},
