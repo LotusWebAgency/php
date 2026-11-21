@@ -57,7 +57,7 @@ echo "$mods" | grep -qi snuffleupagus && fail "loaded by default"
 echo "ok: disabled by default"
 
 for rs in default laravel wordpress prestashop; do
-  docker run --rm "$IMAGE" test -f "/usr/local/etc/php/snuffleupagus/${rs}.rules" \
+  docker run --rm "$IMAGE" busybox test -f "/usr/local/etc/php/snuffleupagus/${rs}.rules" \
     || fail "missing ruleset: $rs"
 done
 echo "ok: all four rulesets present"
@@ -672,7 +672,7 @@ echo "ok: sp-upload-check validates archive integrity, not just magic bytes"
 # bomb below decompresses to 5GB, so the timeout fires well before a legitimate small
 # plugin/module zip's sub-second validation would.
 dos_check=$(docker run --rm --entrypoint sh -e ARCHIVE_CHECK_TIMEOUT=1 "$IMAGE" -c '
-  dd if=/dev/zero bs=1M count=5000 2>/dev/null | gzip -9 > /tmp/sp-bomb.gz
+  busybox dd if=/dev/zero bs=1M count=5000 2>/dev/null | gzip -9 > /tmp/sp-bomb.gz
   /usr/local/bin/sp-upload-check /tmp/sp-bomb.gz
   echo "rc=$?"
 ' 2>&1)
@@ -685,7 +685,7 @@ echo "ok: sp-upload-check bounds archive-validation CPU cost with a timeout"
 unreadable_check=$(docker run --rm --user root --entrypoint sh "$IMAGE" -c '
   touch /tmp/sp-noperm.php
   chmod 000 /tmp/sp-noperm.php
-  su -s /bin/sh www-data -c "/usr/local/bin/sp-upload-check /tmp/sp-noperm.php"
+  busybox su -s /bin/sh www-data -c "/usr/local/bin/sp-upload-check /tmp/sp-noperm.php"
   echo "rc=$?"
 ')
 echo "$unreadable_check" | grep -q "rc=1" || fail "sp-upload-check did not fail closed on an unreadable file: $unreadable_check"
