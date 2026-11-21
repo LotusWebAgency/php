@@ -79,7 +79,12 @@ while read -r lib soname; do
     continue
   fi
   owners+="$owner"$'\n'
-  sonames+="so:$soname"$'\n'
+  # arm64's loader lists itself by path (/lib/ld-linux-aarch64.so.1 => ...),
+  # which is no soname apk can resolve; its owner, glibc, is listed above.
+  case "$soname" in
+    */*) ;;
+    *) sonames+="so:$soname"$'\n' ;;
+  esac
 done <<<"$libs"
 
 if [ -n "$unowned" ]; then
