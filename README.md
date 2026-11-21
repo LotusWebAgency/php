@@ -22,7 +22,7 @@ services:
 
 ## Tags
 
-All 11 PHP versions ship all four flavors for `linux/amd64` and `linux/arm64`: 52 images, 44 baseline plus 8 `-v3`. `Support` and
+All 11 PHP versions ship all six flavors for `linux/amd64` and `linux/arm64`: 78 images, 66 baseline plus 12 `-v3`. `Support` and
 `EOL date` are upstream's values from [php.net](https://www.php.net/supported-versions.php). They
 come from `matrix.json` and are carried on every image as the `com.lotuswebagency.support` and
 `com.lotuswebagency.eol-date` labels.
@@ -49,7 +49,7 @@ interpreter in them gets no upstream fixes. See [SUPPORT.md](SUPPORT.md) and
 |---|---|---|
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
 | `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64-v2` / `armv8-a` baseline. 8.4 and 8.5 only. |
-| `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image (`default_version` in `matrix.json`, currently 8.5). |
+| `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image (`default_version` in `matrix.json`, currently 8.5). There is no `slim` or `latest-slim` alias. |
 | `{release}-{flavor}[-v3]` | `8.5.13-fpm` | Full patch version. Read from the built image (`PHP_VERSION`) after tests and the Trivy gate, so a tag cannot name a version the image does not contain. |
 
 `-v3` images need a newer CPU. On amd64 older than Haswell/Excavator they refuse to start: a startup
@@ -122,6 +122,8 @@ These caveats apply to the end-of-life tags. PHP 8.2 and later have none of them
 |---|---|
 | `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` (`php-fpm-healthcheck`, a small native probe) that needs no web server. |
 | `cli` | `php -a` by default. Scripts, cron jobs, queue workers. |
+| `fpm-slim` | `fpm` without `apk`, curl and the database client tools. See [Slim flavors](#slim-flavors). |
+| `cli-slim` | `cli` without `apk`, curl and the database client tools. See [Slim flavors](#slim-flavors). |
 | `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, Node.js 26 with npm 12.2.3 and corepack, semantic-release and [Composer](https://getcomposer.org/) (installed with signature verification). No compiler. For build stages. |
 | `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize` / `php-config`. Runs as root, no Composer, no Node.js. Wolfi's openssf compiler wrappers stay on, so extensions built here get Wolfi's hardening flags. They also take Wolfi's default `-march`/`-mtune`, not the generic tuning the PHP build uses; `-v3` presets `CFLAGS` and `CXXFLAGS` with the `-v3` `-march`/`-mtune` instead. For build stages. |
 
@@ -130,7 +132,7 @@ All images use `tini` as PID 1. All but `ext-builder` run as `www-data` (UID and
 ### Base image and tools
 
 The base is Wolfi, a glibc distribution. `/etc/apk/repositories` points at `packages.wolfi.dev/os`
-and nothing else. Every flavor has `apk`, bash, curl, nano, less, procps, tzdata, ca-certificates,
+and nothing else. Every flavor except the [slim ones](#slim-flavors) has `apk`, bash, curl, nano, less, procps, tzdata, ca-certificates,
 zip, unzip, zstd, xz, bzip2, the PostgreSQL 18 client (`psql`, `pg_dump`, `pg_restore`) and the
 MariaDB 13.1 client. The MariaDB client is `mariadb`. `mysql`, `mysqldump`, `mysqladmin` and
 `mysqlcheck` are one-line wrapper scripts that `exec` `mariadb`, `mariadb-dump`, `mariadb-admin` and
@@ -157,6 +159,40 @@ pattern), and gives up after 2 s.
 There is no apt, dpkg, `ldd`, `getent`, `useradd` or other shadow tool. `fpm` and `cli` have no perl;
 `cli-builder` and `ext-builder` do, because git and autoconf need it. Setuid and setgid bits are
 stripped in every flavor.
+
+### Slim flavors
+
+`fpm-slim` and `cli-slim` carry the same PHP build as `fpm` and `cli`: `php`, `php-fpm`, every
+extension and the ini and pool configuration are byte-identical, which
+[`tests/test-slim-parity.sh`](tests/test-slim-parity.sh) checks in CI. The entrypoint, environment
+variables, user, healthcheck and read-only support are the same too. The difference is the system
+underneath: slim has none of the native tools that code running inside PHP could start through
+`proc_open`. That also makes the image about 45 MB smaller.
+
+Tags are `8.5-fpm-slim`, `8.5-cli-slim`, `8.5.13-fpm-slim` and so on for all 11 versions, plus
+`8.5-fpm-slim-v3` and `8.4-cli-slim-v3` on 8.4 and 8.5. There is no `slim` or `latest-slim` alias.
+
+- **Removed:** `apk`, curl, nano, less, procps, zip, zstd, the PostgreSQL client, and the MariaDB
+  client with its `mysql*` wrappers.
+- **Kept:** bash, `sh`, tini, unzip, bzip2, xz, `php-fcgi`, and these busybox applets: `env`, `sh`,
+  `tr`, `sed`, `awk`, `grep`, `cut`, `wc`, `uniq`, `tail`, `cat`, `id`, `stat`, `flock`, `rm`,
+  `mkdir`, `mktemp`, `chmod`, `mv`, `ln`, `touch`, `true`, `false`, `ls`, `head`, `od`, `timeout`,
+  `gzip`, `sleep`, `date` and `nologin`. Every other busybox link is removed, so `adduser`, `find`
+  and `sort` are gone as well.
+- **Not a sandbox.** PHP itself still has curl, sockets, ftp, pcntl and posix compiled in. Slim
+  reduces the tooling around it, nothing more.
+- **Pruned applets are not removed from busybox.** A pruned name fails as a bare command, but
+  `busybox <applet>` still reaches every applet.
+- **No package manager.** A derived image cannot `apk add`. To add a runtime library, build on the
+  full flavor, or run `apk add` in a stage from the matching full tag and `COPY` the files into the
+  slim image. Trivy does not see copied libraries.
+- **No curl.** A custom `HEALTHCHECK` cannot call it. Use `php`, or on `fpm-slim` the baked
+  `php-fpm-healthcheck`.
+- **No `update-ca-certificates`.** The CA bundle is fixed at build time. Mount a bundle over
+  `/etc/ssl/certs/ca-certificates.crt` or set `openssl.cafile`.
+
+The apk database (`/lib/apk/db/installed`) and `/etc/os-release` stay, so Trivy and SBOM scanners
+read the package inventory without the `apk` binary.
 
 ## Quick start
 
@@ -200,19 +236,19 @@ every tag unless the row says otherwise.
 | Item | Value |
 |---|---|
 | Entrypoint | `/usr/bin/tini -- docker-php-entrypoint`. tini is already PID 1: do not add `--init` / `init: true`, or tini warns that it is not PID 1. |
-| Default command | `fpm`: `php-fpm -F`. `cli`: `php -a`. `cli-builder`, `ext-builder`: `bash`. |
+| Default command | `fpm`, `fpm-slim`: `php-fpm -F`. `cli`, `cli-slim`: `php -a`. `cli-builder`, `ext-builder`: `bash`. |
 | User | `www-data`, UID and GID 33. `ext-builder` runs as root. |
 | Working directory | `/app`, owned by `www-data`. |
-| Port | `fpm`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
-| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed; `PHP_FPM_PING_RESPONSE` is a literal substring). |
-| Stop signal | `fpm`: `SIGQUIT` (graceful). |
+| Port | `fpm`, `fpm-slim`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
+| Healthcheck | `fpm` and `fpm-slim` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed; `PHP_FPM_PING_RESPONSE` is a literal substring). |
+| Stop signal | `fpm`, `fpm-slim`: `SIGQUIT` (graceful). |
 | Logs | stderr only; no log files. |
 | Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |
 | Configuration | `PHP_*` environment variables, applied at start. Drop-in ini files go in `/usr/local/etc/php/conf.d/` and must sort after `10-php.ini`. |
 | Extensions | 53 compiled in; 19 shared, loaded with `PHP_EXT_ENABLE`. List: `php -m`. |
 | Snuffleupagus | Off by default. `PHP_SNUFFLEUPAGUS=<ruleset>`; rulesets in `/usr/local/etc/php/snuffleupagus/`. PHP 7.2+. |
 | `docker exec` | `docker exec <c> docker-php-entrypoint php ...` sees the env-driven ini; plain `docker exec <c> php ...` does not. |
-| Package manager | `apk` (Wolfi). No apt, `pecl` or `docker-php-ext-install`. |
+| Package manager | `apk` (Wolfi), except in `fpm-slim` and `cli-slim`, which have none. No apt, `pecl` or `docker-php-ext-install`. |
 | Pinning | Tags move with patch releases and weekly rebuilds. Pin `@sha256:...` for reproducible deploys. |
 
 ## Configuration
@@ -303,7 +339,7 @@ on that command line changes the ini after the check and bypasses it.
 
 ### Read-only root filesystem
 
-`fpm`, `cli` and `cli-builder` run with `--read-only` and one writable mount, `/tmp`:
+`fpm`, `cli`, `cli-builder` and the slim flavors run with `--read-only` and one writable mount, `/tmp`:
 
 ```yaml
 services:
@@ -545,7 +581,8 @@ ENV PHP_EXT_ENABLE=myext
 - Every setuid and setgid bit inherited from the base image is stripped.
 - Busybox's network applets (`ping`, `netstat`, `traceroute`, `arping`, `microcom` and the rest of
   the raw-socket and interface set) are removed; `curl` stays. A derived image that runs
-  `apk add` gets the busybox links back and can prune them again.
+  `apk add` gets the busybox links back and can prune them again. The slim flavors keep only a short
+  allowlist of applets and have no `apk` (see [Slim flavors](#slim-flavors)).
 - Baked ini defaults for fpm, cli and ext-builder: `zend.assertions = -1`, so `assert()` is compiled out
   instead of executing in production. All four flavors set `session.upload_progress.enabled = 0`,
   `mysqli.allow_local_infile = 0` (PHP 7.0 compiles in 1, 8.x 0, so a hostile MySQL server cannot ask the
@@ -781,12 +818,14 @@ nothing. `tests/build-all.sh` sets the label; for a manual `bake`, set `INPUTS_H
 `SMOKE_ALLOW_STALE=1` skips the check with a warning, for inspecting an image built elsewhere.
 
 `smoke.sh` runs the per-image checks and calls the entrypoint, FPM health, read-only, PGO,
-Snuffleupagus and ELF-hardening tests. Application suites (Laravel, WordPress, PrestaShop) are in
+Snuffleupagus and ELF-hardening tests. For a slim flavor it also asserts what is absent and that the
+busybox links equal the allowlist; `tests/test-slim-parity.sh SLIM_IMAGE FULL_IMAGE` compares it with
+its full flavor. Application suites (Laravel, WordPress, PrestaShop) are in
 [tests/apps/](tests/apps/README.md). Python unit tests live in `scripts/`, `ci/` and `tests/apps/`.
 
 `tests/extended.sh` runs the suites the main gate does not (`-v3` check, corpus-tier replay,
 application suites, and on request the benchmark) against images a `develop` run pushed to GHCR,
-instead of rebuilding all 52 targets. Log in to `ghcr.io` with a token that has `read:packages`, then:
+instead of rebuilding all 78 targets. Log in to `ghcr.io` with a token that has `read:packages`, then:
 
 ```sh
 tests/extended.sh pull && tests/extended.sh all
@@ -823,9 +862,9 @@ Only the promotion and the description-sync jobs use the Docker Hub credentials,
 | `conf/` | Baked ini files, FPM pool config, Snuffleupagus rulesets, ImageMagick security policy. |
 | `rootfs/usr/local/bin/` | `docker-php-entrypoint`, `php-ext-enable`, `php-fcgi` (FastCGI client), `sp-upload-check` (upload validator for Snuffleupagus). |
 | `shim/` | Sources of the `chmod(0)` `LD_PRELOAD` shim and of `php-fpm-healthcheck` (`fpm-ping.c`). |
-| `scripts/`, `ci/` | Matrix generation, inputs hash, PGO tier checks; release, attestation, verification and VEX scripts. Both have unit tests. |
+| `scripts/`, `ci/` | Matrix generation, inputs hash, PGO tier checks, the slim image finalizer (`slim-finalize.sh`); release, attestation, verification and VEX scripts. Both have unit tests. |
 | `vex/` | OpenVEX statements for accepted findings. |
-| `tests/` | Smoke, entrypoint, read-only, PGO, ext-builder and extended suites; `tests/apps/` application tests. |
+| `tests/` | Smoke, entrypoint, read-only, PGO, ext-builder, slim parity and extended suites; `tests/apps/` application tests. |
 | `.github/workflows/` | `ci.yml` (build, test, scan, publish), `extended.yml`, `dev-prune.yml`. |
 
 ## Migrating from `php-fpm-with-ext`

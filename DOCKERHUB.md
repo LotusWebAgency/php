@@ -10,8 +10,6 @@ facts a deployment script or agent needs.
 Source and full docs: [github.com/LotusWebAgency/php](https://github.com/LotusWebAgency/php).
 Replaces `dementev/php-fpm-with-ext`
 ([migration notes](https://github.com/LotusWebAgency/php#migrating-from-php-fpm-with-ext)).
-Coming from a Debian- or Alpine-based PHP image? See
-[Moving from a Debian or Alpine base](https://github.com/LotusWebAgency/php#moving-from-a-debian-or-alpine-base).
 
 ```yaml
 services:
@@ -23,7 +21,7 @@ services:
 
 ## Tags
 
-All 11 PHP versions ship all four flavors for `linux/amd64` and `linux/arm64`. Support status and EOL
+All 11 PHP versions ship all six flavors for `linux/amd64` and `linux/arm64`. Support status and EOL
 dates are upstream's ([php.net](https://www.php.net/supported-versions.php)) and are also image labels.
 
 | PHP | Compiler | `-v3` | Support | EOL date |
@@ -58,7 +56,7 @@ Every caveat and workaround: [Older PHP versions](https://github.com/LotusWebAge
 |---|---|---|
 | `{version}-{flavor}` | `8.5-fpm` | Every published image. |
 | `{version}-{flavor}-v3` | `8.4-fpm-v3` | Built for `x86-64-v3` / `armv9-a` instead of the `x86-64-v2` / `armv8-a` baseline. 8.4 and 8.5 only. |
-| `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image. |
+| `{version}`, `latest` | `8.5`, `latest` | The default version's `fpm` image. No `slim` alias. |
 | `{release}-{flavor}[-v3]` | `8.5.13-fpm` | Full patch version, read from the built image after tests and the Trivy gate. |
 
 `-v3` needs a newer CPU. On older amd64 the image refuses to start
@@ -77,6 +75,7 @@ baseline builds in every image, `-v3` included.
 |---|---|
 | `fpm` | PHP-FPM on `:9000` for a FastCGI-speaking reverse proxy. `STOPSIGNAL SIGQUIT` and a FastCGI `HEALTHCHECK` that needs no web server. |
 | `cli` | `php -a` by default. Scripts, cron jobs, queue workers. |
+| `fpm-slim`, `cli-slim` | `fpm` and `cli` without `apk`, curl and database clients. See below. |
 | `cli-builder` | `cli` plus git, rsync, patch, make, brotli, sqlite3, jq, Node.js 26 with npm 12.2.3 and corepack, semantic-release and Composer. No compiler. For build stages. |
 | `ext-builder` | `cli` plus gcc, g++, make, autoconf, pkg-config, glibc and Linux headers and the PHP headers with `phpize`. Runs as root. Extensions take Wolfi's default `-march`/`-mtune`; `-v3` presets `CFLAGS`/`CXXFLAGS`. For build stages. |
 
@@ -85,7 +84,7 @@ All images run `tini` as PID 1. All but `ext-builder` run as `www-data` (UID and
 ### Base image and tools
 
 The base is Wolfi, a glibc distribution, with `packages.wolfi.dev/os` as the only apk repository.
-Every flavor has `apk`, bash, curl, nano, less, procps, tzdata, ca-certificates, zip, unzip, zstd, xz,
+Every flavor except the slim ones has `apk`, bash, curl, nano, less, procps, tzdata, ca-certificates, zip, unzip, zstd, xz,
 bzip2, the PostgreSQL 18 client (`psql`, `pg_dump`, `pg_restore`) and the MariaDB 13.1 client.
 `mysql`, `mysqldump`, `mysqladmin` and `mysqlcheck` are wrapper scripts that `exec` `mariadb`,
 `mariadb-dump`, `mariadb-admin` and `mariadb-check`. They log in with every MySQL, Percona and
@@ -95,6 +94,22 @@ in every flavor (Wolfi has no `cgi-fcgi`).
 
 There is no apt, dpkg, `ldd`, `getent`, `useradd` or other shadow tool. `fpm` and `cli` have no perl;
 `cli-builder` and `ext-builder` do, because git and autoconf need it.
+
+### Slim flavors
+
+`fpm-slim` and `cli-slim` have the same PHP build as `fpm` and `cli` (byte-identical binaries,
+extensions and ini, checked in CI) and the same entrypoint and healthcheck, in an image
+about 45 MB smaller. Tags: `8.5-fpm-slim`, `8.5.13-cli-slim`, `8.5-fpm-slim-v3`.
+
+- Removed: `apk`, curl, nano, less, procps, zip, zstd, the PostgreSQL client, the MariaDB client and
+  `mysql*` wrappers. Kept: bash, `sh`, tini, unzip, bzip2, xz and a busybox applet
+  allowlist ([list](https://github.com/LotusWebAgency/php/blob/main/README.md#slim-flavors)).
+- Not a sandbox: PHP still has curl, sockets, ftp, pcntl and posix, and `busybox <applet>` still
+  reaches every applet; a pruned name only fails as a bare command.
+- No package manager, no curl for custom healthchecks, no `update-ca-certificates` (mount a CA
+  bundle or set `openssl.cafile`). To add a runtime library, use the full flavor, or `apk add` in a
+  stage from the matching full tag and `COPY` the files (Trivy does not see copied libraries).
+- The apk database and `/etc/os-release` stay, so scanners still work.
 
 ## Quick start
 
@@ -130,19 +145,19 @@ every tag unless the row says otherwise.
 | Item | Value |
 |---|---|
 | Entrypoint | `/usr/bin/tini -- docker-php-entrypoint`. tini is already PID 1: do not add `--init` / `init: true`, or tini warns that it is not PID 1. |
-| Default command | `fpm`: `php-fpm -F`. `cli`: `php -a`. `cli-builder`, `ext-builder`: `bash`. |
+| Default command | `fpm`, `fpm-slim`: `php-fpm -F`. `cli`, `cli-slim`: `php -a`. `cli-builder`, `ext-builder`: `bash`. |
 | User | `www-data`, UID and GID 33. `ext-builder` runs as root. |
 | Working directory | `/app`, owned by `www-data`. |
-| Port | `fpm`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
-| Healthcheck | `fpm` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed; `PHP_FPM_PING_RESPONSE` is a literal substring). |
-| Stop signal | `fpm`: `SIGQUIT` (graceful). |
+| Port | `fpm`, `fpm-slim`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
+| Healthcheck | `fpm` and `fpm-slim` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed; `PHP_FPM_PING_RESPONSE` is a literal substring). |
+| Stop signal | `fpm`, `fpm-slim`: `SIGQUIT` (graceful). |
 | Logs | stderr only; no log files. |
 | Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |
 | Configuration | `PHP_*` environment variables, applied at start. Drop-in ini files go in `/usr/local/etc/php/conf.d/` and must sort after `10-php.ini`. |
 | Extensions | 53 compiled in; 19 shared, loaded with `PHP_EXT_ENABLE`. List: `php -m`. |
 | Snuffleupagus | Off by default. `PHP_SNUFFLEUPAGUS=<ruleset>`; rulesets in `/usr/local/etc/php/snuffleupagus/`. PHP 7.2+. |
 | `docker exec` | `docker exec <c> docker-php-entrypoint php ...` sees the env-driven ini; plain `docker exec <c> php ...` does not. |
-| Package manager | `apk` (Wolfi). No apt, `pecl` or `docker-php-ext-install`. |
+| Package manager | `apk` (Wolfi); none in the slim flavors. No apt, `pecl` or `docker-php-ext-install`. |
 | Pinning | Tags move with patch releases and weekly rebuilds. Pin `@sha256:...` for reproducible deploys. |
 
 ## Configuration
@@ -405,24 +420,8 @@ Two further gates fail the build on any finding in CISA's Known Exploited Vulner
 
 ## Moving from a Debian or Alpine base
 
-This applies to any PHP image built on Debian (the official `php:*-fpm` images, and
-`dementev/php-fpm-with-ext` for 8.1 and later) or on Alpine (`dementev/php-fpm-with-ext` for
-7.0-8.0). The notes below are written for Debian. Alpine users already have apk, but move from musl
-to glibc, so rebuild every compiled extension in an `ext-builder` stage of the same tag.
-
-- `apt-get install` becomes `apk add --no-cache`, run as root. There is no `apt-get` or `dpkg`, and
-  package names differ (`libjpeg-dev` is `libjpeg-turbo-dev`, `libtiff-dev` is `tiff-dev`,
-  `libxslt1-dev` is `libxslt-dev`, `uuid-dev` is `util-linux-dev`, `libpq-dev` is
-  `postgresql-18-dev`).
-- The amd64 baseline needs `x86-64-v2`. `-v3` tags refuse to start below `x86-64-v3`.
-- PHP 8.1 to 8.5 use OpenSSL 4 (Debian-based images ship OpenSSL 3). Rebuild extensions compiled
-  against `libssl.so.3` in an `ext-builder` stage of the same tag.
-- `mysql*` names are wrappers around the MariaDB 13.1 `mariadb*` tools.
-- Libraries are in `/usr/lib`, not `/usr/lib/x86_64-linux-gnu`. `ldd`, `getent`, `useradd` and
-  `groupadd` are absent; list a binary's libraries with the loader
-  (`/lib64/ld-linux-x86-64.so.2 --list <file>`, `/lib/ld-linux-aarch64.so.1` on arm64).
-
-Full notes: [README](https://github.com/LotusWebAgency/php#moving-from-a-debian-or-alpine-base).
+Coming from a Debian or Alpine PHP image? Package, path and OpenSSL differences:
+[README](https://github.com/LotusWebAgency/php/blob/main/README.md#moving-from-a-debian-or-alpine-base).
 
 ## Related images
 

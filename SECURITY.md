@@ -47,6 +47,14 @@ or kept under `/opt` are tracked by hand through the pins in `deps/versions.lock
 
 PHP 8.1 to 8.5 use Wolfi's system OpenSSL 4, which `apk upgrade` updates with the rest of the base.
 
+`fpm-slim` and `cli-slim` have no `apk`, curl, procps, zip, zstd, PostgreSQL client or MariaDB client
+tools, and only a short allowlist of busybox applets (see
+[Slim flavors](README.md#slim-flavors)). That reduces the native tooling reachable through
+`proc_open`; it is not a sandbox, because PHP still has curl, sockets, ftp, pcntl and posix compiled
+in, and `busybox <applet>` still runs a pruned applet. Their apk database and `/etc/os-release`
+stay, so the Trivy gate scans them like any other flavor. A library copied into a slim image from
+another stage is outside that database and Trivy does not see it.
+
 The base image, `cgr.dev/chainguard/wolfi-base`, is pinned by digest. CI verifies that digest's
 Chainguard cosign signature before any job builds on it. Packages come from `packages.wolfi.dev/os`
 only, and every image carries `org.opencontainers.image.base.name` and
