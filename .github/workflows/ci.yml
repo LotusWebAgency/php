@@ -42,7 +42,7 @@
 # pushed by its own digest, merged and signed separately. A leg has at most one
 # rider; the steps below call it the rider and key on rider_flavor. The slim
 # flavors are also checked against their host's image (tests/test-slim-parity.sh:
-# the same php, php-fpm and extension binaries).
+# the same php, php-fpm, extension binaries and /usr/local tree).
 #
 # Every third-party action is pinned to a full commit SHA with a version comment;
 # mutable tags have been hijacked before (GHSA-69fq-xp46-6x23). regctl, the one
@@ -597,11 +597,14 @@ jobs:
 
       # A slim rider must carry the host flavor's PHP byte for byte: same php,
       # php-fpm and extension binaries, only the root filesystem differs. The
-      # cli-slim rider's host leg builds cli-builder, which is cli plus the
-      # toolchain on top of the same php.
+      # cli-slim rider's host leg builds cli-builder, which is cli plus a toolchain
+      # and its own conf.d/10-php.ini; --full-is-builder accounts for exactly that.
       - name: Slim parity with its host image
         if: endsWith(matrix.target.rider_flavor, '-slim')
-        run: ./tests/test-slim-parity.sh "$RIDER_TAG" "$TARGET_TAG"
+        run: |
+          flags=()
+          [ "$RIDER_FLAVOR" != cli-slim ] || flags=(--full-is-builder)
+          ./tests/test-slim-parity.sh "${flags[@]}" "$RIDER_TAG" "$TARGET_TAG"
 
       # A repo-root .trivyignore, if present, is honored automatically.
       - name: Trivy vulnerability gate
@@ -1291,11 +1294,15 @@ jobs:
           set -euo pipefail
           ./tests/smoke.sh "${STAGE_IMAGE}@${RIDER_DIGEST}" "$TARGET_PHP" "$RIDER_FLAVOR" 2>&1 | tee "$RUNNER_TEMP/smoke-rider.log"
 
-      # The slim rider carries the host flavor's PHP byte for byte (cli-slim's
-      # host leg builds cli-builder: cli plus the toolchain on the same php).
+      # The slim rider carries the host flavor's PHP byte for byte (cli-slim's host
+      # leg builds cli-builder: cli plus a toolchain and its own conf.d/10-php.ini,
+      # which --full-is-builder accounts for).
       - name: Slim parity with its host digest
         if: endsWith(matrix.target.rider_flavor, '-slim')
-        run: ./tests/test-slim-parity.sh "${STAGE_IMAGE}@${RIDER_DIGEST}" "${STAGE_IMAGE}@${DIGEST}"
+        run: |
+          flags=()
+          [ "$RIDER_FLAVOR" != cli-slim ] || flags=(--full-is-builder)
+          ./tests/test-slim-parity.sh "${flags[@]}" "${STAGE_IMAGE}@${RIDER_DIGEST}" "${STAGE_IMAGE}@${DIGEST}"
 
       # A repo-root .trivyignore is honored automatically. Scans the exact digest
       # that was pushed and will be merged.
