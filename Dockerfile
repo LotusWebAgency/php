@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 # One Dockerfile for every published tag; docker-bake.hcl feeds it the matrix.
-ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:71f52fd289650f1d021d60ba11235550b1b5ce124f3797bd254ca70c4cef39f9
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:be019c1c74fe69204a42c4e10bc4d886a49bf5403ffa74374ef7baa408fc9a26
 ARG PHP_ERA=modern
 # Declared before any FROM so `FROM toolchain-select-${COMPILER}` can resolve it.
 # The toolchain-base stage redeclares it for use inside the stage.

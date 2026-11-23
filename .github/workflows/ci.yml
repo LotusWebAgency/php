@@ -125,7 +125,7 @@ env:
   # The image of every docker-container BuildKit builder (setup-buildx-action's
   # default is moby/buildkit:buildx-stable-1 from Docker Hub, unpinned); also read
   # by tests/test-attest.sh.
-  BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+  BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.35.1@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c
   # The Trivy release the prepare steps install; the scan steps skip the
   # action's own setup and run it.
   SETUP_TRIVY_VERSION: v0.76.2
