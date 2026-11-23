@@ -1,5 +1,5 @@
 # Build -> test -> scan -> publish for lotuswebagency/php: a docker-bake matrix of
-# 52 targets (11 PHP versions x 4 flavors, plus an x86-64-v3 / armv9-a variant
+# 78 targets (11 PHP versions x 6 flavors, plus an x86-64-v3 / armv9-a variant
 # of every flavor on 8.4 and 8.5), each built with a PGO training corpus
 # that is itself a build input.
 #
@@ -11,7 +11,7 @@
 #     silently stop branch protection from covering anything.
 #   push or dispatch on develop  `verify` over the whole matrix, natively on amd64
 #     and arm64 (no QEMU): build --load, smoke, the ext-builder end-to-end test,
-#     Trivy. Every image that passed is pushed to GHCR as
+#     the slim parity check, Trivy. Every image that passed is pushed to GHCR as
 #     ghcr.io/lotuswebagency/php/dev:<tag>-<sha>-<arch> for further testing;
 #     `dev-manifest` joins the arches into dev:<tag>-<sha> and, when every verify
 #     leg succeeded, moves the floating dev:<tag>. These are unpublished test
@@ -35,10 +35,14 @@
 #     `release`, with that environment limited to `main`: a repository setting
 #     this file cannot enforce.
 #
-# ext-builder is not a leg of its own: it is built in the same bake invocation as
-# its version's cli target (scripts/gen_matrix.py's build legs), so the php-build
-# stage (PHP compile plus the PGO passes) is shared. Its image is still tested,
-# pushed by its own digest, merged and signed separately.
+# ext-builder, fpm-slim and cli-slim are not legs of their own. Each is built in the
+# same bake invocation as its host (scripts/gen_matrix.py's build legs: ext-builder
+# with cli, fpm-slim with fpm, cli-slim with cli-builder), so the php-build stage
+# (PHP compile plus the PGO passes) is shared. The rider's image is still tested,
+# pushed by its own digest, merged and signed separately. A leg has at most one
+# rider; the steps below call it the rider and key on rider_flavor. The slim
+# flavors are also checked against their host's image (tests/test-slim-parity.sh:
+# the same php, php-fpm, extension binaries and /usr/local tree).
 #
 # Every third-party action is pinned to a full commit SHA with a version comment;
 # mutable tags have been hijacked before (GHSA-69fq-xp46-6x23). regctl, the one
@@ -121,12 +125,19 @@ env:
   # The image of every docker-container BuildKit builder (setup-buildx-action's
   # default is moby/buildkit:buildx-stable-1 from Docker Hub, unpinned); also read
   # by tests/test-attest.sh.
-  BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.35.0@sha256:aa632b921ef07411d2cb77292cd34213d4f7b384001d6fceef1e1f25bf9752bb
+  BUILDKIT_IMAGE: docker.io/moby/buildkit:v0.35.1@sha256:baf6138eb8c37644800c7c913fba051e840ebb9ba13eaf92d92ef9a1712d0b4c
   # The Trivy release the prepare steps install; the scan steps skip the
   # action's own setup and run it.
   SETUP_TRIVY_VERSION: v0.76.2
   # The Cosign release cosign-installer fetches (its own default is older).
   COSIGN_VERSION: v3.1.4
+  # Control for the Trivy scans: an image's report must list more than this many
+  # OS packages (the "Trivy package floor" steps), so a scan that read no package
+  # database (an empty report passes every gate above it) cannot go green. A
+  # floor, not an expectation: even a slim image carries dozens (wolfi-baselayout,
+  # busybox, bash, glibc and the libraries PHP links), while an unreadable package
+  # database yields none. Every step logs the real count, so tighten it from one.
+  TRIVY_MIN_PACKAGES: "20"
 
 jobs:
   # ------------------------------------------------------------- preflight
@@ -332,9 +343,10 @@ jobs:
   # ----------------------------------------------------------- verify-matrix
   # What the verify job below builds, and on which architectures. A pull
   # request gets the bake `pr` subset (php-7_0-fpm, php-8_2-fpm, php-8_5-fpm,
-  # php-8_5-cli-builder and php-8_5-cli, which carries ext-builder -- oldest and
-  # newest ends, one mid-range version, the heaviest flavor and the extension
-  # build stage) on amd64 only; develop gets every build leg on amd64 and arm64.
+  # php-8_5-cli-builder and php-8_5-cli, which carries ext-builder, plus the slim
+  # riders php-8_5-fpm-slim, php-8_5-cli-slim and php-7_0-fpm-slim -- oldest and
+  # newest ends, one mid-range version, the heaviest flavor, the extension
+  # build stage and both slim flavors) on amd64 only; develop gets every build leg on amd64 and arm64.
   # Both lists come from scripts/gen_matrix.py, the source tests/preflight.sh's
   # bake --print cross-check trusts.
   verify-matrix:
@@ -560,7 +572,7 @@ jobs:
       - name: Smoke test
         run: ./tests/smoke.sh "$TARGET_TAG" "$TARGET_PHP" "$TARGET_FLAVOR"
 
-      - name: Smoke test (ext-builder, built with this leg)
+      - name: Smoke test (rider, built with this leg)
         if: matrix.target.rider_name != ''
         run: ./tests/smoke.sh "$RIDER_TAG" "$TARGET_PHP" "$RIDER_FLAVOR"
 
@@ -583,6 +595,17 @@ jobs:
             --load
           ./tests/test-ext-builder.sh "$TARGET_PHP$suffix"
 
+      # A slim rider must carry the host flavor's PHP byte for byte: same php,
+      # php-fpm and extension binaries, only the root filesystem differs. The
+      # cli-slim rider's host leg builds cli-builder, which is cli plus a toolchain
+      # and its own conf.d/10-php.ini; --full-is-builder accounts for exactly that.
+      - name: Slim parity with its host image
+        if: endsWith(matrix.target.rider_flavor, '-slim')
+        run: |
+          flags=()
+          [ "$RIDER_FLAVOR" != cli-slim ] || flags=(--full-is-builder)
+          ./tests/test-slim-parity.sh "${flags[@]}" "$RIDER_TAG" "$TARGET_TAG"
+
       # A repo-root .trivyignore, if present, is honored automatically.
       - name: Trivy vulnerability gate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -601,7 +624,7 @@ jobs:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
 
-      - name: Trivy vulnerability gate (ext-builder)
+      - name: Trivy vulnerability gate (rider)
         if: matrix.target.rider_name != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -631,6 +654,7 @@ jobs:
           output: ${{ runner.temp }}/kev-target.json
           exit-code: "0"
           scanners: vuln
+          list-all-pkgs: true
           skip-setup-trivy: true
           cache: false
           cache-dir: ${{ github.workspace }}/.cache/trivy
@@ -642,7 +666,7 @@ jobs:
       - name: KEV gate
         run: python3 ci/kev.py "$RUNNER_TEMP/kev-target.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
 
-      - name: Trivy KEV report (ext-builder)
+      - name: Trivy KEV report (rider)
         if: matrix.target.rider_name != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -651,6 +675,7 @@ jobs:
           output: ${{ runner.temp }}/kev-rider.json
           exit-code: "0"
           scanners: vuln
+          list-all-pkgs: true
           skip-setup-trivy: true
           cache: false
           cache-dir: ${{ github.workspace }}/.cache/trivy
@@ -659,9 +684,24 @@ jobs:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
 
-      - name: KEV gate (ext-builder)
+      - name: KEV gate (rider)
         if: matrix.target.rider_name != ''
         run: python3 ci/kev.py "$RUNNER_TEMP/kev-rider.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
+
+      # The control for the gates around it: both reports list every OS package
+      # (list-all-pkgs), and an image whose scan saw TRIVY_MIN_PACKAGES or fewer
+      # fails, so an empty scan cannot pass.
+      - name: Trivy package floor
+        run: |
+          set -euo pipefail
+          for report in kev-target.json ${RIDER_NAME:+kev-rider.json}; do
+            count="$(jq '[.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length' "$RUNNER_TEMP/$report")"
+            echo "$report: $count OS packages (floor: more than $TRIVY_MIN_PACKAGES)"
+            [ "$count" -gt "$TRIVY_MIN_PACKAGES" ] || {
+              echo "FAIL: the Trivy scan behind $report saw $count OS packages; an empty scan proves nothing" >&2
+              exit 1
+            }
+          done
 
       # Docker Scout's "no AGPL v3 licenses" policy. ci/trivy-license.yaml narrows
       # Trivy's forbidden category to the AGPL ids; every other category keeps its
@@ -684,7 +724,7 @@ jobs:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
 
-      - name: Trivy license gate (ext-builder)
+      - name: Trivy license gate (rider)
         if: matrix.target.rider_name != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -705,8 +745,7 @@ jobs:
       # Only reached when the smoke tests and the Trivy, KEV and license gates
       # above passed, so a pushed image is a tested one. Per-arch tag
       # <tag>-<sha>-<arch>; the fpm sibling built for test-ext-builder.sh is not
-      # pushed (the fpm leg pushes its own), the ext-builder that rides on a cli
-      # leg is.
+      # pushed (the fpm leg pushes its own), the rider of a leg is.
       - name: Push the tested image to GHCR (develop)
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/develop'
         run: |
@@ -726,7 +765,7 @@ jobs:
   # succeeded and the run's commit is still the head of develop, so the floating
   # set mixes commits at most inside the short second pass of the script (a
   # cancel or crash there can split it; the prune keeps both sha sets). One job
-  # over all 52 targets, not a matrix: each target is a handful of manifest calls
+  # over all 78 targets, not a matrix: each target is a handful of manifest calls
   # and runners are scarce. A missing arch while verify claims success is a bug
   # and fails the job; after a failed verify leg the missing ones are only
   # reported. The logic is in ci/dev-manifest.sh.
@@ -778,9 +817,9 @@ jobs:
           echo "ok: preflight and every verify leg succeeded"
 
   # -------------------------------------------------------- release-matrix
-  # The full 52-target matrix (scripts/gen_matrix.py --github targets) for the
-  # merge job, and the 39 build legs of it (--github build: ext-builder rides
-  # with its version's cli leg) for the build job. main only: develop's
+  # The full 78-target matrix (scripts/gen_matrix.py --github targets) for the
+  # merge job and the promote job, and the 39 build legs of it (--github build:
+  # ext-builder, fpm-slim and cli-slim ride with a host leg) for the build job. main only: develop's
   # counterpart is verify-matrix.
   release-matrix:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
@@ -1214,7 +1253,7 @@ jobs:
           mkdir -p /tmp/digests
           echo -n "$digest" > "/tmp/digests/$ARCH_NAME"
 
-          # The ext-builder that rode along: its own digest, in its own
+          # The rider (ext-builder, fpm-slim or cli-slim): its own digest, in its own
           # directory so the file can still be named exactly amd64/arm64 (what
           # the merge job cats) without colliding with the leg's own.
           if [ -n "$RIDER_NAME" ]; then
@@ -1237,7 +1276,7 @@ jobs:
       - name: Pull the pushed image back by digest
         run: ./ci/retry.sh docker pull --quiet "${STAGE_IMAGE}@${DIGEST}"
 
-      - name: Pull the pushed ext-builder back by digest
+      - name: Pull the pushed rider back by digest
         if: matrix.target.rider_name != ''
         run: ./ci/retry.sh docker pull --quiet "${STAGE_IMAGE}@${RIDER_DIGEST}"
 
@@ -1249,11 +1288,21 @@ jobs:
           set -euo pipefail
           ./tests/smoke.sh "${STAGE_IMAGE}@${DIGEST}" "$TARGET_PHP" "$TARGET_FLAVOR" 2>&1 | tee "$RUNNER_TEMP/smoke-target.log"
 
-      - name: Smoke test the pushed ext-builder digest
+      - name: Smoke test the pushed rider digest
         if: matrix.target.rider_name != ''
         run: |
           set -euo pipefail
           ./tests/smoke.sh "${STAGE_IMAGE}@${RIDER_DIGEST}" "$TARGET_PHP" "$RIDER_FLAVOR" 2>&1 | tee "$RUNNER_TEMP/smoke-rider.log"
+
+      # The slim rider carries the host flavor's PHP byte for byte (cli-slim's host
+      # leg builds cli-builder: cli plus a toolchain and its own conf.d/10-php.ini,
+      # which --full-is-builder accounts for).
+      - name: Slim parity with its host digest
+        if: endsWith(matrix.target.rider_flavor, '-slim')
+        run: |
+          flags=()
+          [ "$RIDER_FLAVOR" != cli-slim ] || flags=(--full-is-builder)
+          ./tests/test-slim-parity.sh "${flags[@]}" "${STAGE_IMAGE}@${RIDER_DIGEST}" "${STAGE_IMAGE}@${DIGEST}"
 
       # A repo-root .trivyignore is honored automatically. Scans the exact digest
       # that was pushed and will be merged.
@@ -1273,7 +1322,7 @@ jobs:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
 
-      - name: Trivy vulnerability gate (pushed ext-builder digest)
+      - name: Trivy vulnerability gate (pushed rider digest)
         id: trivy_rider
         if: matrix.target.rider_name != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -1300,6 +1349,7 @@ jobs:
           output: ${{ runner.temp }}/kev-target.json
           exit-code: "0"
           scanners: vuln
+          list-all-pkgs: true
           skip-setup-trivy: true
           cache: false
           cache-dir: ${{ github.workspace }}/.cache/trivy
@@ -1310,7 +1360,7 @@ jobs:
       - name: KEV gate (pushed digest)
         run: python3 ci/kev.py "$RUNNER_TEMP/kev-target.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
 
-      - name: Trivy KEV report (pushed ext-builder digest)
+      - name: Trivy KEV report (pushed rider digest)
         if: matrix.target.rider_name != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -1319,6 +1369,7 @@ jobs:
           output: ${{ runner.temp }}/kev-rider.json
           exit-code: "0"
           scanners: vuln
+          list-all-pkgs: true
           skip-setup-trivy: true
           cache: false
           cache-dir: ${{ github.workspace }}/.cache/trivy
@@ -1326,9 +1377,24 @@ jobs:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
 
-      - name: KEV gate (pushed ext-builder digest)
+      - name: KEV gate (pushed rider digest)
         if: matrix.target.rider_name != ''
         run: python3 ci/kev.py "$RUNNER_TEMP/kev-rider.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
+
+      # The control for the gates around it: both reports list every OS package
+      # (list-all-pkgs), and an image whose scan saw TRIVY_MIN_PACKAGES or fewer
+      # fails, so an empty scan cannot pass.
+      - name: Trivy package floor (pushed digests)
+        run: |
+          set -euo pipefail
+          for report in kev-target.json ${RIDER_NAME:+kev-rider.json}; do
+            count="$(jq '[.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length' "$RUNNER_TEMP/$report")"
+            echo "$report: $count OS packages (floor: more than $TRIVY_MIN_PACKAGES)"
+            [ "$count" -gt "$TRIVY_MIN_PACKAGES" ] || {
+              echo "FAIL: the Trivy scan behind $report saw $count OS packages; an empty scan proves nothing" >&2
+              exit 1
+            }
+          done
 
       - name: Trivy license gate (pushed digest)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -1346,7 +1412,7 @@ jobs:
           TRIVY_SKIP_DB_UPDATE: "true"
           TRIVY_SKIP_VERSION_CHECK: "true"
 
-      - name: Trivy license gate (pushed ext-builder digest)
+      - name: Trivy license gate (pushed rider digest)
         if: matrix.target.rider_name != ''
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -1413,7 +1479,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      - name: Upload ext-builder digest
+      - name: Upload rider digest
         if: matrix.target.rider_name != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

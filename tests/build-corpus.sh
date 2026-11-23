@@ -7,21 +7,25 @@
 #   ./tests/build-corpus.sh 8.2       one tier
 #
 # Nothing here pushes; the tags are local labels on the images the training
-# build mounts.
+# build mounts, in the local namespace (tests/matrix-lib.sh: $PHP_LOCAL_REPO-corpus,
+# default lwa-php-local-corpus), never ghcr.io/lotuswebagency/php/corpus:*.
 #
 # Does not stop at the first tier that fails -- same reasoning as
 # tests/build-all.sh: seven tiers is little enough that "which ones broke and
 # how" is more useful than dying on the first one.
 #
-# A tier's real cli-builder (lotuswebagency/php:<floor>-cli-builder) may not exist
+# A tier's real cli-builder (<local repo>:<floor>-cli-builder) may not exist
 # yet -- from a from-zero daemon, none do. It then falls back to an existing
-# bootstrap cli-builder (lotuswebagency/php:<floor>-cli-builder-bootstrap), or
+# bootstrap cli-builder (<local repo>:<floor>-cli-builder-bootstrap), or
 # builds one (docker-bake.hcl's php-cli-builder-bootstrap) when neither exists,
 # rather than skipping the tier.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"
 ONLY_TIER="${1:-}"
+
+# shellcheck source=tests/matrix-lib.sh
+. "${HERE}/matrix-lib.sh"
 
 python3 "${ROOT}/scripts/pgo_tiers.py" check
 
@@ -90,9 +94,21 @@ fi
 results=()  # "tier<TAB>status<TAB>detail" rows, printed as a table at the end
 while IFS=$'\t' read -r tier _release builder tag _versions; do
   [ -z "$ONLY_TIER" ] || [ "$tier" = "$ONLY_TIER" ] || continue
+  builder="$(local_tag "$builder")"
+  tag="$(local_tag "$tag")"
+
+  # Resumable: skip a tier whose corpus image already matches this tree. Checked
+  # before the builder is resolved: an up-to-date corpus (built here, or pulled by
+  # tests/extended.sh pull) needs no cli-builder, so none is bootstrapped for it.
+  label_hash=$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}' "$tag" 2>/dev/null || true)
+  if [ -n "$label_hash" ] && [ "$label_hash" != "<no value>" ] && [ "$label_hash" = "$INPUTS_HASH" ] && have_image "$tag"; then
+    echo "=== tier $tier -> $tag: up to date (inputs-hash matches), skipping"
+    results+=("$tier"$'\t'"skip"$'\t'"up to date")
+    continue
+  fi
 
   # From a daemon with no images at all, $builder (the tier floor's *release*
-  # cli-builder, e.g. lotuswebagency/php:7.0-cli-builder) does not exist either --
+  # cli-builder, e.g. <local repo>:7.0-cli-builder) does not exist either --
   # it is itself a full php build this run should not have to do first.
   # Three-step fallback, cheapest first: the real cli-builder, else a bootstrap
   # cli-builder from an earlier run, else build the bootstrap one now
@@ -100,7 +116,7 @@ while IFS=$'\t' read -r tier _release builder tag _versions; do
   # placeholder corpus in php/pgo/Dockerfile.bootstrap-corpus). Once the tier's
   # real cli-builder is built (tests/build-all.sh phase 2) it wins on the next
   # run: the release image is always preferred over the bootstrap one.
-  bootstrap_tag="lotuswebagency/php:${tier}-cli-builder-bootstrap"
+  bootstrap_tag="$(local_tag "lotuswebagency/php:${tier}-cli-builder-bootstrap")"
   bootstrap_target="php-${tier//./_}-cli-builder-bootstrap"
   if have_builder "$builder"; then
     : # release cli-builder already built -- use it, nothing to do here
@@ -110,20 +126,13 @@ while IFS=$'\t' read -r tier _release builder tag _versions; do
   else
     echo "=== tier $tier: neither $builder nor $bootstrap_tag exist -- bootstrapping $bootstrap_tag"
     if ! (cd "$ROOT" && RETRY_KIND=registry,http RETRY_ATTEMPTS=5 "$ROOT/ci/retry.sh" docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$bootstrap_target" \
-           --set '*.platform='"$PLATFORM" --load); then
+           --set '*.platform='"$PLATFORM" --set "${bootstrap_target}.tags=${bootstrap_tag}" \
+           --set "bootstrap-empty-corpus.tags=$(local_tag lotuswebagency/php:bootstrap-empty-corpus)" --load); then
       echo "=== tier $tier -> $tag: FAIL -- bootstrap build of $bootstrap_tag failed" >&2
       results+=("$tier"$'\t'"FAIL"$'\t'"bootstrap build of $bootstrap_tag failed")
       continue
     fi
     builder="$bootstrap_tag"
-  fi
-
-  # Resumable: skip a tier whose corpus image already matches this tree.
-  label_hash=$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}' "$tag" 2>/dev/null || true)
-  if [ -n "$label_hash" ] && [ "$label_hash" != "<no value>" ] && [ "$label_hash" = "$INPUTS_HASH" ] && have_image "$tag"; then
-    echo "=== tier $tier -> $tag: up to date (inputs-hash matches), skipping"
-    results+=("$tier"$'\t'"skip"$'\t'"up to date")
-    continue
   fi
 
   echo "=== tier $tier -> $tag (from $builder)"

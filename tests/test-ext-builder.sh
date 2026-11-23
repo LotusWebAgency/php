@@ -4,8 +4,9 @@
 #
 #   ./tests/test-ext-builder.sh <php-version>[-v3]        e.g. 8.5 or 8.4-v3
 #
-# Needs lotuswebagency/php:<version>-{ext-builder,fpm,cli}[-v3] in the local
-# daemon (PHP_IMAGE overrides the repository part). What it proves that
+# Needs <local repo>:<version>-{ext-builder,fpm,cli}[-v3] in the local
+# daemon (PHP_IMAGE overrides the repository part; the default is the local
+# repository of tests/matrix-lib.sh). What it proves that
 # smoke.sh, which sees one image at a time, cannot:
 #
 #   - php-config in ext-builder reports the extension_dir the fpm and cli
@@ -20,7 +21,7 @@
 #     -march/-mtune php/cflags.sh passes for v3, and the fixture's compile
 #     lines carry them, so the .so matches the -v3 runtime it is COPYed into.
 #
-# The two derived images are tagged lotuswebagency/php-ext-hello-test:* and
+# The two derived images are tagged <local repo>-ext-hello-test:* and
 # removed again on exit.
 set -euo pipefail
 ARG="${1:?usage: test-ext-builder.sh <php-version>[-v3]}"
@@ -31,12 +32,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 # shellcheck source=tests/docker-lib.sh
 . "$HERE/docker-lib.sh"
-PHP_IMAGE="${PHP_IMAGE:-lotuswebagency/php}"
+# shellcheck source=tests/matrix-lib.sh
+. "$HERE/matrix-lib.sh"
+PHP_IMAGE="${PHP_IMAGE:-$(local_image_repo)}"
 FIXTURE="$HERE/fixtures/ext-hello"
 EXT="$PHP_IMAGE:$VERSION-ext-builder$SUFFIX"
 FPM="$PHP_IMAGE:$VERSION-fpm$SUFFIX"
 CLI="$PHP_IMAGE:$VERSION-cli$SUFFIX"
-DERIVED_REPO="lotuswebagency/php-ext-hello-test"
+DERIVED_REPO="$(local_image_repo)-ext-hello-test"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 # Every container: removed on exit, signal-forwarding init, and the time limit

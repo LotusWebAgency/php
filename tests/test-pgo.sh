@@ -49,6 +49,8 @@ VERSION="${2:?usage: test-pgo.sh <image> <php-version>}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=tests/docker-lib.sh
 . "$HERE/docker-lib.sh"
+# shellcheck source=tests/matrix-lib.sh
+. "$HERE/matrix-lib.sh"
 ROOT="$(cd "${HERE}/.." && pwd)"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -306,7 +308,7 @@ done
 # long as it was compatible -- would look identical.
 if [ "$expect_pgo" = true ]; then
   tier="$(python3 "${ROOT}/scripts/pgo_tiers.py" tier-of "$VERSION")"
-  tag="$(python3 "${ROOT}/scripts/pgo_tiers.py" field "$tier" tag)"
+  tag="$(local_tag "$(python3 "${ROOT}/scripts/pgo_tiers.py" field "$tier" tag)")"
   docker image inspect "$tag" >/dev/null 2>&1 \
     || fail "the tier $tier corpus ($tag) is not present locally; it is required to build this image, so it is required to check it -- ./tests/build-corpus.sh $tier"
   manifest="$(drun --rm "$tag" cat /corpus/MANIFEST)"

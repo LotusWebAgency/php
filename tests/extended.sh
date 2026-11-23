@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # The tests CI does not run, against the images develop CI already tested and
 # pushed to GHCR (ghcr.io/lotuswebagency/php/dev), instead of a from-source
-# rebuild of all 52 targets on this machine.
+# rebuild of all 78 targets on this machine.
 #
-#   tests/extended.sh pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--no-corpus]
+#   tests/extended.sh pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--no-corpus] [--best-effort]
 #   tests/extended.sh uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
 #   tests/extended.sh apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
 #   tests/extended.sh bench [--prepare] [--only V,..] [--flavor F,..]   report only, never fails the run
@@ -20,12 +20,16 @@
 # green develop run promises -- org.opencontainers.image.revision is the full
 # sha, com.lotuswebagency.inputs-hash is this working tree's
 # scripts/inputs-hash.sh, the architecture is the one asked for -- and only
-# then retagged to the canonical lotuswebagency/php:<tag> every other script in
-# this directory expects. Each retag is printed with the image it replaces. The
-# PGO corpus tier of each target is pulled by its hash-pinned tag from
-# $EXTENDED_CORPUS_REPO (also under --latest), checked the same way and tagged as the floating
-# ghcr.io/lotuswebagency/php/corpus:php<tier> that tests/test-pgo.sh reads,
-# which is what ci.yml's verify job does too.
+# then retagged into the local namespace every other script in this directory
+# expects (tests/matrix-lib.sh: $PHP_LOCAL_REPO:<tag>, default
+# lwa-php-local:<tag>; the published lotuswebagency/php:* is never touched). Each
+# retag is printed with the image it replaces. The PGO corpus tier of each
+# target is pulled by its hash-pinned tag from $EXTENDED_CORPUS_REPO (also under
+# --latest), checked the same way and tagged as the floating
+# $PHP_LOCAL_REPO-corpus:php<tier> that tests/test-pgo.sh reads. Under GitHub
+# Actions, or with PHP_LOCAL_REPO set to the empty string, the canonical names
+# are used instead: lotuswebagency/php:<tag> and
+# ghcr.io/lotuswebagency/php/corpus:php<tier>, as ci.yml's verify job tags them.
 #
 # The inputs-hash rule has no override. tests/smoke.sh and tests/test-pgo.sh
 # fail an image whose label disagrees with the tree, and
@@ -37,6 +41,12 @@
 #
 # --no-corpus leaves the corpus tiers out of the pull, for a run that only tests
 # the images (uarch, ext-builder, apps); corpus-tiers and smoke need them.
+#
+# --best-effort turns every refusal into a note and exits 0 (tests/build-all.sh
+# uses it to reuse what develop CI pushed): a ref that is missing, unpullable,
+# of another architecture, or from another tree is not retagged and not an
+# error, and the caller builds it instead. Without it a partial pull stays a
+# failure.
 #
 # --latest pulls the floating <tag> refs (the last fully green develop run)
 # instead, and then requires every pulled image to agree on one revision and to
@@ -95,7 +105,7 @@ usage() {
   cat <<'EOF'
 usage: tests/extended.sh <subcommand> [options]
 
-  pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--jobs N] [--no-corpus]
+  pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--jobs N] [--no-corpus] [--best-effort]
   uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
   apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
   bench [--prepare] [--only V,..] [--flavor F,..]   report only, never fails the run
@@ -104,11 +114,12 @@ usage: tests/extended.sh <subcommand> [options]
   --sha REF          pull: the commit whose images to pull (default: git rev-parse HEAD)
   --latest           pull: the floating tags, i.e. the last fully green develop run
   --only V[,V...]    only these matrix.json versions (repeatable)
-  --flavor F[,F...]  only these flavors: fpm, cli, cli-builder, ext-builder (repeatable)
+  --flavor F[,F...]  only these flavors: fpm, cli, cli-builder, ext-builder, fpm-slim, cli-slim (repeatable)
   --platform P       pull: linux/amd64 or linux/arm64, must be this daemon's architecture
   --jobs N           pull: parallel pulls (default 4)
   --skip-pull        all: do not pull first
   --no-corpus        pull, all: do not pull the PGO corpus tiers (corpus-tiers and smoke need them)
+  --best-effort      pull: a missing or mismatched image is a note, not a failure; exit 0 (the caller builds it)
   --prepare          bench: only pull the official php images the benchmark compares against
 EOF
 }
@@ -132,6 +143,7 @@ LATEST=0
 JOBS=4
 SKIP_PULL=0
 NO_CORPUS=0
+BEST_EFFORT=0
 BENCH_PREPARE=0
 PASSTHRU=()
 while [ "$#" -gt 0 ]; do
@@ -149,6 +161,7 @@ while [ "$#" -gt 0 ]; do
     --latest) LATEST=1; shift ;;
     --skip-pull) SKIP_PULL=1; shift ;;
     --no-corpus) NO_CORPUS=1; shift ;;
+    --best-effort) BEST_EFFORT=1; shift ;;
     --prepare) BENCH_PREPARE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
@@ -166,6 +179,7 @@ case "$CMD" in
        || usage_die "--platform/--sha/--latest/--skip-pull/--no-corpus apply to pull and all only" ;;
 esac
 [ "$CMD" = all ] || [ "$SKIP_PULL" -eq 0 ] || usage_die "--skip-pull applies to all only"
+[ "$CMD" = pull ] || [ "$BEST_EFFORT" -eq 0 ] || usage_die "--best-effort applies to pull only"
 [ "$CMD" = bench ] || [ "$BENCH_PREPARE" -eq 0 ] || usage_die "--prepare applies to bench only"
 { [ "$LATEST" -eq 0 ] || [ -z "$SHA_REF" ]; } || usage_die "--sha and --latest are exclusive"
 
@@ -331,7 +345,7 @@ for _row in "${SELECTED[@]}"; do
 done
 
 # corpus_floating <target-name> -> the floating corpus ref its target mounts.
-corpus_floating() { matrix_target_field "$1" corpus; }
+corpus_floating() { matrix_target_corpus "$1"; }
 
 # ---------------------------------------------------------------------- pull
 PULL_DIR=""
@@ -412,8 +426,13 @@ cmd_pull() {
   [ -n "$PLATFORM" ] || PLATFORM="linux/$HOST_ARCH"
   case "$PLATFORM" in linux/amd64|linux/arm64) ;; *) usage_die "--platform must be linux/amd64 or linux/arm64" ;; esac
   if [ "${PLATFORM#linux/}" != "$HOST_ARCH" ]; then
+    if [ "$BEST_EFFORT" -eq 1 ]; then
+      record pull "$PLATFORM" SKIP 0 "daemon is $HOST_ARCH"
+      echo "note: no images pulled: $PLATFORM images cannot run on this $HOST_ARCH daemon" >&2
+      return 0
+    fi
     record pull "$PLATFORM" REFUSED 0 "daemon is $HOST_ARCH"
-    echo "REFUSED: $PLATFORM images cannot run on this $HOST_ARCH daemon, and retagging them to lotuswebagency/php:* would replace the ones that can. Pull them where the daemon is ${PLATFORM#linux/} (GitHub's runner does)." >&2
+    echo "REFUSED: $PLATFORM images cannot run on this $HOST_ARCH daemon, and retagging them to $(local_image_repo):* would replace the ones that can. Pull them where the daemon is ${PLATFORM#linux/} (GitHub's runner does)." >&2
     return 3
   fi
   SHA_FULL=""
@@ -453,6 +472,11 @@ cmd_pull() {
   pull_one "${keys[0]}" "${refs[0]}" "${kinds[0]}"
   local first_status
   first_status="$(status_of "${keys[0]}")"
+  if [ "$BEST_EFFORT" -eq 1 ] && [ "$first_status" != ok ]; then
+    record pull "${keys[0]}" SKIP 0 "$first_status: $(field_of "${keys[0]}" 2)"
+    echo "note: nothing reused from $DEV_REPO: ${refs[0]} is not usable ($first_status: $(field_of "${keys[0]}" 2)); the selection gets built. Log: $PULL_DIR/${keys[0]}.log" >&2
+    return 0
+  fi
   if [ "$first_status" = MISSING ] || [ "$first_status" = PULL-FAILED ]; then
     record pull "${keys[0]}" "$([ "$first_status" = MISSING ] && echo MISSING || echo FAIL)" 0 "$first_status: $(field_of "${keys[0]}" 2)"
     {
@@ -496,6 +520,11 @@ cmd_pull() {
     revs="$(for ((i = 0; i < ${#keys[@]}; i++)); do
       [ "${kinds[$i]}" = image ] && [ "$(status_of "${keys[$i]}")" = ok ] && field_of "${keys[$i]}" 3
     done | sort -u)"
+    if [ "$(grep -c . <<<"$revs" || true)" -gt 1 ] && [ "$BEST_EFFORT" -eq 1 ]; then
+      record pull "floating tags" SKIP 0 "images disagree on their revision"
+      echo "note: nothing reused: the floating tags name more than one commit" >&2
+      return 0
+    fi
     if [ "$(grep -c . <<<"$revs" || true)" -gt 1 ]; then
       record pull "floating tags" REFUSED 0 "images disagree on their revision"
       echo "REFUSED: the floating tags name more than one commit (a develop run was mid-publish, or one target is behind):" >&2
@@ -527,12 +556,18 @@ cmd_pull() {
     printf '%-30s %-18s %s\n' "${keys[$i]}" "$st" "$(field_of "${keys[$i]}" 2)"
     if [ "$st" != ok ]; then
       bad=$((bad + 1))
-      record pull "${keys[$i]}" "$([ "$st" = MISSING ] && echo MISSING || echo FAIL)" 0 "$st: $(field_of "${keys[$i]}" 2)"
+      if [ "$BEST_EFFORT" -eq 1 ]; then
+        record pull "${keys[$i]}" SKIP 0 "$st: $(field_of "${keys[$i]}" 2)"
+      else
+        record pull "${keys[$i]}" "$([ "$st" = MISSING ] && echo MISSING || echo FAIL)" 0 "$st: $(field_of "${keys[$i]}" 2)"
+      fi
     fi
   done
   if [ "$bad" -eq 0 ]; then
     echo "PULL COMPLETE: ${#keys[@]}/${#keys[@]} (${#SELECTED[@]} images, $((${#keys[@]} - ${#SELECTED[@]})) corpus tiers)"
     record pull "${#keys[@]} refs" ok 0 "$PLATFORM"
+  elif [ "$BEST_EFFORT" -eq 1 ]; then
+    echo "PULL PARTIAL (best effort): $bad of ${#keys[@]} refs not usable (see above), $n retagged; the rest gets built"
   else
     echo "PULL INCOMPLETE: $bad of ${#keys[@]} refs not usable (see above); $n retagged" >&2
   fi
@@ -590,6 +625,7 @@ cmd_corpus_tiers() {
     for v in "${tier_versions[@]}"; do [ -z "${fpm_sel[$v]:-}" ] || in_sel+=("$v"); done
     [ "${#in_sel[@]}" -gt 0 ] || continue
     touched=1
+    ctag="$(local_tag "$ctag")"
     partial=0
     [ "${#in_sel[@]}" -eq "${#tier_versions[@]}" ] || partial=1
     sel_fpm=()
@@ -599,8 +635,8 @@ cmd_corpus_tiers() {
     # used as if it proved something.
     control="$(python3 "$ROOT/scripts/pgo_tiers.py" control-of "$floor")"
     control_img=()
-    if [ -n "$control" ] && [ "$(image_state "lotuswebagency/php:$control-fpm")" != missing ]; then
-      control_img=("lotuswebagency/php:$control-fpm")
+    if [ -n "$control" ] && [ "$(image_state "$(local_image_repo):$control-fpm")" != missing ]; then
+      control_img=("$(local_image_repo):$control-fpm")
     fi
     gate corpus-tiers "tier $floor" "$ctag" "${sel_fpm[@]}" "${control_img[@]}" || continue
     if [ "$partial" -eq 1 ]; then
@@ -609,7 +645,7 @@ cmd_corpus_tiers() {
       # selection (a stale one fails the replay, or proves nothing).
       for v in "${tier_versions[@]}"; do
         [ -z "${fpm_sel[$v]:-}" ] || continue
-        e="lotuswebagency/php:$v-fpm"
+        e="$(local_image_repo):$v-fpm"
         [ "$(image_state "$e")" = missing ] \
           || echo "    note: $e is outside the selection but present, and test-corpus-tiers.sh replays it anyway ($(image_state "$e"))"
       done
@@ -668,8 +704,8 @@ apps_run() {  # apps_run <stock 0|1>
       tags+=("$tag")
       gate apps "$tag" "$tag" || bad=1
     done
-    # Without this run-matrix.sh would docker-pull a missing lotuswebagency/php:*
-    # tag from Docker Hub and test whatever answers.
+    # Without this run-matrix.sh would docker-pull a missing image from the
+    # registry and test whatever answers.
     [ "$bad" -eq 0 ] || { echo "--- apps: NOT RUN, images above are missing or stale"; return 0; }
     note_revisions "${tags[@]}"
   fi

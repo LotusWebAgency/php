@@ -57,7 +57,7 @@ echo "$mods" | grep -qi snuffleupagus && fail "loaded by default"
 echo "ok: disabled by default"
 
 for rs in default laravel wordpress prestashop; do
-  docker run --rm "$IMAGE" test -f "/usr/local/etc/php/snuffleupagus/${rs}.rules" \
+  docker run --rm "$IMAGE" busybox test -f "/usr/local/etc/php/snuffleupagus/${rs}.rules" \
     || fail "missing ruleset: $rs"
 done
 echo "ok: all four rulesets present"
@@ -427,7 +427,8 @@ echo "ok: wordpress.rules ships upstream's defaults with no additional directive
 # container is gone.
 SRV_LOG_FILE="/tmp/sp-srv-logs.$$"
 # Removed on exit: each srv() call overwrites the file, so the last one would leak.
-trap 'rm -f "$SRV_LOG_FILE"' EXIT
+# srv() names its container sp-upload-e2e-$$; an abort mid-call must not leave it running.
+trap 'rm -f "$SRV_LOG_FILE"; docker rm -f "sp-upload-e2e-$$" >/dev/null 2>&1 || true' EXIT
 
 # Callers that need a different form shape (array, nested or empty file fields) set
 # SRV_FORM to the curl arguments replacing the default `-F f=@$2` and SRV_QUERY to the
@@ -672,7 +673,7 @@ echo "ok: sp-upload-check validates archive integrity, not just magic bytes"
 # bomb below decompresses to 5GB, so the timeout fires well before a legitimate small
 # plugin/module zip's sub-second validation would.
 dos_check=$(docker run --rm --entrypoint sh -e ARCHIVE_CHECK_TIMEOUT=1 "$IMAGE" -c '
-  dd if=/dev/zero bs=1M count=5000 2>/dev/null | gzip -9 > /tmp/sp-bomb.gz
+  busybox dd if=/dev/zero bs=1M count=5000 2>/dev/null | gzip -9 > /tmp/sp-bomb.gz
   /usr/local/bin/sp-upload-check /tmp/sp-bomb.gz
   echo "rc=$?"
 ' 2>&1)
@@ -685,7 +686,7 @@ echo "ok: sp-upload-check bounds archive-validation CPU cost with a timeout"
 unreadable_check=$(docker run --rm --user root --entrypoint sh "$IMAGE" -c '
   touch /tmp/sp-noperm.php
   chmod 000 /tmp/sp-noperm.php
-  su -s /bin/sh www-data -c "/usr/local/bin/sp-upload-check /tmp/sp-noperm.php"
+  busybox su -s /bin/sh www-data -c "/usr/local/bin/sp-upload-check /tmp/sp-noperm.php"
   echo "rc=$?"
 ')
 echo "$unreadable_check" | grep -q "rc=1" || fail "sp-upload-check did not fail closed on an unreadable file: $unreadable_check"

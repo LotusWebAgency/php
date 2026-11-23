@@ -1,0 +1,9 @@
+bash
+bunzip2
+bzcat
+bzip2
+tini
+unxz
+unzip
+xz
+xzcat

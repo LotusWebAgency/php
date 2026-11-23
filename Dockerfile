@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
 # One Dockerfile for every published tag; docker-bake.hcl feeds it the matrix.
-ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:71f52fd289650f1d021d60ba11235550b1b5ce124f3797bd254ca70c4cef39f9
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:be019c1c74fe69204a42c4e10bc4d886a49bf5403ffa74374ef7baa408fc9a26
 ARG PHP_ERA=modern
 # Declared before any FROM so `FROM toolchain-select-${COMPILER}` can resolve it.
 # The toolchain-base stage redeclares it for use inside the stage.
@@ -9,6 +9,12 @@ ARG COMPILER=clang
 # TARGETARCH is the platform arg BuildKit sets for each platform of a multi-platform build.
 ARG UARCH=baseline
 ARG TARGETARCH
+
+# Which OS layer the runtime stages sit on: full (the Wolfi base plus the tools
+# below) or slim (a separate root filesystem without the native tooling). Used
+# only in the FROM of runtime-base, so php-build and the payload stages stay
+# shared; the fpm-slim and cli-slim targets need RUNTIME_OS=slim.
+ARG RUNTIME_OS=full
 
 # --- toolchain ---
 # Busybox's raw-socket and interface applets have no job in a PHP runtime and only
@@ -600,11 +606,10 @@ RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
       [ "$(head -c 4 "/usr/bin/$b" | tail -c 3)" = ELF ] || { echo "$b is not a native binary" >&2; exit 1; }; \
     done
 
-# --- runtime-base ---
-FROM ${BASE_IMAGE} AS runtime-base
-ARG PHP_VERSION
-ARG WWW_UID=33
-ARG WWW_GID=33
+# --- runtime-os-full ---
+# The OS half of the full flavors: the Wolfi base plus the shared tools and the
+# MariaDB and PostgreSQL clients.
+FROM ${BASE_IMAGE} AS runtime-os-full
 # Client packages for the PostgreSQL major whose libpq links OpenSSL 4, like
 # everything else PHP loads; 17's libpq and libldap-2.6 pull OpenSSL 3 in beside it.
 ARG PG_MAJOR=18
@@ -669,6 +674,76 @@ RUN set -eux; \
     for p in caching_sha2_password sha256_password client_ed25519 parsec dialog mysql_clear_password; do \
       test -f "/usr/lib/mariadb-13.1/plugin/$p.so"; \
     done
+
+# --- runtime-rootfs-slim ---
+# Build-only: the slim OS as a separate root filesystem. Deleting files in a later
+# layer would leave apk, curl and the clients in the lower ones, so the packages go
+# into an empty root with `apk add --root` and runtime-os-slim copies it out. The
+# package list is runtime-os-full's minus apk, curl, less, nano, procps, zip,
+# zstd, the MariaDB and PostgreSQL clients; unzip, bzip2 and xz stay because
+# sp-upload-check needs them and busybox has no xz applet. The apk database and
+# /etc/os-release are kept so scanners can still read the package inventory.
+# root gets /bin/sh as its shell (the ash link is gone) and the nonroot user 65532
+# that the full flavors inherit from wolfi-base is added.
+FROM ${BASE_IMAGE} AS runtime-rootfs-slim
+COPY --from=php-build /tmp/runtime-packages.txt /tmp/runtime-packages.txt
+ARG WOLFI_INDEX_STATE=""
+RUN set -eux; \
+    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}"; \
+    echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories; \
+    apk add --root /out --initdb --no-cache \
+      --keys-dir /etc/apk/keys --repositories-file /etc/apk/repositories \
+      wolfi-baselayout busybox bash tini tzdata ca-certificates-bundle glibc-iconv \
+      libldap-2.7 bzip2 unzip xz \
+      $(tr '\n' ' ' < /tmp/runtime-packages.txt); \
+    find /out -xdev -perm /6000 -type f -exec chmod a-s {} +; \
+    test -s /out/lib/apk/db/installed; \
+    test -s /out/etc/os-release
+# Native tools are an allowlist, not a delete list: the packages above pull in
+# executables nobody asked for (openssl, the libmemcached clients, ziptool,
+# xsltproc, the libtiff tools, gdbmtool, iconv, ldconfig, ...), and a package added
+# later must not bring its tools along silently. /out/bin, /out/sbin and
+# /out/usr/sbin are symlinks into /out/usr/bin. What stays is the busybox binary and
+# its applet links (scripts/slim-finalize.sh prunes those to its own list) and the
+# names in scripts/slim-native-keep.txt.
+RUN --mount=type=bind,source=scripts/slim-native-keep.txt,target=/tmp/slim-native-keep.txt \
+    set -eux; \
+    for link in /out/bin /out/sbin /out/usr/sbin; do test -L "$link"; done; \
+    keep=" busybox $(tr '\n' ' ' < /tmp/slim-native-keep.txt)"; \
+    for entry in /out/usr/bin/* /out/usr/bin/.[!.]*; do \
+      [ -e "$entry" ] || [ -L "$entry" ] || continue; \
+      name="${entry##*/}"; \
+      case "$keep" in *" $name "*) continue ;; esac; \
+      case "$(readlink "$entry" || true)" in *busybox) continue ;; esac; \
+      rm -rf "$entry"; \
+    done; \
+    for name in $keep; do test -e "/out/usr/bin/$name"; done; \
+    sed -i 's|^root:\(.*\):/bin/ash$|root:\1:/bin/sh|' /out/etc/passwd; \
+    sed -i '\|^/bin/ash$|d' /out/etc/shells; \
+    grep -qx 'root:x:0:0:root:/root:/bin/sh' /out/etc/passwd; \
+    grep -qx /bin/sh /out/etc/shells; \
+    echo 'nonroot:x:65532:65532:Account created by apko:/home/nonroot:/bin/sh' >> /out/etc/passwd; \
+    echo 'nonroot:x:65532:' >> /out/etc/group; \
+    mkdir -p /out/home/nonroot; \
+    chown 65532:65532 /out/home/nonroot; \
+    chmod 700 /out/home/nonroot
+
+# --- runtime-os-slim ---
+# The base image's config (PATH, the CA bundle path) plus the UTF-8 locale
+# runtime-os-full sets.
+FROM scratch AS runtime-os-slim
+COPY --from=runtime-rootfs-slim /out /
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    LANG=C.UTF-8
+
+# --- runtime-base ---
+# The OS layer (full or slim) with php-build's output on top; every flavor starts
+# here.
+FROM runtime-os-${RUNTIME_OS} AS runtime-base
+ARG PHP_VERSION
+ARG WWW_UID=33
+ARG WWW_GID=33
 
 # php-build's output, then the baked config, as two layers (see runtime-payload).
 # The config layer stays last so a config edit never re-ships the binaries.
@@ -817,6 +892,25 @@ FROM runtime-base AS cli
 COPY conf/php-cli.ini /usr/local/etc/php/conf.d/10-php.ini
 USER www-data
 CMD ["php", "-a"]
+
+# The slim flavors rebase fpm and cli on runtime-os-slim (build with
+# RUNTIME_OS=slim) and trim what is left: scripts/slim-finalize.sh refuses an image
+# that still has apk, prunes the busybox applets and strips setuid bits. It runs
+# last so the shared stages above keep adduser, install and find. Bind-mounted, so
+# the script is in no layer.
+FROM fpm AS fpm-slim
+USER root
+RUN --mount=type=bind,source=scripts/slim-finalize.sh,target=/tmp/slim-finalize.sh \
+    --mount=type=bind,source=scripts/slim-native-keep.txt,target=/tmp/slim-native-keep.txt \
+    bash /tmp/slim-finalize.sh
+USER www-data
+
+FROM cli AS cli-slim
+USER root
+RUN --mount=type=bind,source=scripts/slim-finalize.sh,target=/tmp/slim-finalize.sh \
+    --mount=type=bind,source=scripts/slim-native-keep.txt,target=/tmp/slim-native-keep.txt \
+    bash /tmp/slim-finalize.sh
+USER www-data
 
 # npm and semantic-release as one tree for cli-builder, installed under /usr/local
 # so the apk-managed Node (nodejs-26, /usr/bin/node) carries no npm of its own and

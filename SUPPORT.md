@@ -1,7 +1,7 @@
 # Support and lifecycle
 
-Every PHP version ships four flavors (`fpm`, `cli`, `cli-builder`, `ext-builder`) for `linux/amd64`
-and `linux/arm64`. Tag shapes, flavors and configuration are in [README.md](README.md).
+Every PHP version ships six flavors (`fpm`, `cli`, `cli-builder`, `ext-builder`, `fpm-slim`,
+`cli-slim`) for `linux/amd64` and `linux/arm64`. Tag shapes, flavors and configuration are in [README.md](README.md).
 
 ## Version matrix
 

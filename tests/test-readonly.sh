@@ -41,7 +41,7 @@ RO_EXEC=(--read-only --tmpfs /tmp:exec -m 512m)
 WRITE_ERR='read-only file system|permission denied|failed to open stream|unable to (create|write|open)|cannot (create|open|write)|EROFS'
 
 EXTDIR=$(drun --rm "$IMAGE" timeout 20 php -r 'echo ini_get("extension_dir");')
-has_ext() { drun --rm "$IMAGE" timeout 20 test -f "${EXTDIR}/$1.so"; }
+has_ext() { drun --rm "$IMAGE" timeout 20 busybox test -f "${EXTDIR}/$1.so"; }
 
 # Every flavor, every combination: refusing loudly is the documented failure
 # mode when there is nowhere to put the env-driven ini. Control for everything

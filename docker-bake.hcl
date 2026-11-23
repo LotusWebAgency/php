@@ -92,6 +92,10 @@ target "php" {
     NM_COMPILER     = item.compiler == "gcc" ? "nm" : "llvm-nm"
     PGO         = item.pgo
     ICU_VERSION = item.icu
+    # full (every flavor but the -slim ones) or slim: which root filesystem the
+    # Dockerfile's runtime-base stage builds on (a global ARG, used only in FROM, so
+    # php-build and the payload stages are shared by every flavor).
+    RUNTIME_OS  = item.runtime_os
   }
   # The PGO training corpus for this version's tier, mounted by the Dockerfile's
   # php-build stage. item.corpus comes from scripts/gen_matrix.py: a version maps
@@ -110,11 +114,16 @@ target "php" {
     "com.lotuswebagency.compiler"    = item.compiler
     "com.lotuswebagency.support"     = item.support
     "com.lotuswebagency.eol-date"    = item.eol_date
+    "com.lotuswebagency.runtime-os"  = item.runtime_os
     "org.opencontainers.image.title" = "lotuswebagency/php ${item.php}-${item.flavor}"
+    # The slim flavors say what they drop: the description is what registries show.
     "org.opencontainers.image.description" = item.support == "end-of-life" ? format(
-      "PHP %s (%s) compiled from source with profile-guided optimization, hardened, on Wolfi. PHP %s reached end of life on %s and receives no upstream security fixes -- see the README for supported versions.",
-      item.php, item.flavor, item.php, item.eol_date
-    ) : "PHP ${item.php} (${item.flavor}) compiled from source with profile-guided optimization, hardened, on Wolfi."
+      "PHP %s (%s) compiled from source with profile-guided optimization, hardened, on Wolfi.%s PHP %s reached end of life on %s and receives no upstream security fixes -- see the README for supported versions.",
+      item.php, item.flavor, item.runtime_os == "slim" ? " Slim runtime: no package manager, curl or database client tools." : "", item.php, item.eol_date
+    ) : format(
+      "PHP %s (%s) compiled from source with profile-guided optimization, hardened, on Wolfi.%s",
+      item.php, item.flavor, item.runtime_os == "slim" ? " Slim runtime: no package manager, curl or database client tools." : ""
+    )
   }
   tags       = item.tags
   platforms  = item.platforms
@@ -133,11 +142,12 @@ group "default" {
 }
 
 # The PR subset: both ends of the range, where breakage concentrates, one
-# mid-range version, the heaviest flavor, and cli plus ext-builder (one CI leg,
-# so one php-build). Mirrors PR_SUBSET in scripts/gen_matrix.py, which
+# mid-range version, the heaviest flavor, cli plus ext-builder (one CI leg, so one
+# php-build), and the slim flavors on the ends (a slim rides its host's leg).
+# Mirrors PR_SUBSET in scripts/gen_matrix.py, which
 # tests/preflight.sh cross-checks.
 group "pr" {
-  targets = ["php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm", "php-8_5-cli-builder", "php-8_5-cli", "php-8_5-ext-builder"]
+  targets = ["php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm", "php-8_5-cli-builder", "php-8_5-cli", "php-8_5-ext-builder", "php-8_5-fpm-slim", "php-8_5-cli-slim", "php-7_0-fpm-slim"]
 }
 
 # ------------------------------------------------------------------ bootstrap
