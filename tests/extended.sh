@@ -625,6 +625,7 @@ cmd_corpus_tiers() {
     for v in "${tier_versions[@]}"; do [ -z "${fpm_sel[$v]:-}" ] || in_sel+=("$v"); done
     [ "${#in_sel[@]}" -gt 0 ] || continue
     touched=1
+    ctag="$(local_tag "$ctag")"
     partial=0
     [ "${#in_sel[@]}" -eq "${#tier_versions[@]}" ] || partial=1
     sel_fpm=()
