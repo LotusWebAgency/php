@@ -870,7 +870,7 @@ arm64 runners and pushes the ones that pass to `ghcr.io/lotuswebagency/php/dev` 
 builds (pruned after 14 days by `dev-prune.yml`); it never touches Docker Hub. A pull request from
 `develop` to `main` is the release: merging it builds, tests, signs and attests every image in the
 GHCR staging repository, copies each signed manifest list to Docker Hub with its signatures and
-attestations, and only then moves the tags. A weekly rebuild (Mondays 04:10 UTC) runs on `main`.
+attestations, and only then moves the tags. A weekly rebuild (Mondays 19:10 UTC) runs on `main`.
 Only the promotion and the description-sync jobs use the Docker Hub credentials, both in the
 `release` deployment environment on `main`. Cadence is in [SUPPORT.md](SUPPORT.md), the controls in
 [SECURITY.md](SECURITY.md).

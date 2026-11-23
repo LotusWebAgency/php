@@ -102,7 +102,7 @@ on:
     # cache ref includes an ISO-week component (docker-bake.hcl's CACHE_WEEK)
     # so this run always starts the runtime-package layer's cache scope
     # empty instead of replaying last week's apk add forever.
-    - cron: "10 4 * * 1"
+    - cron: "10 19 * * 1"
 
 concurrency:
   group: ci-${{ github.ref }}
