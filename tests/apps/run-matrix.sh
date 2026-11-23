@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the application suites across the whole matrix.
 #
-#   ./tests/apps/run-matrix.sh                    every built lotuswebagency/php target
+#   ./tests/apps/run-matrix.sh                    every built target (local names, tests/matrix-lib.sh)
 #   ./tests/apps/run-matrix.sh --only 8.4,8.5 --flavor fpm
 #   ./tests/apps/run-matrix.sh --stock            the stock baseline: every
 #                                                 version of APPTEST_BUILDER_REPO,
@@ -31,6 +31,8 @@
 set -euo pipefail
 # shellcheck source=tests/apps/lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+# shellcheck source=tests/matrix-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/matrix-lib.sh"
 
 STOCK=0
 JOBS=3
@@ -75,7 +77,7 @@ else
     [ -z "$FLAVORS" ] || [[ ",$FLAVORS," == *",$flavor,"* ]] || continue
     # ext-builder is a flavor of the matrix with no app suites.
     case "$flavor" in fpm|cli|cli-builder) ;; *) continue ;; esac
-    PLAN+=("$tag $flavor $php $variant")
+    PLAN+=("$(local_tag "$tag") $flavor $php $variant")
   done < <(cd "$APPTEST_REPO" && python3 scripts/gen_matrix.py --github targets | python3 -c '
 import json, sys
 for t in json.load(sys.stdin)["include"]:

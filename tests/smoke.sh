@@ -1150,7 +1150,7 @@ esac
 # an executable stack or a writable GOT in any one of them is the whole
 # process's problem.
 hard_dir=$(mktemp -d)
-trap 'docker rm -f "$cid" >/dev/null 2>&1 || true; rm -f "$tmp_php"; rm -rf "$hard_dir"' EXIT
+trap 'docker rm -f "$cid" ${hcid:+"$hcid"} >/dev/null 2>&1 || true; rm -f "$tmp_php"; rm -rf "$hard_dir"' EXIT
 hcid=$(docker create --pull never "$IMAGE")
 docker cp "$hcid:/usr/local/bin/php" "$hard_dir/php" >/dev/null
 docker cp "$hcid:/usr/local/lib/php-chmod-sanitize.so" "$hard_dir/php-chmod-sanitize.so" >/dev/null
@@ -1713,7 +1713,13 @@ fi
 # SMOKE_SKIP_PGO is the explicit escape hatch for a bootstrap image built with
 # PGO=false ahead of what matrix.json says for it (a cli-builder built to seed
 # the very corpus PGO training needs).
-if [ "${SMOKE_SKIP_PGO:-}" = "1" ]; then
+# An image built by tests/build-all.sh --no-pgo carries com.lotuswebagency.pgo=false
+# (published and CI images carry no such label): it is a dev build that never
+# trained a profile, so the PGO assertions cannot hold and are skipped, loudly.
+pgo_label=$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.pgo"}}' "$IMAGE" 2>/dev/null || true)
+if [ "$pgo_label" = "false" ]; then
+  echo "SKIP (no-pgo dev build): $IMAGE is labeled com.lotuswebagency.pgo=false -- PGO check (test-pgo.sh) not run; this image is not release evidence" >&2
+elif [ "${SMOKE_SKIP_PGO:-}" = "1" ]; then
   echo "WARNING: PGO check skipped because SMOKE_SKIP_PGO=1 -- only meant for a known-bootstrap image that predates matrix.json's current pgo setting." >&2
 elif [ "$PGO" = true ]; then
   bash "$HERE/test-pgo.sh" "$IMAGE" "$EXPECT"

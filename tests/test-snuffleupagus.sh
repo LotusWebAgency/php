@@ -427,7 +427,8 @@ echo "ok: wordpress.rules ships upstream's defaults with no additional directive
 # container is gone.
 SRV_LOG_FILE="/tmp/sp-srv-logs.$$"
 # Removed on exit: each srv() call overwrites the file, so the last one would leak.
-trap 'rm -f "$SRV_LOG_FILE"' EXIT
+# srv() names its container sp-upload-e2e-$$; an abort mid-call must not leave it running.
+trap 'rm -f "$SRV_LOG_FILE"; docker rm -f "sp-upload-e2e-$$" >/dev/null 2>&1 || true' EXIT
 
 # Callers that need a different form shape (array, nested or empty file fields) set
 # SRV_FORM to the curl arguments replacing the default `-F f=@$2` and SRV_QUERY to the
