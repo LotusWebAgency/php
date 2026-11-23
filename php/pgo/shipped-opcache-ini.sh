@@ -14,6 +14,10 @@
 # for interned strings" at startup. 7.0-7.2 images exited 254 before accepting a
 # connection. 16 is still twice opcache's default of 8.
 #
+# PHP 8.0 ships with the JIT disabled: its tracing JIT segfaults workers in
+# generated code under real applications, and 8.0 is end of life, so no upstream
+# fix is coming. The entrypoint's generated ini defaults to the same.
+#
 # Guarded on both sides: `sed` exits 0 whether or not it matched, so a reworded
 # conf/opcache.ini would silently turn the clamp into a no-op.
 set -eu
@@ -32,6 +36,14 @@ case "$version" in
     grep -qx 'opcache.interned_strings_buffer = 16' "$destination" \
       || { echo "FATAL: interned strings clamp did not apply" >&2; exit 1; }
     echo "ok: clamped interned_strings_buffer to 16 for php $version" >&2
+    ;;
+  8.0)
+    grep -qx 'opcache.jit = tracing' "$source_ini" \
+      || { echo "FATAL: $source_ini no longer sets opcache.jit = tracing; the 8.0 JIT override is dead" >&2; exit 1; }
+    sed 's/^opcache.jit = tracing$/opcache.jit = disable/' "$source_ini" > "$destination"
+    grep -qx 'opcache.jit = disable' "$destination" \
+      || { echo "FATAL: 8.0 JIT override did not apply" >&2; exit 1; }
+    echo "ok: disabled the JIT for php $version" >&2
     ;;
   *)
     cp "$source_ini" "$destination"
