@@ -14,6 +14,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"
 cd "$ROOT" || exit 1
+# shellcheck source=tests/matrix-lib.sh
+. "${HERE}/matrix-lib.sh"
 
 FAILED=()
 section() { echo; echo "=== $*"; }
@@ -252,7 +254,7 @@ m = json.load(open("matrix.json"))
 for v in sorted(m["versions"], key=lambda s: tuple(int(x) for x in s.split("."))):
     print(v, m["versions"][v]["compiler"])
 ' | while read -r v want; do
-  tag="lotuswebagency/php:${v}-fpm"
+  tag="$(local_image_repo):${v}-fpm"
   label="$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.compiler"}}' "$tag" 2>/dev/null || true)"
   if [ -z "$label" ] || [ "$label" = "<no value>" ]; then
     if docker image inspect "$tag" >/dev/null 2>&1; then

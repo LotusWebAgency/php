@@ -805,19 +805,33 @@ the Dockerfile. Every build mounts its tier's PGO corpus image, so build the cor
 ```sh
 python3 scripts/gen_matrix.py          # after editing matrix.json
 ./tests/preflight.sh                   # matrix drift, PGO tiers, shellcheck, unit tests; no build
-./tests/build-corpus.sh                # PGO corpus images, every tier
 
+# The usual way: corpus tiers, images, smoke and ext-builder tests, resumable.
+./tests/build-all.sh --only 8.5 --flavor cli   # also --platform, --dry-run
+./tests/build-all.sh --no-reuse        # build everything, pull nothing from GHCR
+./tests/build-all.sh --no-pgo --only 8.5   # dev shortcut: no PGO, no corpus phase; not a release gate
+
+# One piece at a time, under the local names described below.
+./tests/build-corpus.sh                # PGO corpus images, every tier
 # bake auto-loads only docker-bake.hcl; the targets are in matrix.gen.hcl.
 # Pin one platform, or arm64 builds under QEMU.
 INPUTS_HASH="$(./scripts/inputs-hash.sh)" \
 docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl php-8_5-fpm \
-  --set '*.platform=linux/amd64' --load            # one target (use `pr` for the PR subset)
+  --set '*.platform=linux/amd64' --set 'php-8_5-fpm.tags=lwa-php-local:8.5-fpm' \
+  --set 'php-8_5-fpm.contexts.corpus=docker-image://lwa-php-local-corpus:php8.5' --load
 
-./tests/smoke.sh lotuswebagency/php:8.5-fpm 8.5 fpm
-./tests/test-pgo.sh lotuswebagency/php:8.5-fpm 8.5
+./tests/smoke.sh lwa-php-local:8.5-fpm 8.5 fpm
+./tests/test-pgo.sh lwa-php-local:8.5-fpm 8.5
 ./tests/test-ext-builder.sh 8.5        # needs that version's ext-builder, fpm and cli images (8.4-v3: the -v3 trio)
-./tests/build-all.sh                   # every target, resumable; --only, --flavor, --platform, --dry-run
 ```
+
+Local runs never create or retag `lotuswebagency/php:*` or `ghcr.io/lotuswebagency/php/corpus:*`.
+Images go under `$PHP_LOCAL_REPO` (default `lwa-php-local`), corpus tiers under
+`$PHP_LOCAL_REPO-corpus`, `--no-pgo` images under `$PHP_LOCAL_REPO-nopgo`; the mapping is in
+`tests/matrix-lib.sh`. By default `build-all.sh` first pulls what a `develop` run pushed to GHCR for
+this tree (host architecture only) and builds only what is missing or differs. A `--no-pgo` image
+carries `com.lotuswebagency.pgo=false`; `smoke.sh` skips the PGO checks for it with a
+`SKIP (no-pgo dev build)` line and enforces everything else.
 
 `tests/smoke.sh` fails an image whose `com.lotuswebagency.inputs-hash` label does not match the
 working tree's `scripts/inputs-hash.sh` output, because a green result on a stale image proves
@@ -839,8 +853,9 @@ tests/extended.sh pull && tests/extended.sh all
 tests/extended.sh pull --only 8.4,8.5 --flavor fpm,cli
 ```
 
-`pull` refuses images whose inputs hash differs from your working tree and prints the
-`git worktree add` command that fixes it. Only your daemon's architecture can be tested locally.
+`pull` retags into the local namespace, refuses images whose inputs hash differs from your working
+tree and prints the `git worktree add` command that fixes it (`--best-effort` turns refusals into
+notes and exits 0; `build-all.sh` uses it). Only your daemon's architecture can be tested locally.
 `tests/extended.sh --help` lists the subcommands. The same suites run on native amd64 and arm64
 runners through `gh workflow run extended.yml --ref develop` (inputs `sha`, `only`, `flavor`, `apps`,
 `bench`).

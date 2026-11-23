@@ -28,10 +28,12 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"
 ONLY_TIER="${1:-}"
+# shellcheck source=tests/matrix-lib.sh
+. "${HERE}/matrix-lib.sh"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-image_of() { echo "lotuswebagency/php:${1}-fpm"; }
+image_of() { echo "$(local_image_repo):${1}-fpm"; }
 
 # start_database <corpus-image> -> sets CORPUS_DB to a sidecar container;
 # stop_database removes it.
@@ -50,7 +52,13 @@ stop_database() {
   [ -z "$CORPUS_DB" ] || docker rm -f "$CORPUS_DB" >/dev/null 2>&1 || true
   CORPUS_DB=""
 }
-trap stop_database EXIT
+# The replay volumes of the tier in progress go too, however the script ends.
+VOLUMES=()
+cleanup() {
+  stop_database
+  [ "${#VOLUMES[@]}" -eq 0 ] || docker volume rm -f "${VOLUMES[@]}" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 
 start_database() {
   local _
@@ -93,11 +101,13 @@ run_corpus() {
 
 while IFS=$'\t' read -r tier _release _builder tag versions; do
   [ -z "$ONLY_TIER" ] || [ "$tier" = "$ONLY_TIER" ] || continue
+  tag="$(local_tag "$tag")"
 
   docker image inspect "$tag" >/dev/null 2>&1 || fail "$tag has not been built"
 
   corpus_vol="corpus-test-${tier//./_}"
   src_vol="corpus-test-src-${tier//./_}"
+  VOLUMES=("$corpus_vol" "$src_vol")
   docker volume rm -f "$corpus_vol" "$src_vol" >/dev/null 2>&1 || true
   docker volume create "$corpus_vol" >/dev/null
   docker volume create "$src_vol" >/dev/null
@@ -173,6 +183,7 @@ $(diff <(echo "$built_manifest") <(echo "$fresh") || true)"
   fi
 
   docker volume rm -f "$corpus_vol" "$src_vol" >/dev/null
+  VOLUMES=()
 done < <(python3 "${ROOT}/scripts/pgo_tiers.py" list)
 
 echo "CORPUS TIER TESTS PASSED"

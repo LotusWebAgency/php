@@ -12,7 +12,44 @@
 #   matrix_ext_versions    ext-builder end-to-end cases (8.5, 8.4-v3, ...) whose ext-builder, fpm and cli are all SELECTED
 #   matrix_ext_target      <case> <flavor> -> the target name of that case's flavor
 #   matrix_target_field    <target-name> <field> -> that field of the target, e.g. corpus
+#   matrix_target_corpus   <target-name> -> the local ref of the corpus tier that target mounts
+#   local_image_repo       the repository local runs tag the php images under
+#   local_corpus_repo      the repository local runs tag the PGO corpus tiers under
+#   local_tag              <canonical ref> -> the local ref (lotuswebagency/php:X, the corpus refs)
 #
+# Local namespace. A local run never creates, retags or deletes the published
+# names (lotuswebagency/php:*, ghcr.io/lotuswebagency/php/corpus:*): the images
+# are tagged under $PHP_LOCAL_REPO (default lwa-php-local), the corpus tiers
+# under $PHP_LOCAL_REPO-corpus, and a --no-pgo build under $PHP_LOCAL_REPO-nopgo
+# (PHP_LOCAL_NOPGO=1, set by tests/build-all.sh). PHP_LOCAL_REPO set to the empty
+# string keeps the canonical names; that is also the default under GitHub
+# Actions, whose jobs build, check and push the published names themselves.
+if [ -z "${PHP_LOCAL_REPO+x}" ]; then
+  if [ "${GITHUB_ACTIONS:-}" = true ]; then PHP_LOCAL_REPO=""; else PHP_LOCAL_REPO="lwa-php-local"; fi
+fi
+
+local_image_repo() {
+  if [ -z "$PHP_LOCAL_REPO" ]; then
+    echo "lotuswebagency/php"
+  elif [ "${PHP_LOCAL_NOPGO:-0}" = 1 ]; then
+    echo "$PHP_LOCAL_REPO-nopgo"
+  else
+    echo "$PHP_LOCAL_REPO"
+  fi
+}
+
+local_corpus_repo() {
+  if [ -z "$PHP_LOCAL_REPO" ]; then echo "ghcr.io/lotuswebagency/php/corpus"; else echo "$PHP_LOCAL_REPO-corpus"; fi
+}
+
+local_tag() {
+  case "$1" in
+    ghcr.io/lotuswebagency/php/corpus:*) echo "$(local_corpus_repo):${1#*:}" ;;
+    lotuswebagency/php:*) echo "$(local_image_repo):${1#*:}" ;;
+    *) echo "$1" ;;
+  esac
+}
+
 # Versions and flavors come from matrix.json, never a literal list here --
 # same reasoning as smoke.sh deriving its expected extension set instead of
 # naming it: a list copied into a script would keep passing while silently not
@@ -54,9 +91,9 @@ matrix_validate_selection() {
   done
 }
 
-# One line per selected target: name<TAB>flavor<TAB>php<TAB>tag (the first,
-# canonical tag -- the one the inputs-hash label check and tests/smoke.sh both
-# key off of).
+# One line per selected target: name<TAB>flavor<TAB>php<TAB>tag (the first
+# tag, mapped into the local namespace -- the one the inputs-hash label check
+# and tests/smoke.sh both key off of).
 matrix_select() {
   ONLY_CSV="$(IFS=,; echo "${ONLY[*]:-}")"
   FLAVOR_CSV="$(IFS=,; echo "${FLAVORS[*]:-}")"
@@ -75,6 +112,11 @@ for t in data["include"]:
     print("\t".join([t["name"], t["flavor"], t["php"], t["tags"][0]]))
 ' "$TARGETS_JSON" "$ONLY_CSV" "$FLAVOR_CSV")
   [ "${#SELECTED[@]}" -gt 0 ] || { echo "FAIL: no target matched --only/--flavor"; exit 1; }
+  local i name flavor php tag
+  for i in "${!SELECTED[@]}"; do
+    IFS=$'\t' read -r name flavor php tag <<<"${SELECTED[$i]}"
+    SELECTED[i]="$name"$'\t'"$flavor"$'\t'"$php"$'\t'"$(local_tag "$tag")"
+  done
 }
 
 # matrix_ext_versions -> the cases (one per line) whose ext-builder, fpm and cli
@@ -116,3 +158,5 @@ for t in json.loads(sys.argv[1])["include"]:
         break
 ' "$TARGETS_JSON" "$1" "$2"
 }
+
+matrix_target_corpus() { local_tag "$(matrix_target_field "$1" corpus)"; }
