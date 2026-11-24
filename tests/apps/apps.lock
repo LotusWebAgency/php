@@ -12,8 +12,8 @@
 # the 7.0/7.1 fixtures install with it; everything else uses current 2.x.
 #
 # name            set   version     sha256                                                            url
-composer-lts      -     2.2.32      241a3d13b7c6d35d970b1f69a000298b66943541302148a438a932f5dd44a9fc  https://getcomposer.org/download/2.2.32/composer.phar
-composer          -     2.11.2      dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028  https://getcomposer.org/download/2.11.2/composer.phar
+composer-lts      -     2.2.33      3f0f2015a715f39cf0d8f9fd14ff5f9c675d965bd042301ea18b20b95f565423  https://getcomposer.org/download/2.2.33/composer.phar
+composer          -     2.11.3      04f8b003da4e3a2459056591fbfebd02b4dc3e5adeb158616b90cf55a65113ec  https://getcomposer.org/download/2.11.3/composer.phar
 #
 # PrestaShop: two sources, by release. 9.2.1 has no zip anywhere, so its tree comes
 # from the vendor's own Docker image (the sha256 column of a prestashop-image row is
@@ -24,7 +24,7 @@ composer          -     2.11.2      dd158c0afd41d15fac89e1b4e47b5d42911fe316c368
 # index.php and a readme; 1.6 is a flat zip with a prestashop/ directory) that build.sh
 # unpacks. 1.7 to 8.2 carry vendor/ and composer.lock (1.6 has neither); the tree is the
 # release, not an image built on top of it.
-prestashop-image     9.2  9.2.1  281466ae3666736867107e91d93d8cf47658373ca160f632076d09da305012ca  docker://prestashop/prestashop:9.2.1-8.1
+prestashop-image     9.2  9.2.1  bfe62297c2b52344c679eaf74f9dfde26ab6a6db2d33dc7cdc692e554d51120a  docker://prestashop/prestashop:9.2.1-8.1
 # The installer downloads the en-US pack even for English, with no offline path.
 # Upstream re-exports these zips in place with every release, so the lang rows
 # are `latest`: fetch.sh checks the zip's shape (en-US/*.xlf only) instead of a
@@ -50,8 +50,8 @@ prestashop-composer  1.7  1.7.8.11  e93e62f2f853ead75d5a0d514e18a714f1df75f965fc
 # 1.6: the only PrestaShop that runs on php 7.0 -- no 1.7 release supports it. No prestashop-lang row (1.6 installs English from its own tree) and no prestashop-composer row (1.6 has no
 # composer.json or lock).
 prestashop-zip       1.6  1.6.1.24  4d8991fbad38766baee66793b52f586e48eadc79d68c0a5fc81830bdb38bb00e  https://github.com/PrestaShop/PrestaShop/releases/download/1.6.1.24/prestashop_1.6.1.24.zip
-# WordPress: the newest patch of each line in tests/apps/sets; 4.9.35 runs
-# on php 7.0/7.2, 5.9.20 on 7.0/8.1, 6.9.12 on 7.2/8.5, 7.1.5 on 7.4 up to 8.5 (hashes checked against the .sha1 that
+# WordPress: the newest patch of each line in tests/apps/sets; 4.9.36 runs
+# on php 7.0/7.2, 5.9.21 on 7.0/8.1, 6.9.12 on 7.2/8.5, 7.1.5 on 7.4 up to 8.5 (hashes checked against the .sha1 that
 # wordpress.org serves next to each tarball). wp-cli 2.12.0 (phar) runs on php 5.6+.
 #
 # Every set also carries WooCommerce, Akismet, Contact Form 7, Yoast SEO, Classic Editor, Wordfence, WPForms Lite,
@@ -62,7 +62,7 @@ prestashop-zip       1.6  1.6.1.24  4d8991fbad38766baee66793b52f586e48eadc79d68c
 # set's php-min -- the PHP the fixture is built on. No plugin lacks a release for any set.
 wp-cli           -     2.12.0      ce34ddd838f7351d6759068d09793f26755463b4a4610a5a5c0a97b68220d85c  https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar
 # 7.1 / php 7.4 .. 8.5. WooCommerce 11.3.1 is tested up to WP 7.1; Akismet 5.7.2, Contact Form 7 6.1.7 (6.2.x wants WP 7.1 and PHP 8.3),
-# Yoast SEO 28.9 (PHP 7.4) and WPForms Lite 2.0.5.1 are the newest releases that declare PHP <= 7.4.
+# Yoast SEO 28.9 (PHP 7.4) and WPForms Lite 2.0.5.2 are the newest releases that declare PHP <= 7.4.
 wordpress        7.1   7.1.5       053857d980eaee8702c617c685948becb9be2523ba0dcbc98e4dbb2300367c79  https://wordpress.org/wordpress-7.1.5.tar.gz
 woocommerce              7.1   11.3.1      1502600c738840f7f9ebfa2f11e1aaff087221a5fc5a2006c51be2d874ae2a09  https://downloads.wordpress.org/plugin/woocommerce.11.3.1.zip
 akismet                  7.1   5.7.2       e76d9ad61b95fb36c99b580e23c23e16a2cf9fd8483baa16d756d47f1994126d  https://downloads.wordpress.org/plugin/akismet.5.7.2.zip
@@ -70,7 +70,7 @@ contact-form-7           7.1   6.1.7       aedc5cc878e1e62187882286e0711168491d7
 wordpress-seo            7.1   28.9        1f1af9d3dff70288b37e6edc04e27cff4979b258f62960c0b91c092614bf2301  https://downloads.wordpress.org/plugin/wordpress-seo.28.9.zip
 classic-editor           7.1   1.7.0       7cc7799b0b7d820fbb7528dbff8027c736e52513992416cb37279f44d3d9dd77  https://downloads.wordpress.org/plugin/classic-editor.1.7.0.zip
 wordfence                7.1   9.1.1       51acb206ebaef1756e03112df81c749a70e4086d1a71b6e3426373e393880ad1  https://downloads.wordpress.org/plugin/wordfence.9.1.1.zip
-wpforms-lite             7.1   2.0.5.1     bb43f472001d629f88760bd40237a02c8f70fb0550d2e82ce1d3c666c3d5fec2  https://downloads.wordpress.org/plugin/wpforms-lite.2.0.5.1.zip
+wpforms-lite             7.1   2.0.5.2     48bc21d8bd0c95627eaf82cb973e4410b2ab6420ccbdd509ab6b7c30e6139f2e  https://downloads.wordpress.org/plugin/wpforms-lite.2.0.5.2.zip
 all-in-one-wp-migration  7.1   7.113       69d8369ac615fee1706340710bc2ff240a4f1fa18687107b613db773a6435a22  https://downloads.wordpress.org/plugin/all-in-one-wp-migration.7.113.zip
 redis-cache              7.1   3.0.1       8de85553394c4462dd43d38a403b805e8fb404d7dc34e02ecd313ea37002196b  https://downloads.wordpress.org/plugin/redis-cache.3.0.1.zip
 # 6.9 / php 7.2 (8.5 too). WooCommerce 7.6.2 is the newest with a 7.2 header (7.7 wants 7.3). Contact Form 7 5.7.7
@@ -89,7 +89,7 @@ redis-cache              6.9   3.0.1       8de85553394c4462dd43d38a403b805e8fb40
 # 5.9 / php 7.0 (8.1 too). WooCommerce 6.4.2 (header: WP 5.7, PHP 7.0; 6.5 wants PHP 7.2), Akismet 5.3.7 (5.4 wants
 # PHP 7.2), Contact Form 7 5.6.4 (5.7 says WP 6.0), Yoast SEO 19.13 (20.0 says WP 6.0), WPForms Lite 1.9.2.3 (1.9.3
 # wants PHP 7.1). Wordfence, Classic Editor and All-in-One WP Migration as in 4.9. Redis Object Cache 2.0.26, see 4.9.
-wordpress        5.9   5.9.20      9e184b54a551f38abe91d3350d557f61d70102c95f9a435df1505c3effc3eb32  https://wordpress.org/wordpress-5.9.20.tar.gz
+wordpress        5.9   5.9.21      a9ebb511925b4b2bdc9874b1a276657cd20b3a05dd73a4747d7adb11d81fc5b9  https://wordpress.org/wordpress-5.9.21.tar.gz
 woocommerce              5.9   6.4.2       dc74b250df1114f2b9a0a7ce090cd9aea905eb1999947c4abfe08fe1c17a575c  https://downloads.wordpress.org/plugin/woocommerce.6.4.2.zip
 akismet                  5.9   5.3.7       56173d4282dbb58265f54c721306ff6098c1816bed73e8a0441c32f985dda8b0  https://downloads.wordpress.org/plugin/akismet.5.3.7.zip
 contact-form-7           5.9   5.6.4       696ab06e037205c89f99438078885239bad19cd8c05ec5efb60580cb604cccfb  https://downloads.wordpress.org/plugin/contact-form-7.5.6.4.zip
@@ -108,7 +108,7 @@ redis-cache              5.9   2.0.26      c881088286ccb789a307313a79d67fac0ec83
 # which 4.9 does not have, so POST /wp/v2/users is a fatal there (measured on 4.9.33); 8.1.0 is the newest without it. Redis Object Cache 2.0.26 (Requires PHP 5.6): 2.1.0 is the last that declares PHP 7.0 but is broken on
 # WordPress 6.5 (its add_multiple(), which core calls from 6.0, leaves the result `true` in the runtime cache instead
 # of the value, so cold-cache page loads 404/500); the two old sets run the release that is known good.
-wordpress        4.9   4.9.35      b7fe4dbae1712ab012a901466148f970f81f461ffa9168b0903c7064810bb55e  https://wordpress.org/wordpress-4.9.35.tar.gz
+wordpress        4.9   4.9.36      80d7d1f7ab93f70e0b1f40113da6a7bf7495ba0b3012bea5857635eed8d8b9e8  https://wordpress.org/wordpress-4.9.36.tar.gz
 woocommerce              4.9   3.8.3       30c8a8041d7a17eca351e99944593c4054fe178b209bcb5c3b861752decd84e7  https://downloads.wordpress.org/plugin/woocommerce.3.8.3.zip
 akismet                  4.9   4.1.12      e44be7ddbc3f21ef63d729e75ee5855f617ddc276e97e2dbe0c8463004b9ba91  https://downloads.wordpress.org/plugin/akismet.4.1.12.zip
 contact-form-7           4.9   5.1.9       5bc4636eabebee54bd00e696f60b570753bb339efd6b4421a35b4380bf114bab  https://downloads.wordpress.org/plugin/contact-form-7.5.1.9.zip

@@ -19,7 +19,7 @@ APPTEST_BUILDER_REPO="${APPTEST_BUILDER_REPO:-dementev/php-fpm-with-ext}"
 # The fixture image is this MariaDB plus the populated datadir and the app
 # tree. Pinned by digest: a fixture has to be rebuilt deliberately, never
 # because a tag moved under it.
-APPTEST_DB_IMAGE="mariadb:11.8@sha256:d36f18d65a0459510b8b0f643b226a6d299e3206486e2b64ff20754a6d291707"
+APPTEST_DB_IMAGE="mariadb:11.8@sha256:e1d5495f445654134f226f55a41ce0da227116f6f27f283101f405c794d841fc"
 APPTEST_DB_DATADIR=/var/lib/mysql-fixture
 APPTEST_DB_PASSWORD=apptest
 # The same server flags at build time and at test time, so the fixture's
@@ -38,8 +38,8 @@ APPTEST_DB_ARGS=(
 
 # Side services, pinned the same way. compose.yml reads them from the
 # environment run.sh exports, so this is the only place they are named.
-export APPTEST_WEB_IMAGE="nginx:1.30-alpine@sha256:901e593c95dc85f5a729f5765516321366ef4ac401821431d408897e95287d0a"
-export APPTEST_REDIS_IMAGE="redis:8-alpine@sha256:7958cfbb9d152f87dadfbc89f1b0b15938f0b81ff8982feb327476f4911935c3"
+export APPTEST_WEB_IMAGE="nginx:1.30-alpine@sha256:8eb2b5540eae779603cc3db84b3986a15ecb5308b54303146eee9837c137b51a"
+export APPTEST_REDIS_IMAGE="redis:8-alpine@sha256:5af80107c1eeecb484a2269b80a26d12bfa6521787da4663bd9f19f60a163483"
 export APPTEST_MEMCACHED_IMAGE="memcached:1.6-alpine@sha256:084fb554292d1447bc2c68b80c2331b98834514f56c866bc21a61be3c2ee376d"
 apptest_service_image() {
   case "$1" in

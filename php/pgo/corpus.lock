@@ -65,12 +65,12 @@
 #     not re-resolvable from a version tag like every other row here.
 #
 # tier  name          version        sha256 (image digest)                                            url (docker tag, for reference -- not what is fetched)
-8.5     prestashop    9.2.1          39135963babf5b529a3b8f1f79cd00fc5a05f5e2be470759d04356b0a57ec4b9  docker://prestashop/prestashop:9.2.1-8.2
-8.4     prestashop    8.2.9          5a70694c5d0eb194b1d7f6e48ac68f786e7c3e8d5b0f9ef67baa5cda3f1e90de  docker://prestashop/prestashop:8.2.9-7.2-fpm
-8.2     prestashop    8.2.9          5a70694c5d0eb194b1d7f6e48ac68f786e7c3e8d5b0f9ef67baa5cda3f1e90de  docker://prestashop/prestashop:8.2.9-7.2-fpm
-8.1     prestashop    8.2.9          5a70694c5d0eb194b1d7f6e48ac68f786e7c3e8d5b0f9ef67baa5cda3f1e90de  docker://prestashop/prestashop:8.2.9-7.2-fpm
-7.2     prestashop    8.2.9          5a70694c5d0eb194b1d7f6e48ac68f786e7c3e8d5b0f9ef67baa5cda3f1e90de  docker://prestashop/prestashop:8.2.9-7.2-fpm
-7.1     prestashop    1.7.8.11       35d83e335c408afe87e18f828477a72ff9fa12d220fcedb81815df5a001edbd8  docker://prestashop/prestashop:1.7.8.11-7.1-fpm
+8.5     prestashop    9.2.1          dcd61a4691eb6d18736dd9068d6a6f385b044b793eab55bbaec9b3a4c58d1b9d  docker://prestashop/prestashop:9.2.1-8.2
+8.4     prestashop    8.2.9          cd68c2d36e26b26be014f94ba296cd42ed5a5965fce41d1e9b49eacc8ab42d17  docker://prestashop/prestashop:8.2.9-7.2-fpm
+8.2     prestashop    8.2.9          cd68c2d36e26b26be014f94ba296cd42ed5a5965fce41d1e9b49eacc8ab42d17  docker://prestashop/prestashop:8.2.9-7.2-fpm
+8.1     prestashop    8.2.9          cd68c2d36e26b26be014f94ba296cd42ed5a5965fce41d1e9b49eacc8ab42d17  docker://prestashop/prestashop:8.2.9-7.2-fpm
+7.2     prestashop    8.2.9          cd68c2d36e26b26be014f94ba296cd42ed5a5965fce41d1e9b49eacc8ab42d17  docker://prestashop/prestashop:8.2.9-7.2-fpm
+7.1     prestashop    1.7.8.11       6317c533a8921745a6fd68b092617d8cee201d1bce7632c6b6da81eea208b051  docker://prestashop/prestashop:1.7.8.11-7.1-fpm
 7.0     prestashop    1.6.1.24       fd757ab1a4847abc053f19dfbf0f4885ffbf4fc06b02bce04035f30c952e234f  docker://prestashop/prestashop:1.6-7.0-fpm
 #
 # prestashop-lang: the CLI install's English language step is not
@@ -147,8 +147,8 @@
 7.2     wordpress     6.9.12    9a3c0b04cb05186f6b2cad955bd6b0d709ea21985476c8ace425ffd336fcb513  https://wordpress.org/wordpress-6.9.12.tar.gz
 7.2     wp-sqlite     2.2.23    44be096a14ebcea424b5e4bf764436ec85fb067f74ab47822c4c5346df21591e  https://downloads.wordpress.org/plugin/sqlite-database-integration.2.2.23.zip
 7.1     laravel-app   5.8.35    f88d0c8c74c0fade17323fbc2b2d95905af15a7249b25922efa7ec166b244723  https://github.com/laravel/laravel/archive/refs/tags/v5.8.35.tar.gz
-7.1     wordpress     6.5.14    cacde7e7b5721ea31fa5acf3d7e549037d6f1db1f0b50bab8bb449a1bcc9ae3d  https://wordpress.org/wordpress-6.5.14.tar.gz
+7.1     wordpress     6.5.15    3f7eabe7cb040eb44990ad037623c5001f37db6bcb2f2973556ae3cce6dde2bf  https://wordpress.org/wordpress-6.5.15.tar.gz
 7.1     wp-sqlite     2.1.16    ccc69cada05983e6c2dac8c0962b548c437b4c96c00ea41b0e130fc128671391  https://downloads.wordpress.org/plugin/sqlite-database-integration.2.1.16.zip
 7.0     laravel-app   5.5.28    17264762d343bbb23cd8ddc7427e58bb1ba4d484de0c1d48eb45d32526999878  https://github.com/laravel/laravel/archive/refs/tags/v5.5.28.tar.gz
-7.0     wordpress     6.5.14    cacde7e7b5721ea31fa5acf3d7e549037d6f1db1f0b50bab8bb449a1bcc9ae3d  https://wordpress.org/wordpress-6.5.14.tar.gz
+7.0     wordpress     6.5.15    3f7eabe7cb040eb44990ad037623c5001f37db6bcb2f2973556ae3cce6dde2bf  https://wordpress.org/wordpress-6.5.15.tar.gz
 7.0     wp-sqlite     2.1.16    ccc69cada05983e6c2dac8c0962b548c437b4c96c00ea41b0e130fc128671391  https://downloads.wordpress.org/plugin/sqlite-database-integration.2.1.16.zip

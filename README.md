@@ -709,8 +709,8 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
   | 8.2 | 8.2, 8.3 | 8.2.9 | 12.12.2 | 7 | 7.1.5 | none |
   | 8.1 | 8.1 | 8.2.9 | 10.3.3 | 6.4 | 7.1.5 | none |
   | 7.2 | 7.2-8.0 | 8.2.9 | 6.20.1 | 5.4 | 6.9.12 | none |
-  | 7.1 | 7.1 | 1.7.8.11 | 5.8.35 | 4.4 | 6.5.14 | none |
-  | 7.0 | 7.0 | 1.6.1.24 | 5.5.28 | 3.4 | 6.5.14 | none |
+  | 7.1 | 7.1 | 1.7.8.11 | 5.8.35 | 4.4 | 6.5.15 | none |
+  | 7.0 | 7.0 | 1.6.1.24 | 5.5.28 | 3.4 | 6.5.15 | none |
 
 - **Pinned sources.** Every fetched tarball is verified by sha256 (`deps/fetch-verified.sh`). PHP
   releases are also GPG-verified against php.net's release keys (`php/release-keys.asc`); PECL
