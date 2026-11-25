@@ -26,7 +26,7 @@ redis@7.2     6.0.2     01aeccb0e14f897fe56f0509be6e6991ff0ad459f9d34e95e4556d02
 redis@7.3     6.0.2     01aeccb0e14f897fe56f0509be6e6991ff0ad459f9d34e95e4556d02699b9a03  7.2.0    -
 memcached     3.4.0     c163434eb0da97c8f45c7ad41d979d381f8b81c49402b1b90b063987fb37972e  7.0.0    -
 apcu          5.1.28    ca9c1820810a168786f8048a4c3f8c9e3fd941407ad1553259fb2e30b5f057bf  7.0.0    -
-zstd          0.18.0    223d0f77eb5a5e73cf5e7a0652dd8fde7ffdcc843e7f30eeb3998283dec847b9  7.0      -
+zstd          0.19.0    46592a6576c2f42927659dd00dc6c3f39f1fcae7374e95e1f4e11f8ce4f477fc  7.0      -
 imagick       3.8.1     3a3587c0a524c17d0dad9673a160b90cd776e836838474e173b549ed864352ee  5.6.0    -
 # Shared PECL extensions: the latest stable release on pecl.php.net when pinned;
 # sha256 computed locally against the fetched tarball (pecl.php.net does not
