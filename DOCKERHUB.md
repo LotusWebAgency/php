@@ -48,7 +48,7 @@ interpreter (8.1 and below) gets no upstream security fixes. Policy:
 - mysqli/PDO support `caching_sha2_password` from 7.4. 7.1-7.3 need `mysql_native_password`
   accounts on MySQL 8 and cannot reach MySQL 9. 7.0 also needs the server's default plugin set to
   `mysql_native_password`. 7.0 and 7.1 speak TLS 1.0 only, which MySQL 8.4 and MariaDB 11 refuse.
-- No JIT below 8.0 (8.0: amd64 only, off by default). `-v3` tags are 8.4 and 8.5 only.
+- No JIT below 8.0 (8.0: amd64 only). `-v3` tags are 8.4 and 8.5 only.
 
 Every caveat and workaround: [Older PHP versions](https://github.com/LotusWebAgency/php/blob/main/README.md#older-php-versions).
 
@@ -179,7 +179,7 @@ variable that is set but empty, or contains a newline, stops the container with 
 | `PHP_OPCACHE_INTERNED_STRINGS` | opcache memory / 8, 8-32 MB (max half of it, even when set; 7.0-7.2: a fifth, max 16) | `opcache.interned_strings_buffer` |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS`, `PHP_OPCACHE_REVALIDATE_FREQ` | `1`, `2` | Set validation to `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
-| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing` (8.0: `disable`), `64M` | PHP 8.1+, and 8.0 on amd64 (8.0 on arm64 has no JIT). |
+| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing` (8.0, 8.1: `disable`), `64M` | PHP 8.1+, and 8.0 on amd64 (8.0 on arm64 has no JIT). |
 | `PHP_OPCACHE_HUGE_CODE_PAGES`, `PHP_ZEND_ALLOC_HUGE_PAGES` | off | `true` sets `opcache.huge_code_pages=1` / `USE_ZEND_ALLOC_HUGE_PAGES=1`. The host needs transparent huge pages in `madvise` or `always` mode; [details](https://github.com/LotusWebAgency/php#configuration). |
 | `PHP_EXT_ENABLE` | unset | Comma-separated shared extensions to load, for example `ldap,uuid`. |
 | `PHP_SNUFFLEUPAGUS` | unset | `default`, `wordpress`, `prestashop`, `laravel`, or a custom ruleset name. |

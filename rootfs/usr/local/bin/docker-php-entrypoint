@@ -433,12 +433,13 @@ if [ "$CONF_WRITABLE" = 1 ]; then
     echo "opcache.validate_timestamps=${PHP_OPCACHE_VALIDATE_TIMESTAMPS:-1}"
     echo "opcache.revalidate_freq=${PHP_OPCACHE_REVALIDATE_FREQ:-2}"
     [ -n "${PHP_OPCACHE_PRELOAD:-}" ] && echo "opcache.preload=${PHP_OPCACHE_PRELOAD}"
-    # JIT does not exist before 8.0; the directives are unknown there. 8.0's
-    # tracing JIT crashes workers (SIGSEGV in generated code) and gets no upstream
-    # fixes, so it defaults to off there; PHP_OPCACHE_JIT still opts in.
+    # JIT does not exist before 8.0; the directives are unknown there. The
+    # tracing JIT of 8.0 and 8.1 crashes workers (SIGSEGV in generated code) and
+    # gets no upstream fixes, so it defaults to off there; PHP_OPCACHE_JIT still
+    # opts in.
     if [ "${PHP_MAJOR_MINOR%%.*}" -ge 8 ]; then
       jit_default=tracing
-      [ "$PHP_MAJOR_MINOR" = 8.0 ] && jit_default=disable
+      case "$PHP_MAJOR_MINOR" in 8.0|8.1) jit_default=disable ;; esac
       echo "opcache.jit=${PHP_OPCACHE_JIT:-$jit_default}"
       echo "opcache.jit_buffer_size=${PHP_OPCACHE_JIT_BUFFER:-64M}"
     fi

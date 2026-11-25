@@ -109,8 +109,8 @@ These caveats apply to the end-of-life tags. PHP 8.2 and later have none of them
   The MariaDB command-line tools are the same in every tag and have none of these limits.
 - **Extensions.** `pcov` needs 7.1+, `sodium` and `snuffleupagus` 7.2+, `ffi` 7.4+, `mongodb`
   8.1+, `protobuf` and `swoole` 8.2+. `mcrypt` and `xmlrpc` ship on 7.x only.
-- **JIT.** PHP 8.1+ has it on both architectures, 8.0 on amd64 only. On 8.0 it is off by default:
-  its tracing JIT crashes workers under real applications and gets no upstream fixes;
+- **JIT.** PHP 8.1+ has it on both architectures, 8.0 on amd64 only. On 8.0 and 8.1 it is off by
+  default: their tracing JIT crashes workers under real applications and gets no upstream fixes;
   `PHP_OPCACHE_JIT=tracing` turns it on. Below 8.0 there is no JIT, so
   `PHP_OPCACHE_JIT` and `PHP_OPCACHE_JIT_BUFFER` have no effect.
 - **Locale.** Under a non-UTF-8 `LC_CTYPE`, PHP 7.x's `basename()` and `pathinfo()` drop multibyte
@@ -284,7 +284,7 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS` | `1` | `opcache.validate_timestamps`. Set `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_REVALIDATE_FREQ` | `2` | `opcache.revalidate_freq` |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
-| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing` (8.0: `disable`), `64M` | `opcache.jit`, `opcache.jit_buffer_size`. PHP 8.1+, and 8.0 on amd64. 8.0 on arm64 has no JIT: its opcache builds one for x86 only. |
+| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing` (8.0, 8.1: `disable`), `64M` | `opcache.jit`, `opcache.jit_buffer_size`. PHP 8.1+, and 8.0 on amd64. 8.0 on arm64 has no JIT: its opcache builds one for x86 only. |
 | `PHP_OPCACHE_HUGE_CODE_PAGES` | off | `1`, `true`, `yes` or `on` sets `opcache.huge_code_pages=1`. `0`, `false`, `no`, `off` leave it off. Anything else is refused. See the huge pages paragraph below. |
 | `PHP_ZEND_ALLOC_HUGE_PAGES` | off | Same spellings. On exports `USE_ZEND_ALLOC_HUGE_PAGES=1`, which php-fpm passes to its workers. |
 | `PHP_EXT_ENABLE` | unset | Comma-separated shared extensions to load. See [Extensions](#extensions). |
@@ -900,7 +900,7 @@ Only the promotion and the description-sync jobs use the Docker Hub credentials,
 - **`disable_functions`:** the predecessor's default also disabled `proc_open`, `proc_close`,
   `proc_get_status`, `proc_nice`, `proc_terminate` and `highlight_file`. Here they stay enabled.
   `PHP_DISABLE_FUNCTIONS` adds to the baked list instead of replacing it.
-- **JIT:** on by default here (`opcache.jit=tracing`) on 8.1+, off in the predecessor and on 8.0. Set
+- **JIT:** on by default here (`opcache.jit=tracing`) on 8.2+, off in the predecessor and on 8.0 and 8.1. Set
   `PHP_OPCACHE_JIT=off` if your application has not been checked against it.
 - **Healthcheck:** one pool only, via `PHP_FPM_LISTEN` and `/fpm-ping`. The predecessor's
   `FPM_HEALTH_PORTS` has no equivalent.

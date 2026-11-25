@@ -1055,13 +1055,13 @@ php_major="${RELEASE%%.*}"
 if [ "$IMAGE_ARCH" = arm64 ] && [ "$EXPECT" = "8.0" ]; then
   [ "$on" = "on:jit=0" ] || { echo "FAIL: PHP 8.0 on arm64 reports a running JIT, but 8.0's opcache builds none for aarch64: $on"; exit 1; }
   echo "ok: JIT not available on PHP 8.0/arm64 (8.0's JIT is x86-only; aarch64 support arrived in 8.1)"
-elif [ "$EXPECT" = "8.0" ]; then
-  # 8.0 ships with opcache.jit=disable (php/pgo/shipped-opcache-ini.sh): off by
-  # default, still available on request.
-  [ "$on" = "on:jit=0" ] || { echo "FAIL: PHP 8.0 runs the JIT by default, but its shipped ini disables it: $on"; exit 1; }
+elif [ "$EXPECT" = "8.0" ] || [ "$EXPECT" = "8.1" ]; then
+  # 8.0 and 8.1 ship with opcache.jit=disable (php/pgo/shipped-opcache-ini.sh): off
+  # by default, still available on request.
+  [ "$on" = "on:jit=0" ] || { echo "FAIL: PHP $EXPECT runs the JIT by default, but its shipped ini disables it: $on"; exit 1; }
   optin=$(drun --rm "$IMAGE" php -d opcache.enable_cli=1 -d opcache.jit=tracing -d opcache.jit_buffer_size=16M -r '$s = opcache_get_status(false); echo !empty($s["jit"]["on"]) ? "1" : "0";')
-  [ "$optin" = "1" ] || { echo "FAIL: PHP 8.0/amd64 JIT does not start when opted in with opcache.jit=tracing: $optin"; exit 1; }
-  echo "ok: JIT off by default on PHP 8.0, starts when opted in"
+  [ "$optin" = "1" ] || { echo "FAIL: PHP $EXPECT/$IMAGE_ARCH JIT does not start when opted in with opcache.jit=tracing: $optin"; exit 1; }
+  echo "ok: JIT off by default on PHP $EXPECT, starts when opted in"
 elif [ "$php_major" -ge 8 ]; then
   [ "$on" = "on:jit=1" ] || { echo "FAIL: opcache activated but JIT is not actually running -- PHP $EXPECT should support it: $on"; exit 1; }
   echo "ok: JIT active on PHP $EXPECT when opcache is enabled"
