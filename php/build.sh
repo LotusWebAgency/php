@@ -461,7 +461,7 @@ php_set_pass_flags() {
   export LDFLAGS="$BASE_LDFLAGS${2:+ $2}"
 }
 
-# assert_profile_reached_the_link <yes|no> <binary> [<binary>...]
+# assert_profile_reached_the_link <yes|no> <floor percent> <binary> [<binary>...]
 #
 # "The build printed no errors" cannot tell a profile-guided link apart from one
 # where the profile was generated, merged, and never consumed (ccache serving
@@ -478,6 +478,12 @@ php_set_pass_flags() {
 # recorded into the image so what the build asserted is legible from the
 # artifact.
 PGO_TEXT_HOT_MIN_PERCENT=5
+# opcache.so on 8.1 is mostly JIT compiler code, and the image defaults the JIT
+# off (php/pgo/shipped-opcache-ini.sh), so training never runs it: 7% on amd64,
+# 4% on arm64. Any .text.hot still proves the profile reached the compiler, since
+# a link without one has none (discriminator control), so only its floor is lower.
+OPCACHE_TEXT_HOT_MIN_PERCENT="$PGO_TEXT_HOT_MIN_PERCENT"
+case "$PHP_VERSION" in 8.1) OPCACHE_TEXT_HOT_MIN_PERCENT=2 ;; esac
 
 # section_size <readelf -SW output> <section name> -> size in bytes, 0 if absent
 #
@@ -492,7 +498,7 @@ section_size() {
 }
 
 assert_profile_reached_the_link() {
-  local want="$1"; shift
+  local want="$1" floor="$2"; shift 2
   local bin sections hot text unlikely total pct
   for bin in "$@"; do
     sections="$(readelf -SW "$bin")" \
@@ -509,9 +515,9 @@ assert_profile_reached_the_link() {
       || { echo "FATAL: $bin has no executable text at all -- nothing was measured" >&2; exit 1; }
     pct=$((100 * hot / total))
     if [ "$want" = yes ]; then
-      [ "$pct" -ge "$PGO_TEXT_HOT_MIN_PERCENT" ] || {
+      [ "$pct" -ge "$floor" ] || {
         echo "FATAL: $bin has ${hot} bytes of .text.hot, ${pct}% of its text, below the" \
-             "${PGO_TEXT_HOT_MIN_PERCENT}% a profile-guided build produces. The profile was merged" \
+             "${floor}% a profile-guided build produces. The profile was merged" \
              "but did not reach the compiler -- this is a plain ThinLTO build wearing a PGO label." >&2
         exit 1; }
       echo "ok: $(basename "$bin") has ${hot} bytes of .text.hot (${pct}% of text) -- the profile reached the compiler"
@@ -1257,18 +1263,19 @@ fi
 php_install
 # After php_install, so this measures the stripped binaries that actually ship.
 # --strip-unneeded keeps allocated sections, .text.hot among them (verified).
-assert_profile_reached_the_link "$([ "$PGO" = true ] && echo yes || echo no)" \
+assert_profile_reached_the_link "$([ "$PGO" = true ] && echo yes || echo no)" "$PGO_TEXT_HOT_MIN_PERCENT" \
   /usr/local/bin/php /usr/local/sbin/php-fpm
 # opcache is a separate shared object on every branch but 8.5, which links it into
 # php and php-fpm (covered above). The JIT and the compile path live in it, so it
-# gets the same .text.hot assertion, at the same floor. The 5% floor was set from
-# the two executables; opcache.so's own share is not measured separately, and a
+# gets the same .text.hot assertion, at the same floor (OPCACHE_TEXT_HOT_MIN_PERCENT
+# lowers it where the JIT is off by default). The 5% floor was set from the two
+# executables; opcache.so's own share is not measured separately, and a
 # link that drops the section prefix for shared modules fails here, not silently.
 if [ -f "$PWD/modules/opcache.so" ]; then
   installed_opcache="$(find /usr/local/lib/php/extensions -name opcache.so | head -1)"
   [ -n "$installed_opcache" ] \
     || { echo "FATAL: modules/opcache.so was built but make install placed no opcache.so under /usr/local/lib/php/extensions" >&2; exit 1; }
-  assert_profile_reached_the_link "$([ "$PGO" = true ] && echo yes || echo no)" "$installed_opcache"
+  assert_profile_reached_the_link "$([ "$PGO" = true ] && echo yes || echo no)" "$OPCACHE_TEXT_HOT_MIN_PERCENT" "$installed_opcache"
 else
   echo "ok: opcache is compiled into php and php-fpm on php ${PHP_VERSION}; their .text.hot assertion covers it"
 fi
@@ -1281,6 +1288,7 @@ if [ "$(bash "$HERE/arch.sh")" = amd64 ]; then
 fi
 write_build_record "discriminator_control=ok" "ifunc_resolvers=disabled" \
   "text_hot_min_percent=${PGO_TEXT_HOT_MIN_PERCENT}" \
+  "opcache_text_hot_min_percent=${OPCACHE_TEXT_HOT_MIN_PERCENT}" \
   "simd_php_src=${SIMD_CHECK_RESULT:-unchecked}" \
   "simd_php_src_functions=${SIMD_FOUND:-0}" \
   "hardening_php_src=${HARDENING_PHP_SRC:-unchecked}" \
