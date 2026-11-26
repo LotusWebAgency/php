@@ -62,7 +62,7 @@ two builds of one tag. Pin the digest to keep the exact set you tested.
 
 | Trigger | What happens |
 |---|---|
-| Push to `develop` | Every target is built on both architectures, smoke-tested and Trivy-gated. Nothing reaches Docker Hub. Tested images go to the GHCR `php/dev` package. |
+| Push to `develop` | Every target is built on both architectures, smoke-tested and Trivy-gated. Nothing reaches Docker Hub. Tested images go to the GHCR `php/dev` package. A push that leaves the build inputs unchanged reuses the previous green run's images (at most five days old) and only re-tests them; `rebuild` on a manual run forces a build. |
 | Merge to `main` | Full build, smoke tests, Trivy gate, sign, attest, publish. |
 | Weekly cron | The same pipeline with no source change, to pick up base-image and package updates. |
 | Fixable CRITICAL or HIGH CVE | The build fails and nothing is published until it is fixed or accepted in `vex/php.openvex.json` with a review date. |
