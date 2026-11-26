@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""The release candidate record a develop run leaves behind.
+
+    python3 ci/candidate.py entry --entry ENTRY.json --out TEST_OUT_DIR --created TS --repository REPO > record.json
+    python3 ci/candidate.py merge --targets TARGETS.json --records DIR --sha SHA --tree TREE \
+        --inputs-hash HASH --run-id ID --run-attempt N --out release-candidate.json
+
+`entry` runs in each `images` job after ci/test-images.sh --mode digest: for every target
+in passed.txt it records the per-arch index digest the build pushed (the file the merge job
+reads), the digest of that architecture's platform manifest (from the signed test-result
+predicate) and the build timestamp. `merge` runs once in the `candidate` job: it joins the
+per-entry records and refuses anything but a complete set, every target of
+`scripts/gen_matrix.py --github targets` on every architecture exactly once, so a candidate
+on disk always means "this commit's whole matrix was built and passed".
+
+release-candidate.json:
+    {"schema": 1, "sha", "tree", "inputs_hash", "run_id", "run_attempt", "repository",
+     "targets": {"<name>": {"tag": "8.5-fpm", "archs": {"amd64": {"index", "platform", "created"}, ...}}}}
+"""
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+SCHEMA = 1
+ARCHES = ("amd64", "arm64")
+DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+class CandidateError(ValueError):
+    pass
+
+
+def _digest(value, what):
+    if not isinstance(value, str) or not DIGEST.match(value):
+        raise CandidateError(f"{what}: '{value}' is not a sha256 digest")
+    return value
+
+
+def entry_record(entry, out_dir, created, repository):
+    """The passed targets of one images job (one matrix entry) as a record."""
+    if not TIMESTAMP.match(created):
+        raise CandidateError(f"created '{created}' is not a UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)")
+    out_dir = Path(out_dir)
+    arch = entry["arch"]
+    by_name = {t["name"]: t for t in entry["targets"]}
+    passed_file = out_dir / "passed.txt"
+    if not passed_file.is_file():
+        raise CandidateError(f"{passed_file} does not exist: test-images.sh did not finish")
+    passed = [line.strip() for line in passed_file.read_text().splitlines() if line.strip()]
+    targets = {}
+    for name in passed:
+        if name not in by_name:
+            raise CandidateError(f"{name} is in passed.txt but not in entry {entry['name']}")
+        artifact = out_dir / name / "artifact"
+        index = _digest((artifact / arch).read_text().strip(), f"{name} index digest")
+        result = json.loads((artifact / f"{arch}.test-result.json").read_text())
+        platform = _digest(result["platforms"][0]["image_digest"], f"{name} platform digest")
+        targets[name] = {"tag": by_name[name]["tag"].split(":", 1)[1], "index": index, "platform": platform}
+    return {
+        "name": entry["name"],
+        "php": entry["php"],
+        "uarch": entry["uarch"],
+        "arch": arch,
+        "created": created,
+        "repository": repository,
+        "targets": targets,
+    }
+
+
+def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, arches=ARCHES):
+    """release-candidate.json from the per-entry records, or CandidateError listing every gap."""
+    wanted_tags = {t["name"]: t["tags"][0].split(":", 1)[1] for t in wanted}
+    problems = []
+    repositories = {r["repository"] for r in records}
+    if len(repositories) > 1:
+        problems.append(f"records name more than one repository: {sorted(repositories)}")
+    merged = {}
+    for rec in records:
+        if rec["arch"] not in arches:
+            problems.append(f"record {rec['name']}: architecture {rec['arch']} is not one of {list(arches)}")
+            continue
+        for name, found in rec["targets"].items():
+            if name not in wanted_tags:
+                problems.append(f"record {rec['name']}: {name} is not a target of this matrix")
+                continue
+            if found["tag"] != wanted_tags[name]:
+                problems.append(f"record {rec['name']}: {name} has tag {found['tag']}, expected {wanted_tags[name]}")
+                continue
+            slot = merged.setdefault(name, {"tag": found["tag"], "archs": {}})["archs"]
+            if rec["arch"] in slot:
+                problems.append(f"{name} {rec['arch']} is in more than one record")
+                continue
+            try:
+                slot[rec["arch"]] = {
+                    "index": _digest(found["index"], f"{name} {rec['arch']} index"),
+                    "platform": _digest(found["platform"], f"{name} {rec['arch']} platform"),
+                    "created": rec["created"],
+                }
+            except CandidateError as exc:
+                problems.append(str(exc))
+    for name in wanted_tags:
+        for arch in arches:
+            if arch not in merged.get(name, {}).get("archs", {}):
+                problems.append(f"{name} {arch} is missing: it did not build and pass")
+    if problems:
+        raise CandidateError("incomplete candidate:\n  " + "\n  ".join(problems))
+    return {
+        "schema": SCHEMA,
+        "sha": sha,
+        "tree": tree,
+        "inputs_hash": inputs_hash,
+        "run_id": str(run_id),
+        "run_attempt": str(run_attempt),
+        "repository": repositories.pop(),
+        "targets": {name: merged[name] for name in wanted_tags},
+    }
+
+
+def load_records(directory):
+    files = sorted(Path(directory).rglob("*.json"))
+    if not files:
+        raise CandidateError(f"no records under {directory}")
+    return [json.loads(f.read_text()) for f in files]
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    e = sub.add_parser("entry")
+    e.add_argument("--entry", required=True, help="the matrix entry as JSON")
+    e.add_argument("--out", required=True, help="ci/test-images.sh's --out directory")
+    e.add_argument("--created", required=True)
+    e.add_argument("--repository", required=True)
+    m = sub.add_parser("merge")
+    m.add_argument("--targets", required=True, help="scripts/gen_matrix.py --github targets, .include")
+    m.add_argument("--records", required=True, help="directory of entry records")
+    m.add_argument("--sha", required=True)
+    m.add_argument("--tree", required=True)
+    m.add_argument("--inputs-hash", required=True)
+    m.add_argument("--run-id", required=True)
+    m.add_argument("--run-attempt", required=True)
+    m.add_argument("--out", required=True)
+    args = parser.parse_args(argv)
+    try:
+        if args.cmd == "entry":
+            entry = json.loads(Path(args.entry).read_text())
+            json.dump(entry_record(entry, args.out, args.created, args.repository), sys.stdout, indent=2)
+            print()
+        else:
+            wanted = json.loads(Path(args.targets).read_text())
+            doc = merge_records(load_records(args.records), wanted, args.sha, args.tree, args.inputs_hash,
+                                args.run_id, args.run_attempt)
+            Path(args.out).write_text(json.dumps(doc, indent=2) + "\n")
+            print(f"ok: {len(doc['targets'])} targets x {len(ARCHES)} architectures in {args.out}")
+    except (CandidateError, KeyError, OSError, json.JSONDecodeError) as exc:
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

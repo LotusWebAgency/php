@@ -880,7 +880,8 @@ runners through `gh workflow run extended.yml --ref develop` (inputs `sha`, `onl
 
 Work lands on `develop` through pull requests. A pull request builds, tests and Trivy-gates a subset
 on amd64 without publishing. A push to `develop` builds and tests every image on native amd64 and
-arm64 runners and pushes the ones that pass to `ghcr.io/lotuswebagency/php/dev` as unsigned test
+arm64 runners, pushes every image by digest (SBOM and provenance attached) to
+`ghcr.io/lotuswebagency/php/dev`, tests it from there and tags the ones that pass as unsigned test
 builds (pruned after 14 days by `dev-prune.yml`); it never touches Docker Hub. A pull request from
 `develop` to `main` is the release: merging it builds, tests, signs and attests every image in the
 GHCR staging repository, copies each signed manifest list to Docker Hub with its signatures and
