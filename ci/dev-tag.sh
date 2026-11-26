@@ -13,8 +13,8 @@
 # An existing dev:<tag>-<sha12>-<arch> is never moved to another digest unless
 # DEV_TAG_FORCE=1: a tag that a later run silently re-points would let a run
 # that tested the old image and a release that copies the new one both pass for
-# one commit. ci.yml sets it for a rebuild dispatch and for a re-run attempt of a
-# run; a rebuild of a commit makes the earlier ci run of it no copy source
+# one commit. ci.yml sets it for a develop dispatch and for a re-run attempt of a
+# run; a dispatch of a commit makes the earlier ci run of it no copy source
 # (ci/release_source.py rejects a commit with a newer develop run). The tag
 # already naming the digest is left alone.
 set -euo pipefail

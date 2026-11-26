@@ -890,8 +890,8 @@ builds (pruned after 14 days by `dev-prune.yml`); it never touches Docker Hub. W
 nothing the images are built from (`scripts/inputs-hash.sh`, which covers the build context and not the
 tests, CI scripts or docs) and the previous green `develop` run's images are at most five days old,
 nothing is rebuilt: that run's images are tested again with the day's Trivy database and tagged for the
-new commit, and the run says so in its summary. Dispatching `ci.yml` with `rebuild` forces a build; it
-re-points the commit's dev tags, so the release of that commit rebuilds instead of copying (a newer `develop`
+new commit, and the run says so in its summary. Dispatching `ci.yml` with `rebuild` forces a build; any dispatch on `develop` that
+builds re-points the commit's dev tags (a push never does), so the release of that commit rebuilds instead of copying (a newer `develop`
 `ci` run of the commit, of any event, disqualifies the older one). A
 pull request from `develop` to `main` is the release. Its `promote-check` job decides whether `main`
 could copy the head's images: the `develop` `ci` run of the head commit (its latest

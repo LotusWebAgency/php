@@ -1052,11 +1052,13 @@ jobs:
         if: ${{ !cancelled() && steps.test.conclusion != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' }}
         env:
           # An existing per-arch tag of this commit moves to another digest only on purpose: a
-          # rebuild dispatch or a re-run attempt (ci/dev-tag.sh). A rebuild dispatch leaves a
-          # develop run of this commit newer than the one an extended run tested, so
-          # ci/release_source.py rebuilds the release of this commit; a re-run attempt is
-          # another attempt, which the extended run's title must name.
-          DEV_TAG_FORCE: ${{ ((github.event_name == 'workflow_dispatch' && inputs.rebuild) || github.run_attempt != '1') && '1' || '' }}
+          # dispatch or a re-run attempt (ci/dev-tag.sh). Any dispatch that gets here builds or
+          # re-tests on purpose, `rebuild` or not (a plain one builds when the inputs hash or the
+          # candidate's age says so), and leaves a develop run of this commit newer than the one
+          # an extended run tested, so ci/release_source.py rebuilds the release of this commit;
+          # a re-run attempt is another attempt, which the extended run's title must name. A push
+          # (attempt 1) never moves a tag.
+          DEV_TAG_FORCE: ${{ (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') && '1' || '' }}
         run: ./ci/dev-tag.sh "$RUNNER_TEMP/entry.json" "$RUNNER_TEMP/test-out"
 
       # Reached only when the whole entry passed (success() is the default): the
