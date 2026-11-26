@@ -10,7 +10,9 @@
 #          opcache_reset() in a loop, with the opcache size the entrypoint picks
 #   full   an opcache too small for the scripts, with their mtimes changing under it
 #          (wasted memory, so cache_full and oom restarts)
-#   full-reset  the same with opcache_reset() every few seconds on top
+#   full-reset  the same with opcache_reset() on top, each held back until the cache has
+#          run out of memory again (the pool's fill rate depends on the CPU), so the
+#          resets hit a full cache
 #
 # --informational is for versions whose JIT is off by default (8.0, 8.1): it turns the
 # JIT on, prints the same verdict and always exits 0. A scenario must also exercise what
@@ -40,10 +42,10 @@ fcgi() {  # fcgi <container> <script>
     php-fcgi -f -t 30 127.0.0.1:9000
 }
 
-# scenario <label> <files> <pad> <need> <reset> <churn> [docker run args]
+# scenario <label> <files> <pad> <need> <reset> <churn> <when-full 0|1> [docker run args]
 scenario() {
-  local label="$1" files="$2" pad="$3" need="$4" reset="$5" churn="$6" cname st healthy="none" out log
-  shift 6
+  local label="$1" files="$2" pad="$3" need="$4" reset="$5" churn="$6" when_full="$7" cname st healthy="none" out log
+  shift 7
   cname="php-jit-stress-$label-$$"
   names+=("$cname")
   echo "--- $label: $files scripts, ${SECS}s, $CLIENTS clients, $([ "$reset" = 0 ] && echo 'no opcache_reset()' || echo "opcache_reset() every ${reset}s"), $([ "$churn" = 0 ] && echo 'no mtime churn' || echo "mtime churn $churn per 0.2s")"
@@ -78,7 +80,7 @@ print("opcache: memory used=%s free=%s wasted%%=%.1f" % (s["memory"]["used_memor
     return 0
   fi
 
-  out="$(docker exec "$cname" bash /tmp/jit/driver.sh /tmp/jit "$SECS" "$CLIENTS" "$reset" "$churn" "$files" 2>&1 || true)"
+  out="$(docker exec "$cname" bash /tmp/jit/driver.sh /tmp/jit "$SECS" "$CLIENTS" "$reset" "$churn" "$files" "$when_full" 2>&1 || true)"
   echo "$out" | sed 's/^/    /'
   st="$(fcgi "$cname" status.php | tr -d '\r')"
   log="$(docker logs "$cname" 2>&1)"
@@ -118,9 +120,9 @@ print("    after: manual_restarts=%s oom_restarts=%s hash_restarts=%s cache_full
 jit_env=()
 [ "$INFORMATIONAL" = 0 ] || jit_env=(-e PHP_OPCACHE_JIT=tracing)
 
-scenario reset 60 8 resets 0.3 0 "${jit_env[@]}"
-scenario full 400 60 full 0 8 -e PHP_OPCACHE_MEMORY=16 "${jit_env[@]}"
-scenario full-reset 400 60 full 4 8 -e PHP_OPCACHE_MEMORY=16 "${jit_env[@]}"
+scenario reset 60 8 resets 0.3 0 0 "${jit_env[@]}"
+scenario full 400 60 full 0 8 0 -e PHP_OPCACHE_MEMORY=16 "${jit_env[@]}"
+scenario full-reset 400 60 full 4 8 1 -e PHP_OPCACHE_MEMORY=16 "${jit_env[@]}"
 
 if [ "${#failures[@]}" -gt 0 ]; then
   if [ "$INFORMATIONAL" = 1 ]; then

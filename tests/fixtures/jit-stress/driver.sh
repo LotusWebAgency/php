@@ -2,11 +2,14 @@
 # Runs inside the container under test: CLIENTS request loops against the pool on
 # 127.0.0.1:9000, one loop calling opcache_reset() every RESET seconds (0 = none), and
 # one loop giving CHURN scripts a new mtime every 0.2 s (0 = none), for SECONDS seconds.
+# With WHEN_FULL=1 the resetter holds each reset back until the opcache has run out of
+# memory since the previous one (an oom or hash restart, or cache_full), for at most
+# 20 s, so the resets land on a full cache however fast the pool fills it.
 # Prints one line, "requests=N bad=N resets=N", and a line per bad response on stderr.
 #
-#   driver.sh DIR SECONDS CLIENTS RESET CHURN FILES
+#   driver.sh DIR SECONDS CLIENTS RESET CHURN FILES [WHEN_FULL]
 set -u
-dir="$1" secs="$2" clients="$3" reset="$4" churn="$5" files="$6"
+dir="$1" secs="$2" clients="$3" reset="$4" churn="$5" files="$6" when_full="${7:-0}"
 res="$dir/res"
 rm -rf "$res"
 mkdir -p "$res"
@@ -33,11 +36,30 @@ client() {
   echo "$n $bad" >"$res/client-$id"
 }
 
+full_marks() {  # prints "<oom+hash restarts> <cache_full 0|1>"
+  local st oom hash full=0
+  st="$(fcgi status.php 2>/dev/null | tr -d '\r')"
+  oom="$(grep -oE '"oom_restarts":[0-9]+' <<<"$st" | cut -d: -f2)"
+  hash="$(grep -oE '"hash_restarts":[0-9]+' <<<"$st" | cut -d: -f2)"
+  ! grep -q '"full":true' <<<"$st" || full=1
+  echo "$(( ${oom:-0} + ${hash:-0} )) $full"
+}
+
 resetter() {
-  local n=0
+  local n=0 base cur full until
+  base="$(full_marks | cut -d' ' -f1)"
   while [ "$SECONDS" -lt "$end" ]; do
+    if [ "$when_full" = 1 ]; then
+      until=$((SECONDS + 20))
+      while [ "$SECONDS" -lt "$end" ] && [ "$SECONDS" -lt "$until" ]; do
+        read -r cur full <<<"$(full_marks)"
+        { [ "$cur" -gt "$base" ] || [ "$full" = 1 ]; } && break
+        sleep 0.5
+      done
+    fi
     fcgi reset.php >/dev/null 2>&1 && n=$((n + 1))
     sleep "$reset"
+    [ "$when_full" = 0 ] || base="$(full_marks | cut -d' ' -f1)"
   done
   echo "$n" >"$res/resets"
 }
