@@ -107,9 +107,10 @@ fi
 
 if [ -n "${pr_json:-}" ]; then
   # The pr group in docker-bake.hcl and the CI matrix (scripts/gen_matrix.py
-  # --github pr, whose per-version jobs name every target they bake) are two
-  # spellings of one list; a target in one and not the other is a PR that
-  # silently stops building something, or a job bake cannot resolve.
+  # --github pr: one amd64 entry per PHP version in the PR subset, each naming
+  # every target it bakes in `bake` and `targets`) are two spellings of one
+  # list; a target in one and not the other is a PR that silently stops
+  # building something, or a job bake cannot resolve.
   pr_json_file="$(mktemp)"
   printf '%s' "$pr_json" > "$pr_json_file"
   pr_out="$(python3 scripts/gen_matrix.py --github pr | python3 -c '
@@ -227,7 +228,7 @@ fi
 # input): vex/php.openvex.json is valid OpenVEX, .trivyignore is the file
 # generated from it, the attestation predicate refuses a Trivy step that did not
 # succeed. It does NOT assert that no review-by date has passed: preflight gates
-# every build job, so a date-triggered failure here would stop the whole publish
+# every images job, so a date-triggered failure here would stop the whole publish
 # on the deadline Monday. The deadline gate is Trivy itself (the generated
 # .trivyignore lines carry exp:); `python3 ci/vex.py check --warn-within 14`
 # warns in CI ahead of time.

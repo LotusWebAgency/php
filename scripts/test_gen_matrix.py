@@ -251,6 +251,16 @@ class TestTargets(unittest.TestCase):
             self.assertTrue(t["corpus"].endswith(f":php{want}"),
                             f'{t["name"]} php {t["php"]} got {t["corpus"]}, wanted the {want} tier')
 
+    def test_every_entry_mounts_the_corpus_of_its_version(self):
+        corpus = gen_matrix.corpus_tags(self.matrix)
+        for which in ("version", "pr"):
+            for entry in self.run_github(which):
+                self.assertEqual(entry["corpus"], corpus[entry["php"]], f"{which} {entry['name']}")
+                self.assertTrue(entry["corpus"].startswith("ghcr.io/"), entry["name"])
+                by_name = {t["name"]: t for t in self.targets}
+                for t in entry["targets"]:
+                    self.assertEqual(by_name[t["name"]]["corpus"], entry["corpus"], t["name"])
+
     def test_corpus_is_named_even_when_pgo_is_off(self):
         """The Dockerfile mounts it unconditionally; a pgo=false target that
         named no corpus image would fail to build rather than fall back."""
