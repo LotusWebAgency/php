@@ -23,6 +23,13 @@
 #     GHCR, and `fixtures` builds the application fixtures `extended` needs there.
 #     Develop and main write, and every build reads, a registry build cache (the
 #     deps-cache target in docker-bake.hcl).
+#     A develop push or dispatch whose inputs hash (scripts/inputs-hash.sh) equals
+#     that of the newest green develop run's release candidate, with every image
+#     at most five days old, builds nothing (ci/reuse_plan.py, run by `plan`):
+#     `images` pulls that run's images by digest, tests them again with today's
+#     Trivy DB, tags them for this commit and records them in this run's
+#     candidate with their original build run and time. The dispatch input
+#     `rebuild` forces a build.
 #   push or dispatch on main, and the weekly cron (default branch only)
 #     `images` pushes every image by digest, with SBOM + max-mode provenance, to the
 #     GHCR staging repository ghcr.io/lotuswebagency/php/release and tests that
@@ -99,6 +106,11 @@ on:
   push:
     branches: [main, develop]
   workflow_dispatch:
+    inputs:
+      rebuild:
+        description: Build the images even when the last develop build has the same inputs
+        type: boolean
+        default: false
   schedule:
     # Weekly rebuild: fresh base layers and Wolfi package updates.
     - cron: "10 19 * * 1"
@@ -117,6 +129,9 @@ permissions: {}
 
 env:
   GHCR_CORPUS_REGISTRY: ghcr.io/lotuswebagency/php
+  # develop's images: pushed by digest, tagged per commit and architecture, and
+  # the repository a release candidate names.
+  DEV_REPO: ghcr.io/lotuswebagency/php/dev
   # main's images between build and promotion: pushed by digest, tested, merged,
   # signed and attested here; promote copies them to Docker Hub. Its tags follow
   # the Docker Hub ones from the merge job on (see merge).
@@ -220,11 +235,17 @@ jobs:
   # Preflight runs beside this job and gates nothing that builds: only what
   # publishes or moves a floating tag (dev-manifest, promote) and the PR gate
   # wait for it.
+  #
+  # `mode` is `build`, or `reuse` for a develop push or dispatch whose images the
+  # newest green develop run already built from the same inputs (ci/reuse_plan.py
+  # lists the conditions; the reason is in the step summary). A reuse run skips
+  # the corpus, the sources and every bake, and its `images` entries only test.
   plan:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: read
+      actions: read # the develop runs and their release-candidate artifact (reuse)
     env:
       # Repository variable: a forced toolchain refresh before the week ends,
       # for example 2026-W48.1 (see ci/toolchain-epoch.sh). Empty: the epoch.
@@ -236,6 +257,7 @@ jobs:
       cache-week: ${{ steps.epoch.outputs.cache-week }}
       matrix: ${{ steps.matrix.outputs.matrix }}
       targets: ${{ steps.matrix.outputs.targets }}
+      mode: ${{ steps.reuse.outputs.mode }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -313,6 +335,44 @@ jobs:
             echo "targets=$targets"
           } >> "$GITHUB_OUTPUT"
 
+      # Never fails the run: anything unreadable or unexpected is a build, with
+      # the reason in the summary. The verified candidate goes to this run's
+      # `images` entries as an artifact, so they all read the one file the
+      # decision was made on.
+      - name: Decide whether to reuse the last develop build
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REBUILD: ${{ inputs.rebuild }}
+          INPUTS_HASH: ${{ steps.hash.outputs.inputs-hash }}
+          TARGETS: ${{ steps.matrix.outputs.targets }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/reuse"
+          printf '%s\n' "$TARGETS" > "$RUNNER_TEMP/targets.json"
+          decision="$(python3 ci/reuse_plan.py plan --repo "$GITHUB_REPOSITORY" --event "$EVENT_NAME" --ref "$GITHUB_REF" \
+            --rebuild "$REBUILD" --inputs-hash "$INPUTS_HASH" --targets "$RUNNER_TEMP/targets.json" --dev-repo "$DEV_REPO" \
+            --run-id "$GITHUB_RUN_ID" --save-candidate "$RUNNER_TEMP/reuse/release-candidate.json")" || {
+            echo "::warning::ci/reuse_plan.py failed; building"
+            decision='{"mode":"build","reason":"ci/reuse_plan.py failed"}'
+          }
+          mode="$(jq -er .mode <<<"$decision")"
+          reason="$(jq -er .reason <<<"$decision")"
+          echo "mode=$mode: $reason"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          printf '### Images: %s\n\n%s\n' "$mode" "$reason" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the candidate to reuse
+        if: ${{ steps.reuse.outputs.mode == 'reuse' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reuse-candidate
+          path: ${{ runner.temp }}/reuse/release-candidate.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
   # ---------------------------------------------------------------- trivy-db
   # One vulnerability DB refresh per run, parallel with plan, instead of
   # every images entry racing the registry and the same dated cache key.
@@ -388,8 +448,11 @@ jobs:
   # php-src-cache mount before the first bake. A miss anywhere only means that
   # leg fetches the file itself: deps/fetch-verified.sh re-checks every sha256 it
   # reads from the mount, and a mount's content is not part of any cache key, so
-  # the cache can never change what is built.
+  # the cache can never change what is built. A reuse run builds nothing and
+  # skips it.
   sources:
+    needs: plan
+    if: ${{ needs.plan.outputs.mode != 'reuse' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -446,6 +509,17 @@ jobs:
   # What gets tested and merged is byte-for-byte what was pushed, never a separate
   # --load build that could drift if a base layer refreshed between two builds.
   #
+  # A reuse run (`plan`'s mode, develop only) skips the corpus, the sources, the
+  # builder and the bake: the entry's index digests come from the candidate
+  # `plan` verified (ci/reuse_plan.py entry), and everything from the test on
+  # runs as for a build. The test uses this run's Trivy DB, so a CVE published
+  # since the build still fails the entry, and the smoke test still refuses an
+  # image whose inputs-hash label differs from this tree's. The PGO check is the
+  # one thing left out (SMOKE_SKIP_PGO): it compares the image with the tier's
+  # corpus, which is not pulled, and both are the ones the previous run checked,
+  # since the hash that names the corpus is unchanged. The new dev tags and the
+  # candidate record carry the original build's time and run.
+  #
   # The registry cache (CACHE_REGISTRY/cache:<php>-<uarch>-<arch>-<week>) is
   # written on develop and main by the entry's deps-cache target in the same bake
   # call, and read by every build.
@@ -492,7 +566,6 @@ jobs:
       ARCH: ${{ matrix.job.arch }}
       # The org.opencontainers.image.revision label (and the dev tag's sha).
       REVISION: ${{ github.sha }}
-      DEV_REPO: ghcr.io/lotuswebagency/php/dev
       # One severity list for the Trivy gates and the recorded predicate.
       TRIVY_SEVERITY: CRITICAL,HIGH
     steps:
@@ -535,9 +608,11 @@ jobs:
       # Warm the daemon's image store under the retry policy; the action's
       # builder bootstrap otherwise pulls this image without that backoff.
       - name: Pull the pinned BuildKit image
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         run: ./ci/retry.sh docker pull "$BUILDKIT_IMAGE"
 
       - name: Set up Docker Buildx
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
@@ -556,6 +631,7 @@ jobs:
       # one dead upstream URL only fails the entries that need it; neither step
       # can change what is built.
       - name: Restore the pinned sources
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/php-src-cache
@@ -563,6 +639,7 @@ jobs:
           restore-keys: php-src-
 
       - name: Seed the builder's source cache
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         run: |
           if [ -n "$(ls -A "$RUNNER_TEMP/php-src-cache" 2>/dev/null)" ]; then
             ./ci/retry.sh ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
@@ -570,7 +647,7 @@ jobs:
             echo "::warning::no source cache restored; the build fetches its sources itself"
           fi
 
-      - name: Log in to GHCR (corpus and cache pull, image push)
+      - name: Log in to GHCR (corpus and cache pull, image pull and push)
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
@@ -579,7 +656,9 @@ jobs:
 
       # PUSH_REPO empty: a pull request, built with --load. Otherwise where the
       # images are pushed by digest. CREATED is the one build timestamp of the
-      # entry's images (the OCI created label) and of its candidate record.
+      # entry's images (the OCI created label) and of its candidate record, and
+      # BUILT_RUN the run that built them; a reuse run takes both from the
+      # candidate it reuses (below).
       - name: Resolve the mode and the build settings
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -595,6 +674,7 @@ jobs:
           }
           {
             echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "BUILT_RUN=$GITHUB_RUN_ID"
             if [ "$EVENT_NAME" = pull_request ]; then
               echo "PUSH_REPO="
               echo "CACHE_PUSH=false"
@@ -607,7 +687,32 @@ jobs:
             fi
           } >> "$GITHUB_ENV"
 
+      - name: Download the candidate this run reuses
+        if: ${{ needs.plan.outputs.mode == 'reuse' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: reuse-candidate
+          path: ${{ runner.temp }}/reuse
+
+      # What the Build step leaves in digests.json, read from the candidate
+      # instead: this entry's targets on its architecture. A candidate that lacks
+      # one fails the entry (plan already checked the whole matrix).
+      - name: Take the reused images' digests from the candidate
+        if: ${{ needs.plan.outputs.mode == 'reuse' }}
+        run: |
+          set -euo pipefail
+          [ "$PUSH_REPO" = "$DEV_REPO" ] || { echo "FAIL: reuse is for develop; PUSH_REPO is '$PUSH_REPO'" >&2; exit 1; }
+          meta="$(python3 ci/reuse_plan.py entry --candidate "$RUNNER_TEMP/reuse/release-candidate.json" \
+            --entry "$RUNNER_TEMP/entry.json" --digests-out "$RUNNER_TEMP/digests.json")"
+          {
+            echo "CREATED=$(jq -er .created <<<"$meta")"
+            echo "BUILT_RUN=$(jq -er .built_run <<<"$meta")"
+          } >> "$GITHUB_ENV"
+          cat "$RUNNER_TEMP/digests.json"
+          echo "reusing the images run $(jq -er .built_run <<<"$meta") built at $(jq -er .created <<<"$meta")"
+
       - name: Pull and verify this entry's hash-pinned PGO corpus
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -649,6 +754,7 @@ jobs:
       # attempt that succeeded wrote, and nothing else carries a digest forward.
       # Whatever a failed attempt pushed stays an untagged, unreferenced orphan.
       - name: Build
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         run: |
           set -euo pipefail
           read -ra bake_targets <<<"$ENTRY_BAKE"
@@ -682,6 +788,8 @@ jobs:
       # and a passing one gets its signed test-result predicate.
       - name: Test the images
         id: test
+        env:
+          SMOKE_SKIP_PGO: ${{ needs.plan.outputs.mode == 'reuse' && '1' || '' }}
         run: |
           set -euo pipefail
           args=(--mode load)
@@ -793,7 +901,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/candidate"
           python3 ci/candidate.py entry --entry "$RUNNER_TEMP/entry.json" --out "$RUNNER_TEMP/test-out" \
-            --created "$CREATED" --repository "$DEV_REPO" > "$RUNNER_TEMP/candidate/$ENTRY_NAME.json"
+            --created "$CREATED" --built-run "$BUILT_RUN" --repository "$DEV_REPO" > "$RUNNER_TEMP/candidate/$ENTRY_NAME.json"
 
       - name: Upload the candidate record (develop)
         if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' }}
@@ -813,10 +921,11 @@ jobs:
   # --------------------------------------------------------------- candidate
   # develop only. The release candidate of this run: the commit, its tree, the
   # inputs hash, and for every target and architecture the index digest, the
-  # platform digest and the build time of the tested image on php/dev. Written
-  # only when every entry built and passed (ci/candidate.py refuses a missing
-  # target or architecture), so the file existing means the commit's whole matrix
-  # is tested and pushed.
+  # platform digest, and the build time and build run of the tested image on
+  # php/dev (a reuse run keeps the original build's, so `created` is always when
+  # the image was built). Written only when every entry built or reused and
+  # passed (ci/candidate.py refuses a missing target or architecture), so the
+  # file existing means the commit's whole matrix is tested and pushed.
   candidate:
     needs: [images, plan]
     if: ${{ !cancelled() && needs.images.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' }}
@@ -1013,7 +1122,7 @@ jobs:
   # single runner, past any sensible timeout whenever a shared input changes.
   corpus:
     needs: [plan, corpus-matrix]
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    if: needs.plan.outputs.mode != 'reuse' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     name: corpus ${{ matrix.tier.floor }} ${{ matrix.arch.name }}
     strategy:
       fail-fast: false
@@ -1142,8 +1251,8 @@ jobs:
   # `php<tier>` ref (what every target's `contexts.corpus` names) and
   # `php<tier>-<inputs-hash>` (what images actually mounts).
   corpus-merge:
-    needs: [corpus, corpus-matrix]
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
+    needs: [plan, corpus, corpus-matrix]
+    if: ${{ !cancelled() && needs.plan.outputs.mode != 'reuse' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
     name: corpus-merge ${{ matrix.tier.floor }}
     strategy:
       fail-fast: false

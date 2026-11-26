@@ -14,6 +14,7 @@ import candidate  # noqa: E402
 
 REPO = "ghcr.io/lotuswebagency/php/dev"
 CREATED = "2026-11-26T10:00:00Z"
+BUILT = "123"
 
 
 def sha(char):
@@ -60,15 +61,16 @@ class TestEntryRecord(unittest.TestCase):
         e = entry()
         with tempfile.TemporaryDirectory() as tmp:
             write_out(tmp, e, ["php-8_5-cli"], {"php-8_5-cli": sha("b")})
-            rec = candidate.entry_record(e, tmp, CREATED, REPO)
+            rec = candidate.entry_record(e, tmp, CREATED, REPO, BUILT)
         self.assertEqual(list(rec["targets"]), ["php-8_5-cli"])
         self.assertEqual(rec["targets"]["php-8_5-cli"], {"tag": "8.5-cli", "index": sha("1"), "platform": sha("b")})
         self.assertEqual((rec["arch"], rec["created"], rec["repository"]), ("amd64", CREATED, REPO))
+        self.assertEqual(rec["built_run"], BUILT)
 
     def test_no_passed_txt_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(candidate.CandidateError, "did not finish"):
-                candidate.entry_record(entry(), tmp, CREATED, REPO)
+                candidate.entry_record(entry(), tmp, CREATED, REPO, BUILT)
 
     def test_unknown_passed_target(self):
         e = entry()
@@ -76,7 +78,7 @@ class TestEntryRecord(unittest.TestCase):
             write_out(tmp, e, ["php-8_5-fpm"])
             (Path(tmp) / "passed.txt").write_text("php-9_9-fpm\n")
             with self.assertRaisesRegex(candidate.CandidateError, "not in entry"):
-                candidate.entry_record(e, tmp, CREATED, REPO)
+                candidate.entry_record(e, tmp, CREATED, REPO, BUILT)
 
     def test_malformed_digest(self):
         e = entry()
@@ -84,17 +86,22 @@ class TestEntryRecord(unittest.TestCase):
             write_out(tmp, e, ["php-8_5-fpm"])
             (Path(tmp) / "php-8_5-fpm" / "artifact" / "amd64").write_text("sha256:short")
             with self.assertRaisesRegex(candidate.CandidateError, "not a sha256 digest"):
-                candidate.entry_record(e, tmp, CREATED, REPO)
+                candidate.entry_record(e, tmp, CREATED, REPO, BUILT)
 
     def test_bad_timestamp(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(candidate.CandidateError, "not a UTC timestamp"):
-                candidate.entry_record(entry(), tmp, "yesterday", REPO)
+                candidate.entry_record(entry(), tmp, "yesterday", REPO, BUILT)
+
+    def test_bad_built_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(candidate.CandidateError, "not a run id"):
+                candidate.entry_record(entry(), tmp, CREATED, REPO, "latest")
 
 
-def record(arch, created=CREATED, names=("php-8_5-fpm", "php-8_5-cli"), repo=REPO):
+def record(arch, created=CREATED, names=("php-8_5-fpm", "php-8_5-cli"), repo=REPO, built_run=BUILT):
     return {
-        "name": f"8.5-{arch}", "php": "8.5", "uarch": "baseline", "arch": arch, "created": created, "repository": repo,
+        "name": f"8.5-{arch}", "php": "8.5", "uarch": "baseline", "arch": arch, "created": created, "built_run": built_run, "repository": repo,
         "targets": {n: {"tag": f"8.5-{n.split('-', 2)[2]}", "index": sha("1"), "platform": sha("2")} for n in names},
     }
 
@@ -105,10 +112,11 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(doc["schema"], 1)
         self.assertEqual((doc["sha"], doc["tree"], doc["inputs_hash"]), ("c" * 40, "d" * 40, "hash"))
         self.assertEqual((doc["run_id"], doc["run_attempt"], doc["repository"]), ("123", "2", REPO))
+        self.assertEqual(doc["built_run"], BUILT)
         self.assertEqual(list(doc["targets"]), ["php-8_5-fpm", "php-8_5-cli"])
         fpm = doc["targets"]["php-8_5-fpm"]
         self.assertEqual(fpm["tag"], "8.5-fpm")
-        self.assertEqual(fpm["archs"]["amd64"], {"index": sha("1"), "platform": sha("2"), "created": CREATED})
+        self.assertEqual(fpm["archs"]["amd64"], {"index": sha("1"), "platform": sha("2"), "created": CREATED, "built_run": BUILT})
         self.assertEqual(fpm["archs"]["arm64"]["created"], "2026-11-26T11:00:00Z")
 
     def test_missing_arch_target_lists_every_gap(self):
@@ -146,6 +154,22 @@ class TestMerge(unittest.TestCase):
         with self.assertRaisesRegex(candidate.CandidateError, "not a sha256 digest"):
             merge([rec, record("arm64")])
 
+    def test_reused_images_keep_their_build_run_and_time(self):
+        old = "2026-11-23T08:00:00Z"
+        doc = merge([record("amd64", created=old, built_run="77"), record("arm64", created=old, built_run="77")])
+        self.assertEqual((doc["run_id"], doc["built_run"]), ("123", "77"))
+        self.assertEqual(doc["targets"]["php-8_5-cli"]["archs"]["arm64"]["created"], old)
+
+    def test_two_build_runs_are_refused(self):
+        with self.assertRaisesRegex(candidate.CandidateError, "more than one build run"):
+            merge([record("amd64"), record("arm64", built_run="77")])
+
+    def test_record_without_built_run(self):
+        rec = record("amd64")
+        del rec["built_run"]
+        with self.assertRaisesRegex(candidate.CandidateError, "built_run"):
+            merge([rec, record("arm64")])
+
     def test_unknown_arch(self):
         with self.assertRaisesRegex(candidate.CandidateError, "not one of"):
             merge([record("amd64"), record("arm64"), record("s390x")])
@@ -170,7 +194,7 @@ class TestCli(unittest.TestCase):
                 write_out(out, e, ["php-8_5-fpm", "php-8_5-cli"])
                 (tmp / f"entry-{arch}.json").write_text(json.dumps(e))
                 rc, stdout, _ = self.run_cli("entry", "--entry", str(tmp / f"entry-{arch}.json"), "--out", str(out),
-                                             "--created", CREATED, "--repository", REPO)
+                                             "--created", CREATED, "--built-run", BUILT, "--repository", REPO)
                 self.assertEqual(rc, 0)
                 (records / arch).mkdir()
                 (records / arch / "record.json").write_text(stdout)

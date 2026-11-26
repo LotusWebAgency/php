@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """The release candidate record a develop run leaves behind.
 
-    python3 ci/candidate.py entry --entry ENTRY.json --out TEST_OUT_DIR --created TS --repository REPO > record.json
+    python3 ci/candidate.py entry --entry ENTRY.json --out TEST_OUT_DIR --created TS --built-run ID --repository REPO > record.json
     python3 ci/candidate.py merge --targets TARGETS.json --records DIR --sha SHA --tree TREE \
         --inputs-hash HASH --run-id ID --run-attempt N --out release-candidate.json
 
 `entry` runs in each `images` job after ci/test-images.sh --mode digest: for every target
 in passed.txt it records the per-arch index digest the build pushed (the file the merge job
 reads), the digest of that architecture's platform manifest (from the signed test-result
-predicate) and the build timestamp. `merge` runs once in the `candidate` job: it joins the
+predicate), the build timestamp and the run that built it. `merge` runs once in the `candidate` job: it joins the
 per-entry records and refuses anything but a complete set, every target of
 `scripts/gen_matrix.py --github targets` on every architecture exactly once, so a candidate
 on disk always means "this commit's whole matrix was built and passed".
 
 release-candidate.json:
-    {"schema": 1, "sha", "tree", "inputs_hash", "run_id", "run_attempt", "repository",
-     "targets": {"<name>": {"tag": "8.5-fpm", "archs": {"amd64": {"index", "platform", "created"}, ...}}}}
+    {"schema": 1, "sha", "tree", "inputs_hash", "run_id", "run_attempt", "built_run", "repository",
+     "targets": {"<name>": {"tag": "8.5-fpm", "archs": {"amd64": {"index", "platform", "created", "built_run"}, ...}}}}
+
+`sha`, `tree`, `run_id` and `run_attempt` name the run that tested and tagged these images (its
+digest-<target>-<arch> artifacts and test-result predicates). `created` and `built_run` name the
+build: they are this run's when it built the images, and the original build's when ci/reuse_plan.py
+found the same inputs hash and the images were only re-tested (`built_run` != `run_id`).
 """
 import argparse
 import json
@@ -27,6 +32,7 @@ SCHEMA = 1
 ARCHES = ("amd64", "arm64")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+RUN_ID = re.compile(r"^\d+$")
 
 
 class CandidateError(ValueError):
@@ -39,10 +45,12 @@ def _digest(value, what):
     return value
 
 
-def entry_record(entry, out_dir, created, repository):
+def entry_record(entry, out_dir, created, repository, built_run):
     """The passed targets of one images job (one matrix entry) as a record."""
     if not TIMESTAMP.match(created):
         raise CandidateError(f"created '{created}' is not a UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)")
+    if not RUN_ID.match(str(built_run)):
+        raise CandidateError(f"built run '{built_run}' is not a run id")
     out_dir = Path(out_dir)
     arch = entry["arch"]
     by_name = {t["name"]: t for t in entry["targets"]}
@@ -65,6 +73,7 @@ def entry_record(entry, out_dir, created, repository):
         "uarch": entry["uarch"],
         "arch": arch,
         "created": created,
+        "built_run": str(built_run),
         "repository": repository,
         "targets": targets,
     }
@@ -79,6 +88,9 @@ def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, 
         problems.append(f"records name more than one repository: {sorted(repositories)}")
     merged = {}
     for rec in records:
+        if not RUN_ID.match(str(rec.get("built_run", ""))):
+            problems.append(f"record {rec['name']}: built_run '{rec.get('built_run')}' is not a run id")
+            continue
         if rec["arch"] not in arches:
             problems.append(f"record {rec['name']}: architecture {rec['arch']} is not one of {list(arches)}")
             continue
@@ -98,6 +110,7 @@ def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, 
                     "index": _digest(found["index"], f"{name} {rec['arch']} index"),
                     "platform": _digest(found["platform"], f"{name} {rec['arch']} platform"),
                     "created": rec["created"],
+                    "built_run": rec["built_run"],
                 }
             except CandidateError as exc:
                 problems.append(str(exc))
@@ -105,6 +118,9 @@ def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, 
         for arch in arches:
             if arch not in merged.get(name, {}).get("archs", {}):
                 problems.append(f"{name} {arch} is missing: it did not build and pass")
+    built_runs = {slot["built_run"] for found in merged.values() for slot in found["archs"].values()}
+    if len(built_runs) > 1:
+        problems.append(f"images come from more than one build run: {sorted(built_runs)}")
     if problems:
         raise CandidateError("incomplete candidate:\n  " + "\n  ".join(problems))
     return {
@@ -114,6 +130,7 @@ def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, 
         "inputs_hash": inputs_hash,
         "run_id": str(run_id),
         "run_attempt": str(run_attempt),
+        "built_run": built_runs.pop(),
         "repository": repositories.pop(),
         "targets": {name: merged[name] for name in wanted_tags},
     }
@@ -133,6 +150,7 @@ def main(argv=None):
     e.add_argument("--entry", required=True, help="the matrix entry as JSON")
     e.add_argument("--out", required=True, help="ci/test-images.sh's --out directory")
     e.add_argument("--created", required=True)
+    e.add_argument("--built-run", required=True, help="the run that built the images: this one, or the one they were reused from")
     e.add_argument("--repository", required=True)
     m = sub.add_parser("merge")
     m.add_argument("--targets", required=True, help="scripts/gen_matrix.py --github targets, .include")
@@ -147,7 +165,7 @@ def main(argv=None):
     try:
         if args.cmd == "entry":
             entry = json.loads(Path(args.entry).read_text())
-            json.dump(entry_record(entry, args.out, args.created, args.repository), sys.stdout, indent=2)
+            json.dump(entry_record(entry, args.out, args.created, args.repository, args.built_run), sys.stdout, indent=2)
             print()
         else:
             wanted = json.loads(Path(args.targets).read_text())

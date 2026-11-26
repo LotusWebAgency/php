@@ -16,6 +16,11 @@ cd "$ROOT"
 # Keep this list in sync with .dockerignore's inverse (the paths it does NOT
 # exclude) plus the top-level files the Dockerfile/bake read directly.
 PATHS=(php scripts deps conf rootfs shim Dockerfile matrix.json docker-bake.hcl matrix.gen.hcl)
+# scripts/test_*.py are unit tests: the Dockerfiles COPY or bind only named scripts
+# (runtime-libs.sh, slim-finalize.sh, slim-native-keep.txt), never a glob, so no
+# image carries them, and a test-only commit must keep the hash of the images it
+# does not change (ci/reuse_plan.py re-tests those instead of rebuilding them).
+EXCLUDE=(':(exclude,glob)scripts/test_*.py')
 
 command -v git >/dev/null 2>&1 || { echo "FAIL: git not found -- cannot enumerate build-context inputs" >&2; exit 1; }
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "FAIL: $ROOT is not a git work tree" >&2; exit 1; }
@@ -27,7 +32,7 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "FAIL: $ROOT is no
 # LC_ALL=C: the aggregate depends on line order, and locale-aware collation of
 # mixed-case paths differs per host.
 # core.quotepath=off keeps non-ASCII names as raw bytes instead of C-quoted.
-files=$(git -c core.quotepath=off ls-files --cached --others --exclude-standard -- "${PATHS[@]}" | LC_ALL=C sort)
+files=$(git -c core.quotepath=off ls-files --cached --others --exclude-standard -- "${PATHS[@]}" "${EXCLUDE[@]}" | LC_ALL=C sort)
 [ -n "$files" ] || { echo "FAIL: no build-context input files found under ${PATHS[*]}" >&2; exit 1; }
 
 # sha256sum folds path and content into each line, so a rename changes the

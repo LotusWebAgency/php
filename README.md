@@ -882,8 +882,12 @@ Work lands on `develop` through pull requests. A pull request builds, tests and 
 on amd64 without publishing. A push to `develop` builds and tests every image on native amd64 and
 arm64 runners, pushes every image by digest (SBOM and provenance attached) to
 `ghcr.io/lotuswebagency/php/dev`, tests it from there and tags the ones that pass as unsigned test
-builds (pruned after 14 days by `dev-prune.yml`); it never touches Docker Hub. A pull request from
-`develop` to `main` is the release: merging it builds, tests, signs and attests every image in the
+builds (pruned after 14 days by `dev-prune.yml`); it never touches Docker Hub. When the push changes
+nothing the images are built from (`scripts/inputs-hash.sh`, which covers the build context and not the
+tests, CI scripts or docs) and the previous green `develop` run's images are at most five days old,
+nothing is rebuilt: that run's images are tested again with the day's Trivy database and tagged for the
+new commit, and the run says so in its summary. Dispatching `ci.yml` with `rebuild` forces a build. A
+pull request from `develop` to `main` is the release: merging it builds, tests, signs and attests every image in the
 GHCR staging repository, copies each signed manifest list to Docker Hub with its signatures and
 attestations, and only then moves the tags. A weekly rebuild (Mondays 19:10 UTC) runs on `main`.
 Only the promotion and the description-sync jobs use the Docker Hub credentials, both in the
