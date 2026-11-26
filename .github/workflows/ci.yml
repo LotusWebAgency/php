@@ -30,13 +30,18 @@
 #     Trivy DB, tags them for this commit and records them in this run's
 #     candidate with their original build run and time. The dispatch input
 #     `rebuild` forces a build.
-#   pull request from develop to main (the promote PR)  builds nothing: the
-#     `promote-check` job applies the checks a copy release makes (below) to the PR
-#     head and fails the `pr-gate` unless main could publish develop's images by
-#     copy, and unless the merge ref's tree is the head's, so what the PR gate
-#     passes is exactly what the push to main will copy. The repository variable
-#     RELEASE_HOLD, when set, fails it (this check and the copy path only: a
-#     hold does not stop a push to main from building and publishing).
+#   pull request from develop to main (the promote PR)  the `promote-check` job
+#     applies the checks a copy release makes (below) to the PR head and decides
+#     `copy` or not. When main could publish develop's images by copy, `images` is
+#     skipped (nothing is built, and the merge ref's tree is the head's, so what the
+#     PR gate passes is exactly what the push to main will copy). When it could not
+#     (develop's run is stale or reused images, the first promotion after a change to
+#     extended.yml's run-name, no extended run yet), `images` runs the subset build
+#     like any other pull request and main rebuilds on the merge. promote-check
+#     fails, and so blocks the PR, only for a set RELEASE_HOLD (the copy path and this
+#     check only: a hold does not stop a push to main from building and publishing),
+#     a merge ref that is not a merge of the PR head, or a merge ref whose tree is
+#     not the head's.
 #   push on main, when a merge commit of develop carries develop's tree unchanged
 #     (ci/release_source.py, run by `release-source`; the checks are in its
 #     header: the develop run of the second parent succeeded as a whole and built
@@ -342,7 +347,7 @@ jobs:
           echo "ci-hash=$ci_hash" >> "$GITHUB_OUTPUT"
 
       # The pull request that promotes develop: same repository, head develop,
-      # base main. It builds nothing; `promote-check` stands in for `images`.
+      # base main. `promote-check` decides whether `images` runs for it.
       - name: Recognize the promote pull request
         id: promote
         env:
@@ -601,8 +606,8 @@ jobs:
   # the cache can never change what is built. A reuse run builds nothing and
   # skips it.
   sources:
-    needs: [plan, release-source]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && needs.plan.outputs.promote != 'true' }}
+    needs: [plan, release-source, promote-check]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && (needs.plan.outputs.promote != 'true' || (needs.promote-check.result == 'success' && needs.promote-check.outputs.copy == 'false')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -689,8 +694,8 @@ jobs:
   # A failed test leaves the targets that passed their tags and artifacts (the
   # steps after the test run unless the run was cancelled) and fails the job.
   images:
-    needs: [plan, release-source, corpus-merge, trivy-db, sources]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.trivy-db.result == 'success' && needs.release-source.outputs.mode != 'copy' && needs.plan.outputs.promote != 'true' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') }}
+    needs: [plan, release-source, promote-check, corpus-merge, trivy-db, sources]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.trivy-db.result == 'success' && needs.release-source.outputs.mode != 'copy' && (needs.plan.outputs.promote != 'true' || (needs.promote-check.result == 'success' && needs.promote-check.outputs.copy == 'false')) && (github.event_name == 'pull_request' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') }}
     name: images ${{ matrix.job.name }}
     strategy:
       fail-fast: false
@@ -1231,39 +1236,52 @@ jobs:
       PLAN: ${{ needs.plan.result }}
       IMAGES: ${{ needs.images.result }}
       PROMOTE_CHECK: ${{ needs.promote-check.result }}
+      COPY: ${{ needs.promote-check.outputs.copy }}
       PROMOTE: ${{ needs.plan.outputs.promote }}
     steps:
-      - name: Require preflight, plan and the images (or, for the promote PR, the promote check)
+      - name: Require preflight, plan and the images (for the promote PR, the promote check, and the images unless main will copy)
         run: |
           echo "preflight:      $PREFLIGHT"
           echo "plan:           $PLAN"
           echo "images:         $IMAGES"
-          echo "promote-check:  $PROMOTE_CHECK"
+          echo "promote-check:  $PROMOTE_CHECK (copy: ${COPY:-n/a})"
           [ "$PREFLIGHT" = "success" ] || { echo "FAIL: preflight did not succeed" >&2; exit 1; }
           [ "$PLAN" = "success" ] || { echo "FAIL: plan did not succeed" >&2; exit 1; }
           if [ "$PROMOTE" = "true" ]; then
             [ "$PROMOTE_CHECK" = "success" ] || { echo "FAIL: promote-check did not succeed" >&2; exit 1; }
-            echo "ok: preflight, plan and promote-check succeeded"
+            if [ "$COPY" = "true" ]; then
+              echo "ok: preflight, plan and promote-check succeeded; main will copy, nothing to build"
+            elif [ "$COPY" = "false" ]; then
+              [ "$IMAGES" = "success" ] || { echo "FAIL: main will rebuild and at least one images entry did not succeed" >&2; exit 1; }
+              echo "ok: preflight, plan, promote-check and every images entry succeeded; main will rebuild"
+            else
+              echo "FAIL: promote-check made no decision" >&2; exit 1
+            fi
           else
             [ "$IMAGES" = "success" ] || { echo "FAIL: at least one images entry did not succeed" >&2; exit 1; }
             echo "ok: preflight, plan and every images entry succeeded"
           fi
 
   # ----------------------------------------------------------- promote-check
-  # The pull request from develop to main builds nothing. It passes only when the
-  # push to main that merging it makes would copy develop's images
-  # (ci/release_source.py, the same checks `release-source` runs on that push): the
-  # merge ref has two parents, its second is the PR head and its tree is the head's,
-  # the head's develop ci run succeeded as a whole and built every image itself, the
-  # extended.yml run that its completion started (event workflow_run, titled with the
-  # head and that run attempt) succeeded, its release candidate is complete, for this
-  # inputs hash and this ci.yml and at most seven days old, and the repository
-  # variable RELEASE_HOLD is empty. Anything else fails here, with the reason, not on
-  # main: wait for develop, or push a change to develop. No dispatch of extended.yml
-  # can stand in for that run, and the first promotion after this lands has none
-  # (main's extended.yml still titles its runs the old way, so no run qualifies
-  # until the new one is on main): it can only be a rebuild, and fails here. Unlike
-  # `release-source`, a failed decision or an unreadable GitHub fails the check.
+  # Decides, for the pull request from develop to main, whether the push to main
+  # that merging it makes would copy develop's images (ci/release_source.py, the same
+  # checks `release-source` runs on that push): the merge ref has two parents, its
+  # second is the PR head and its tree is the head's, the head's develop ci run
+  # succeeded as a whole and built every image itself, the extended.yml run that its
+  # completion started (event workflow_run, titled with the head and that run
+  # attempt) succeeded, its release candidate is complete, for this inputs hash and
+  # this ci.yml and at most seven days old, and the repository variable RELEASE_HOLD
+  # is empty. The output `copy` is `true` when all of that holds and `false`
+  # otherwise, with the reason in the step summary: `images` then builds the
+  # subset like for any pull request, and main rebuilds on the merge. Not eligible
+  # is not a failure (it cannot always be: no extended run titled the new way
+  # exists until main's extended.yml carries the run-name, so the first promotion
+  # after that change is always a rebuild, and so is one whose develop run is
+  # stale, reused images, or has no extended run yet). The job fails, and with it
+  # `pr-gate`, only for a set RELEASE_HOLD, a merge ref that is not the PR head's
+  # tree (second parent or tree), git failing, or a script error. No dispatch of
+  # extended.yml can stand in for the run the copy needs. The decision is a hint
+  # for the PR: `release-source` re-derives it on the merge commit.
   promote-check:
     needs: plan
     if: ${{ needs.plan.outputs.promote == 'true' }}
@@ -1273,6 +1291,8 @@ jobs:
       contents: read
       actions: read
       statuses: read
+    outputs:
+      copy: ${{ steps.decide.outputs.copy }}
     steps:
       # The merge ref (the default for a pull request), two commits deep.
       - name: Checkout
@@ -1280,7 +1300,8 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Check that main could copy develop's images
+      - name: Decide whether main could copy develop's images
+        id: decide
         env:
           GH_TOKEN: ${{ github.token }}
           INPUTS_HASH: ${{ needs.plan.outputs.inputs-hash }}
@@ -1294,7 +1315,7 @@ jobs:
           rc=0
           decision="$(python3 ci/release_source.py decide --mode promote --repo "$GITHUB_REPOSITORY" --inputs-hash "$INPUTS_HASH" \
             --ci-hash "$CI_HASH" --targets "$RUNNER_TEMP/targets.json" --dev-repo "$DEV_REPO" --hold "$RELEASE_HOLD" \
-            --head-sha "$HEAD_SHA" --save-candidate "$RUNNER_TEMP/release-candidate.json" --gate)" || rc=$?
+            --head-sha "$HEAD_SHA" --save-candidate "$RUNNER_TEMP/release-candidate.json" --output "$GITHUB_OUTPUT")" || rc=$?
           reason="$(jq -r '.reason // empty' <<<"$decision" 2>/dev/null || true)"
           [ -n "$reason" ] || reason="ci/release_source.py made no decision (rc $rc)"
           if [ "$rc" -ne 0 ]; then
@@ -1302,8 +1323,13 @@ jobs:
             echo "FAIL: $reason" >&2
             exit 1
           fi
-          printf '### Promote check: main will copy\n\n%s\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
-          echo "ok: $reason"
+          if [ "$(jq -er .mode <<<"$decision")" = copy ]; then
+            printf '### Promote check: main will copy\n\nThe images job is skipped.\n\n%s\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+            echo "copy: $reason"
+          else
+            printf '### Promote check: main will rebuild\n\nThe images job builds the pull request subset.\n\n%s\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+            echo "rebuild: $reason"
+          fi
 
   # ------------------------------------------------------------ corpus-matrix
   # The 7 corpus tiers (scripts/pgo_tiers.py list) as a matrix for the corpus and

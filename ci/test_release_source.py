@@ -308,14 +308,27 @@ class TestPromote(unittest.TestCase):
     def test_a_merge_ref_that_does_not_contain_the_pr_head(self):
         got = decide(mode="promote", head_sha="a" * 40)
         self.assertEqual(got["mode"], "rebuild")
+        self.assertTrue(got["blocked"])
         self.assertIn("is not the PR head", got["reason"])
 
     def test_a_merge_ref_whose_tree_is_not_the_heads(self):
         got = decide(mode="promote", head_sha=D, git=FakeGit(trees={"HEAD": "a" * 40, D: TREE}))
+        self.assertTrue(got["blocked"])
         self.assertIn("changes the tree", got["reason"])
 
     def test_a_hold_blocks_the_promotion(self):
-        self.assertIn("RELEASE_HOLD", decide(mode="promote", head_sha=D, hold="1")["reason"])
+        got = decide(mode="promote", head_sha=D, hold="1")
+        self.assertTrue(got["blocked"])
+        self.assertIn("RELEASE_HOLD", got["reason"])
+
+    def test_not_eligible_is_not_blocked(self):
+        got = decide(mode="promote", head_sha=D, api=FakeApi(statuses=[]))
+        self.assertEqual(got["mode"], "rebuild")
+        self.assertNotIn("blocked", got)
+
+    def test_main_mode_never_blocks(self):
+        self.assertNotIn("blocked", decide(hold="1"))
+        self.assertNotIn("blocked", decide(git=FakeGit(trees={"HEAD": "a" * 40, D: TREE})))
 
 
 class TestVerifyTarget(unittest.TestCase):
@@ -410,27 +423,59 @@ class TestCli(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("rebuild instead of copying", err)
 
-    def test_decide_gate_fails_on_rebuild_and_saves_nothing(self):
+    def promote(self, tmp, api, git=FakeGit, hold=None):
         from unittest import mock
+        (tmp / "t.json").write_text(json.dumps(targets()))
+        argv = ["decide", "--mode", "promote", "--repo", SLUG, "--inputs-hash", HASH, "--ci-hash", CI_HASH, "--targets", str(tmp / "t.json"),
+                "--dev-repo", REPO, "--save-candidate", str(tmp / "cand.json"), "--output", str(tmp / "out"), "--head-sha", D]
+        if hold is not None:
+            argv += ["--hold", hold]
+        with mock.patch.object(release_source, "ReleaseApi", lambda repo: api), mock.patch.object(release_source, "Git", git):
+            return self.run_cli(*argv)
+
+    def test_promote_not_eligible_is_a_decision_not_a_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            (tmp / "t.json").write_text(json.dumps(targets()))
-            dest = tmp / "cand.json"
-            argv = ["decide", "--mode", "promote", "--repo", SLUG, "--inputs-hash", HASH, "--ci-hash", CI_HASH, "--targets", str(tmp / "t.json"),
-                    "--dev-repo", REPO, "--save-candidate", str(dest), "--gate", "--head-sha", D]
-            with mock.patch.object(release_source, "ReleaseApi", lambda repo: FakeApi(statuses=[])), \
-                    mock.patch.object(release_source, "Git", FakeGit):
-                rc, out, err = self.run_cli(*argv)
-            self.assertEqual(rc, 1)
+            rc, out, err = self.promote(tmp, FakeApi(statuses=[]))
+            self.assertEqual(rc, 0, err)
             self.assertEqual(json.loads(out)["mode"], "rebuild")
-            self.assertIn("FAIL: ", err)
-            self.assertFalse(dest.exists())
-            with mock.patch.object(release_source, "ReleaseApi", lambda repo: FakeApi()), mock.patch.object(release_source, "Git", FakeGit):
-                rc, out, err = self.run_cli(*argv)
+            self.assertNotIn("blocked", json.loads(out))
+            self.assertEqual((tmp / "out").read_text(), "copy=false\n")
+            self.assertFalse((tmp / "cand.json").exists())
+
+    def test_promote_eligible_copies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rc, out, err = self.promote(tmp, FakeApi())
             self.assertEqual(rc, 0, err)
             self.assertEqual(json.loads(out)["mode"], "copy")
             self.assertNotIn("candidate", json.loads(out))
-            self.assertEqual(json.loads(dest.read_text())["sha"], D)
+            self.assertEqual((tmp / "out").read_text(), "copy=true\n")
+            self.assertEqual(json.loads((tmp / "cand.json").read_text())["sha"], D)
+
+    def test_promote_hold_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rc, out, err = self.promote(tmp, FakeApi(), hold="freeze")
+            self.assertEqual(rc, 1)
+            self.assertIn("FAIL: RELEASE_HOLD is set", err)
+            self.assertFalse((tmp / "out").exists())
+            self.assertFalse((tmp / "cand.json").exists())
+
+    def test_promote_tree_mismatch_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rc, out, err = self.promote(tmp, FakeApi(), git=lambda: FakeGit(trees={"HEAD": "a" * 40, D: TREE}))
+            self.assertEqual(rc, 1)
+            self.assertIn("changes the tree", err)
+            self.assertFalse((tmp / "out").exists())
+
+    def test_promote_merge_ref_without_the_head_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            rc, out, err = self.promote(tmp, FakeApi(), git=lambda: FakeGit(parents=(FIRST, "e" * 40)))
+            self.assertEqual(rc, 1)
+            self.assertIn("is not the PR head", err)
 
     def test_main_mode_rebuild_exits_zero(self):
         from unittest import mock

@@ -2,14 +2,17 @@
 """Release main's images by copying the ones develop already built and tested.
 
     python3 ci/release_source.py decide --mode main|promote --repo OWNER/REPO --inputs-hash H --ci-hash H \
-        --targets TARGETS.json --dev-repo REPO --hold "$RELEASE_HOLD" --save-candidate FILE [--head-sha SHA] [--gate] > decision.json
+        --targets TARGETS.json --dev-repo REPO --hold "$RELEASE_HOLD" --save-candidate FILE [--head-sha SHA] [--output FILE] > decision.json
     python3 ci/release_source.py target --candidate FILE --target NAME --digests DIR
 
 `decide` answers one question: are the images on php/dev the ones this checkout would publish, so
 that main only has to copy, rescan, sign and attest them? It runs in the `release-source` job on a
 push to main (`--mode main`; the answer is `copy` or `rebuild`, and a rebuild never fails the run)
-and in `promote-check` on a pull request from develop to main (`--mode promote`, `--gate`: the same
-checks applied to the PR head, and anything but `copy` fails the check).
+and in `promote-check` on a pull request from develop to main (`--mode promote`: the same checks
+applied to the PR head). There the answer is a decision, not a gate: `copy` or `rebuild` goes to
+`--output` as `copy=true|false` and a rebuild is exit 0, so the PR runs the subset build instead of
+the copy path. Only a PR that must not merge exits 1: RELEASE_HOLD set, a merge ref that is not a
+merge of the PR head, a merge ref whose tree is not the head's, or git failing.
 
 A merge commit of develop into main publishes develop's tree unchanged; D below is its second
 parent, the develop commit that was tested. `copy` needs all of these:
@@ -61,6 +64,10 @@ class NotCopy(NoReuse):
     """The reason this release is not a copy."""
 
 
+class Blocked(NotCopy):
+    """A reason that also stops a promote PR from merging: a hold, or a merge ref that is not the PR head's tree."""
+
+
 class Git:
     """The two things read from the checkout: the parents of HEAD and trees."""
 
@@ -71,7 +78,7 @@ class Git:
         try:
             done = self.run(["git", *args], capture_output=True, text=True, check=True, timeout=60)
         except (subprocess.SubprocessError, OSError) as exc:
-            raise NotCopy(f"git {' '.join(args)} failed: {getattr(exc, 'stderr', '') or exc}") from None
+            raise Blocked(f"git {' '.join(args)} failed: {getattr(exc, 'stderr', '') or exc}") from None
         return done.stdout.strip()
 
     def parents(self):
@@ -99,16 +106,16 @@ def develop_commit(git, mode, head_sha):
     """D, the develop commit whose images this checkout would publish, or NotCopy."""
     commit, parents = git.parents()
     if len(parents) != 2:
-        raise NotCopy(f"HEAD has {len(parents)} parent(s), not the two of a merge of develop")
+        raise Blocked(f"HEAD has {len(parents)} parent(s), not the two of a merge of develop")
     d = parents[1]
     if mode == "promote":
         if head_sha and d != head_sha:
-            raise NotCopy(f"the merge ref's second parent {d[:12]} is not the PR head {head_sha[:12]}")
+            raise Blocked(f"the merge ref's second parent {d[:12]} is not the PR head {head_sha[:12]}")
     elif not SHA.match(d):
         raise NotCopy(f"second parent '{d}' is not a commit sha")
     head_tree, d_tree = git.tree("HEAD"), git.tree(d)
     if head_tree != d_tree:
-        raise NotCopy(f"the merge changes the tree: {head_tree[:12]} is not {d_tree[:12]} ({d[:12]}); main has content develop never tested")
+        raise Blocked(f"the merge changes the tree: {head_tree[:12]} is not {d_tree[:12]} ({d[:12]}); main has content develop never tested")
     return d, head_tree
 
 
@@ -192,10 +199,10 @@ def oldest_created(cand):
 
 
 def decide(api, git, *, mode, repo, inputs_hash, ci_hash, targets, dev_repo, hold, head_sha="", now, max_age=MAX_AGE):
-    """{"mode": "copy"|"rebuild", "reason", and for a copy "sha", "run_id", "extended_run", "built_run", "candidate"}; built_run is run_id."""
+    """{"mode": "copy"|"rebuild", "reason", "blocked": true for a promote PR that must not merge, and for a copy "sha", "run_id", "extended_run", "built_run", "candidate"}; built_run is run_id."""
     try:
         if str(hold).strip():
-            raise NotCopy(f"RELEASE_HOLD is set ({str(hold).strip()[:200]})")
+            raise Blocked(f"RELEASE_HOLD is set ({str(hold).strip()[:200]})")
         d, tree = develop_commit(git, mode, head_sha)
         run = ci_run(api, d, repo)
         extended = extended_run(api, d, repo, run)
@@ -208,7 +215,10 @@ def decide(api, git, *, mode, repo, inputs_hash, ci_hash, targets, dev_repo, hol
             raise NotCopy(f"the candidate says run {cand.get('run_id')} made it, it is an artifact of run {run['id']}")
         built_by(cand, run)
     except NoReuse as exc:
-        return {"mode": "rebuild", "reason": str(exc)}
+        decision = {"mode": "rebuild", "reason": str(exc)}
+        if mode == "promote" and isinstance(exc, Blocked):
+            decision["blocked"] = True
+        return decision
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
         return {"mode": "rebuild", "reason": f"unexpected shape of the GitHub data ({type(exc).__name__}: {exc})"}
     return {
@@ -277,7 +287,7 @@ def main(argv=None):
     d.add_argument("--hold", default="", help="the RELEASE_HOLD repository variable")
     d.add_argument("--head-sha", default="", help="promote mode: the PR head the merge ref must contain")
     d.add_argument("--save-candidate", required=True, help="where the verified candidate goes when the mode is copy")
-    d.add_argument("--gate", action="store_true", help="exit 1 unless the mode is copy")
+    d.add_argument("--output", help="append copy=true|false here (the GITHUB_OUTPUT file) unless the PR is blocked")
     t = sub.add_parser("target")
     t.add_argument("--candidate", required=True)
     t.add_argument("--target", required=True)
@@ -296,9 +306,12 @@ def main(argv=None):
                 Path(args.save_candidate).write_text(json.dumps(cand, indent=2) + "\n")
             json.dump(decision, sys.stdout)
             print()
-            if args.gate and decision["mode"] != "copy":
+            if decision.get("blocked"):
                 print(f"FAIL: {decision['reason']}", file=sys.stderr)
                 return 1
+            if args.output:
+                with open(args.output, "a") as out:
+                    out.write(f"copy={'true' if decision['mode'] == 'copy' else 'false'}\n")
         else:
             problems = verify_target(json.loads(Path(args.candidate).read_text()), args.target, args.digests, _now())
             if problems:
