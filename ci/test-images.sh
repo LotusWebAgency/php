@@ -187,8 +187,9 @@ trivy_scan() {  # trivy_scan <image> <TRIVY_* assignments...>
 }
 
 kev_and_floor() {  # <image> <report>
-  trivy_scan "$1" TRIVY_FORMAT=json TRIVY_OUTPUT="$2" TRIVY_EXIT_CODE=0 TRIVY_SCANNERS=vuln TRIVY_LIST_ALL_PKGS=true
-  python3 "$ROOT/ci/kev.py" "$2" --catalog "$KEV_CATALOG"
+  trivy_scan "$1" TRIVY_FORMAT=json TRIVY_OUTPUT="$2" TRIVY_EXIT_CODE=0 TRIVY_SCANNERS=vuln TRIVY_LIST_ALL_PKGS=true \
+    TRIVY_SEVERITY=UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL || return 1
+  python3 "$ROOT/ci/kev.py" "$2" --catalog "$KEV_CATALOG" || return 1
   local count
   count="$(jq '[.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length' "$2")"
   echo "$(basename "$2"): $count OS packages (floor: more than $MIN_PACKAGES)"
