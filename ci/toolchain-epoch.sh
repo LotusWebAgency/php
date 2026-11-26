@@ -14,8 +14,13 @@ set -euo pipefail
 
 override="${TOOLCHAIN_EPOCH_OVERRIDE:-}"
 if [ -n "$override" ]; then
-  if ! [[ "$override" =~ ^[0-9]{4}-W[0-9]{2}(\.[0-9]+)?$ ]]; then
+  if ! [[ "$override" =~ ^([0-9]{4})-W([0-9]{2})(\.[0-9]+)?$ ]]; then
     echo "toolchain-epoch: TOOLCHAIN_EPOCH_OVERRIDE='$override' is not YYYY-Www or YYYY-Www.N" >&2
+    exit 1
+  fi
+  week=$((10#${BASH_REMATCH[2]}))
+  if [ "$week" -lt 1 ] || [ "$week" -gt 53 ]; then
+    echo "toolchain-epoch: TOOLCHAIN_EPOCH_OVERRIDE='$override' has week $week; an ISO week is 01 to 53" >&2
     exit 1
   fi
   echo "$override"
