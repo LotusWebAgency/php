@@ -403,16 +403,20 @@ IDX_amd64="$DEV_IDX_amd64" IDX_arm64="$DEV_IDX_arm64"
 index_files "$WORK/results-copied"
 
 # What `release_source.py target` holds the downloaded digest files to: the candidate's.
-jq -n --arg ia "$DEV_IDX_amd64" --arg ib "$DEV_IDX_arm64" --arg pa "$DEV_PLAT_amd64" --arg pb "$DEV_PLAT_arm64" \
-  '{targets: {"copied-cli": {archs: {amd64: {index: $ia, platform: $pa}, arm64: {index: $ib, platform: $pb}}}}}' >"$WORK/copy-candidate.json"
+jq -n --arg ia "$DEV_IDX_amd64" --arg ib "$DEV_IDX_arm64" --arg pa "$DEV_PLAT_amd64" --arg pb "$DEV_PLAT_arm64" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{targets: {"copied-cli": {archs: {amd64: {index: $ia, platform: $pa, created: $ts}, arm64: {index: $ib, platform: $pb, created: $ts}}}}}' >"$WORK/copy-candidate.json"
 python3 ci/release_source.py target --candidate "$WORK/copy-candidate.json" --target copied-cli --digests "$WORK/results-copied" >/dev/null \
   || die "release_source.py target refused the digests the candidate records"
 mkdir -p "$WORK/results-wrong"
 cp "$WORK/results-copied/"* "$WORK/results-wrong/"
 printf '%s' "$DEV_IDX_arm64" > "$WORK/results-wrong/amd64"
-if python3 ci/release_source.py target --candidate "$WORK/copy-candidate.json" --target copied-cli --digests "$WORK/results-wrong" >/dev/null 2>&1; then
+if wrong="$(python3 ci/release_source.py target --candidate "$WORK/copy-candidate.json" --target copied-cli --digests "$WORK/results-wrong" 2>&1)"; then
   die "release_source.py target accepted an index the candidate does not record"
 fi
+case "$wrong" in
+  *"the artifact says index"*) ;;
+  *) die "release_source.py target refused the wrong index for another reason: $wrong" ;;
+esac
 pass "release_source.py target accepts the candidate's digests and refuses another index"
 
 # Nothing is attested or listed for an index that was not copied yet.
