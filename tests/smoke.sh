@@ -759,10 +759,12 @@ fi
 # (letters/digits/underscore, like every real name in ext.json) but not a real
 # extension; a hyphenated name is caught earlier by the charset guard, a
 # different assertion (see test-entrypoint.sh).
-if drun --rm "$IMAGE" php-ext-enable not_a_real_extension 2>/tmp/php-ext-enable.err; then
+enable_err="$(mktemp)"
+if drun --rm "$IMAGE" php-ext-enable not_a_real_extension 2>"$enable_err"; then
   echo "FAIL: php-ext-enable accepted an unknown extension name"; exit 1
 fi
-grep -qi "no such extension" /tmp/php-ext-enable.err || { echo "FAIL: unknown extension did not fail loudly"; exit 1; }
+grep -qi "no such extension" "$enable_err" || { echo "FAIL: unknown extension did not fail loudly"; exit 1; }
+rm -f "$enable_err"
 echo "ok: php-ext-enable refuses unknown names"
 
 # COPY from a scratch stage stamps its own directory metadata onto directories
