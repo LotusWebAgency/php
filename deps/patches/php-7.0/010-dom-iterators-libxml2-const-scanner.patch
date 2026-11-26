@@ -1,3 +1,8 @@
+Fixes: ext/dom passes a non-const xmlHashScanner callback, which clang 16+ rejects against libxml2 2.9.8 or later.
+Origin: php-src commit a820aab9da
+Upstream: never: merged in PHP-7.1 (7.1.21); 7.0 is EOL and will not get it
+Drop-when: 7.0 leaves the matrix
+
 Guard ext/dom's xmlHashScanner callback the way php-src itself does from 7.1 on.
 
 libxml2 2.9.8 added `const` to the `name` parameter of xmlHashScanner:

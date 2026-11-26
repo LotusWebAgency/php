@@ -1,3 +1,9 @@
+Fixes: The preserve_none probe in Zend/Zend.m4 leaves x20 out of its aarch64 clobbers, so clang 19 with ThinLTO fails it and arm64 silently gets the CALL VM instead of TAILCALL.
+Origin: php-src commit a1cb5a37c0
+Upstream: merged: php-src master (#23883); no PHP-8.5 release carries it yet
+Drop-when: an 8.5 release carries the commit (patch --forward fails the build if it is applied twice)
+Source: php-src commit a1cb5a37c0 ("fix aarch64 gcc preserve_none detection"), applied verbatim.
+
 --- a/Zend/Zend.m4
 +++ b/Zend/Zend.m4
 @@ -494,7 +494,7 @@

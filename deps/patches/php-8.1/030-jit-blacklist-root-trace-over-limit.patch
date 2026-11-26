@@ -1,3 +1,7 @@
+Fixes: With the tracing JIT, a request spins at full CPU once opcache.jit_max_root_traces root traces exist, because an invalidating side exit re-enters the same trace.
+Origin: php-src commit 350af549a0
+Upstream: never: merged in PHP-8.2 (8.2.21, GH-14475); 8.1 is EOL and will not get it
+Drop-when: 8.1 leaves the matrix
 Source: php-src commit 350af549a0a6743046c63cc7136f27ddfff6301f ("Fix GH-14475: PHP 8.3.7 with JIT encounters infinite loop on specific paths"), applied verbatim with 8.1.34 line numbers. php-src fixed it on PHP-8.2 in June 2024 (8.2.21); 8.1 was security-only by then and never got it.
 
 With the tracing JIT, an invalidating side exit (ZEND_JIT_EXIT_INVALIDATE) resets the root trace's opline to the hot counter handler and returns to it. Once opcache.jit_max_root_traces root traces exist, that reset is skipped, but the exit still returns 0, so the VM re-enters the same JIT-ed trace, which takes the same exit again: the request spins at 100% CPU, taking the shared-memory lock on every pass, until a timeout kills it. A larger opcache.memory_consumption caches more scripts, so more code gets traced and the limit is reached sooner. The fix blacklists the root trace instead, restoring the original VM handler.

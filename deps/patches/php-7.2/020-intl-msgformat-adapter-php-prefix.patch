@@ -1,3 +1,8 @@
+Fixes: ext/intl MessageFormatAdapter methods collide with ICU's own symbols under the static ICU link (multiple definition at the final link).
+Origin: php-src commit 5240f8391f
+Upstream: never: merged in PHP-7.4 (7.4.14, bug #80425); 7.0-7.3 are EOL and will not get it
+Drop-when: ICU is built shared for these versions, or the version leaves the matrix
+
 Prefix ext/intl MessageFormatAdapter methods with php, the way php-src itself
 does from 7.4 on, so a statically-linked ICU does not collide with them.
 
