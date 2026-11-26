@@ -26,40 +26,134 @@ the release tarball others audit, and the only one that breaks silently. Prefer,
 2. a registry change (`php/ext.json`, `php/pecl.lock`);
 3. a patch here.
 
-Six of the ten distinct PHP patches are backports of fixes php-src made on a later branch, and one
-applies a php-src pull request that is not merged yet. One is Wolfi's carried OpenSSL 4 fix, the other
-two address the legacy OpenSSL probe and ARM64 interpreter inlining on clang 19.
+## Header convention
+
+Every patch header carries four single-line fields anywhere before the first diff line, around the
+free-text description (and any `Source:` line or mail header the patch came with):
+
+```
+Fixes:     what breaks without it, one line
+Origin:    own | php-src commit <sha> | php-src pull <n> | php-src pull <n> commit <sha>
+Upstream:  <status>[: detail]
+Drop-when: the condition under which the patch goes away
+```
+
+`Upstream` starts with one of `merged` (in php-src, not yet in a release of this branch), `open` (a
+pull request is open; `Origin` must name it), `unfixed` (no upstream fix, branch still maintained),
+`never` (fixed elsewhere or not fixable, and the branch is EOL) or `n/a` (a local toolchain workaround,
+not an upstream defect). The tables below are generated from these fields:
+
+```
+python3 ci/patches.py write      # regenerate the tables after editing a header
+python3 ci/patches.py check      # offline; tests/preflight.sh runs it (fields valid, tables current)
+python3 ci/patches.py online     # GitHub; which patches the pinned releases already carry
+```
 
 ## Patches
 
-| Patch | PHP | Problem | Upstream |
-|---|---|---|---|
-| `010-dom-iterators-libxml2-const-scanner` | 7.0 | `ext/dom` passes `itemHashScanner` to `xmlHashScan()` with a non-`const` `xmlChar *name`. libxml2 2.9.8 made it `const`, and clang 16+ treats the mismatch (`-Wincompatible-function-pointer-types`) as an error, so `ext/dom` does not build against libxml2 2.9.8 or later. | php-src added a `#if LIBXML_VERSION >= 20908` guard in 7.1. This is that guard. |
-| `020-intl-msgformat-adapter-php-prefix` | 7.0-7.3 | `ext/intl` defines `icu::MessageFormatAdapter::getArgTypeList()`, and ICU defines the same symbol in `umsg.cpp`. Harmless against a shared ICU, but a multiple-definition link error against the static ICU this project builds. | php-src renamed its methods to `phpGetArgTypeList` / `phpGetMessagePattern` in 7.4. This is that rename. |
-| `040-zip-mkstemp-include-unistd` | 7.0, 7.1 | The bundled libzip `mkstemp.c` calls `getpid()` without a declaration, which clang 16+ rejects, so `--enable-zip` does not build. | php-src added the `<unistd.h>` include in 7.2. |
-| `010-curl-openssl3-not-old` | 7.4, 8.0 | The `ext/curl/config.m4` probe for "libcurl linked against an old OpenSSL" only recognizes `OpenSSL/1.1` as new. Wolfi's libcurl reports `OpenSSL/4.0.x`, so the probe takes the old-OpenSSL branch, which links OpenSSL into `ext/curl`. On the legacy era that resolves to the vendored static 1.1.1w, while `libcurl.so.4` is bound to the system `libssl.so.4`: two OpenSSLs with incompatible struct layouts in one process. HTTPS `curl_exec()` segfaults; plain HTTP works. The `HAVE_CURL_OLD_OPENSSL` macro defined by the same branch is not the mechanism, since its only consumer is ZTS-guarded and these images are NTS. | Not fixed upstream on these branches (both EOL). The patch accepts any `OpenSSL/<major>` from 3 up (first digit after the slash) alongside `OpenSSL/1.1`. 7.0-7.3 need no such patch: their probe only checks that the ssl_version string starts with `OpenSSL`, and 7.0-7.2 use the vendored curl anyway. |
-| `010-preserve-none-probe-clobbers` | 8.5 | The `preserve_none` run-probe in `Zend/Zend.m4` writes `x20` in its aarch64 inline asm but does not list it as a clobber, so the compiler may keep an input operand there. Clang 19 with ThinLTO and lld does, the probe fails with `arg2 mismatch`, `HAVE_PRESERVE_NONE` stays undefined, and arm64 silently gets the CALL VM instead of TAILCALL (`php/build.sh` fails the build on that). amd64 is unaffected; its hunk only adds `memory` and `cc`. | php-src commit `a1cb5a37c0` ("fix aarch64 gcc preserve_none detection"), applied verbatim. Remove it once an 8.5 release carries the commit; `patch --forward` fails the build if it is applied twice. |
-| `010-openssl-ssl-ctx-options-uint64` (`030-` on 8.5) | 8.1-8.5 | `php_openssl_setup_crypto()` keeps the SSL_CTX options in an `int`. `SSL_OP_ALL` includes bit 31, so the value is negative and `SSL_CTX_set_options()` (a `uint64_t` since OpenSSL 3.0) receives it sign-extended with bits 32-63 set. OpenSSL 4.0 assigns `SSL_OP_ECH_GREASE` to bit 37, so every TLS client stream sends an ECH GREASE extension, and the handshake aborts where X25519 is unavailable (the FIPS provider). 8.1-8.5 build against the system OpenSSL 4. | Wolfi's `openssl-ssl-ctx-options-uint64.patch` (its php-8.2 copy, and its php-8.5 copy for the 8.5 backport), regenerated against each release with exact offsets. Remove it from a version once a release of that version carries the fix. |
-| `020-openssl4-opaque-asn1` | 8.1 | OpenSSL 4 made `ASN1_STRING` (and its `ASN1_OCTET_STRING` / `ASN1_UTCTIME` aliases) opaque and stopped exporting `ERR_NUM_ERRORS`. 8.1's `ext/openssl` reads `->data` / `->length` directly and sizes its error queue with the macro, so it does not compile against the system OpenSSL 4. | php-src's 8.2 and later branches use the accessors; 8.1 is security-only and never got the change. |
-| `030-jit-blacklist-root-trace-over-limit` | 8.1 | With the tracing JIT, an invalidating side exit resets its root trace to the hot counter handler. Once `opcache.jit_max_root_traces` (1024) root traces exist, 8.1 skips that reset but still returns into the same trace, which takes the same exit again: the request spins at full CPU, taking the opcache lock on every pass, until a timeout kills it (WordPress 5.9's `load-styles.php`, in `get_stylesheet()`). A larger `opcache.memory_consumption` caches more scripts, so more code is traced and the limit is reached; with 64 MB a WordPress install fills the cache first and hides it. | php-src commit `350af549a0` (GH-14475, 8.2.21), applied verbatim: the root trace is blacklisted instead. 8.1 was security-only by then. |
-| `020-arm64-interpreter-noinline` | 8.5 | Clang 19 with PGO and ThinLTO can inline `execute_ex()` into `zend_do_link_class()`, whose dynamic stack allocation uses `x19` as its frame base. An opcode handler using `preserve_none` clobbers `x19`, but the inlined caller keeps using it, corrupting execution during interface autoloading. Prevent interpreter inlining on clang ARM64 in both the generated header and its template. PGO, ThinLTO and the TAILCALL VM remain enabled. | Local toolchain workaround. Remove after a compiler upgrade passes the autoload regression without it. |
-| `020-jit-arm64-restore-stub-handlers-on-restart` (`040-` on 8.5) | 8.4, 8.5 | On ARM64 a conditional branch from JIT code reaches only ±1 MB, so once the JIT buffer holds more code than that, IR emits a veneer and `zend_jit_commit_veneers()` puts its address in place of the stub's in `zend_jit_stub_handlers[]`, a table at the start of the JIT buffer that every worker shares. An OPcache restart (`opcache_reset()`, or an out-of-memory restart) rewinds the buffer below those veneers and keeps the table, so traces compiled afterwards branch into code that has since overwritten them. Every FPM worker that takes such a stub (an exception, leaving a function, an interrupt) dies with SIGSEGV or spins, fresh ones included. PrestaShop's cache clear calls `opcache_reset()`; a larger `opcache.memory_consumption` lets more scripts be cached and traced, which pushes the JIT code past 1 MB first. 8.1-8.3 use the DynASM JIT, whose `zend_jit_restart()` clears its veneer table, and x86-64 has no veneers. | php-src pull request #24273 (commit `0c9d9df691`, against PHP-8.4), applied verbatim without its test; not merged as of 8.4.28 and 8.5.13. It keeps the original stub addresses in a third block of the table and restores them on restart. |
+Which patch applies to which version is the directory it sits in. A patch repeated across versions is
+the same change with that version's line numbers; the version-independent fields stay identical.
 
-Patches per version: 7.0: 3, 7.1: 2, 7.2: 1, 7.3: 1, 7.4: 1, 8.0: 1, 8.1: 3, 8.2: 1, 8.3: 1, 8.4: 2,
-8.5: 4.
+<!-- patches:begin (generated by ci/patches.py; edit the patch headers, then run `python3 ci/patches.py write`) -->
 
-### Extension patches
+### PHP 7.0
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `010-dom-iterators-libxml2-const-scanner` | ext/dom passes a non-const xmlHashScanner callback, which clang 16+ rejects against libxml2 2.9.8 or later. | [`a820aab9da`](https://github.com/php/php-src/commit/a820aab9da) | never: merged in PHP-7.1 (7.1.21); 7.0 is EOL and will not get it | 7.0 leaves the matrix |
+| `020-intl-msgformat-adapter-php-prefix` | ext/intl MessageFormatAdapter methods collide with ICU's own symbols under the static ICU link (multiple definition at the final link). | [`5240f8391f`](https://github.com/php/php-src/commit/5240f8391f) | never: merged in PHP-7.4 (7.4.14, bug #80425); 7.0-7.3 are EOL and will not get it | ICU is built shared for these versions, or the version leaves the matrix |
+| `040-zip-mkstemp-include-unistd` | The bundled libzip mkstemp.c calls getpid() without `<unistd.h>`, which clang 16+ rejects. | [`613ee726a8`](https://github.com/php/php-src/commit/613ee726a8) | never: merged in PHP-7.2 (7.2.0); 7.0 and 7.1 are EOL and will not get it | the version leaves the matrix, or zip leaves php/ext.json for it |
+
+### PHP 7.1
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `020-intl-msgformat-adapter-php-prefix` | ext/intl MessageFormatAdapter methods collide with ICU's own symbols under the static ICU link (multiple definition at the final link). | [`5240f8391f`](https://github.com/php/php-src/commit/5240f8391f) | never: merged in PHP-7.4 (7.4.14, bug #80425); 7.0-7.3 are EOL and will not get it | ICU is built shared for these versions, or the version leaves the matrix |
+| `040-zip-mkstemp-include-unistd` | The bundled libzip mkstemp.c calls getpid() without `<unistd.h>`, which clang 16+ rejects. | [`613ee726a8`](https://github.com/php/php-src/commit/613ee726a8) | never: merged in PHP-7.2 (7.2.0); 7.0 and 7.1 are EOL and will not get it | the version leaves the matrix, or zip leaves php/ext.json for it |
+
+### PHP 7.2
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `020-intl-msgformat-adapter-php-prefix` | ext/intl MessageFormatAdapter methods collide with ICU's own symbols under the static ICU link (multiple definition at the final link). | [`5240f8391f`](https://github.com/php/php-src/commit/5240f8391f) | never: merged in PHP-7.4 (7.4.14, bug #80425); 7.0-7.3 are EOL and will not get it | ICU is built shared for these versions, or the version leaves the matrix |
+
+### PHP 7.3
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `020-intl-msgformat-adapter-php-prefix` | ext/intl MessageFormatAdapter methods collide with ICU's own symbols under the static ICU link (multiple definition at the final link). | [`5240f8391f`](https://github.com/php/php-src/commit/5240f8391f) | never: merged in PHP-7.4 (7.4.14, bug #80425); 7.0-7.3 are EOL and will not get it | ICU is built shared for these versions, or the version leaves the matrix |
+
+### PHP 7.4
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `010-curl-openssl3-not-old` | ext/curl's old-OpenSSL probe takes the old branch on OpenSSL 4 and links the vendored 1.1.1w beside the system libssl, so HTTPS curl_exec() segfaults. | own | never: both branches are EOL; php-src removed the probe in 8.4 | the version leaves the matrix |
+
+### PHP 8.0
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `010-curl-openssl3-not-old` | ext/curl's old-OpenSSL probe takes the old branch on OpenSSL 4 and links the vendored 1.1.1w beside the system libssl, so HTTPS curl_exec() segfaults. | own | never: both branches are EOL; php-src removed the probe in 8.4 | the version leaves the matrix |
+
+### PHP 8.1
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `010-openssl-ssl-ctx-options-uint64` | php_openssl_setup_crypto() keeps the SSL_CTX options in an int, sign-extending SSL_OP_ALL; with OpenSSL 4 every TLS client stream sends an ECH GREASE extension and the handshake aborts under the FIPS provider. | [php-src#24304](https://github.com/php/php-src/pull/24304), [`d27328ca66`](https://github.com/php/php-src/commit/d27328ca66) | open: php-src PR #24304 (base PHP-8.4) is not merged; Wolfi carries the same change | a release of this version carries the fix, or the version stops building against OpenSSL 4 |
+| `020-openssl4-opaque-asn1` | ext/openssl reads ASN1_STRING members and ERR_NUM_ERRORS, which OpenSSL 4 made opaque or stopped exporting, so it does not compile against the system OpenSSL 4. | own | never: PHP-8.2 and later use the accessors; 8.1 is EOL and will not get the change | 8.1 leaves the matrix |
+| `030-jit-blacklist-root-trace-over-limit` | With the tracing JIT, a request spins at full CPU once opcache.jit_max_root_traces root traces exist, because an invalidating side exit re-enters the same trace. | [`350af549a0`](https://github.com/php/php-src/commit/350af549a0) | never: merged in PHP-8.2 (8.2.21, GH-14475); 8.1 is EOL and will not get it | 8.1 leaves the matrix |
+
+### PHP 8.2
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `010-openssl-ssl-ctx-options-uint64` | php_openssl_setup_crypto() keeps the SSL_CTX options in an int, sign-extending SSL_OP_ALL; with OpenSSL 4 every TLS client stream sends an ECH GREASE extension and the handshake aborts under the FIPS provider. | [php-src#24304](https://github.com/php/php-src/pull/24304), [`d27328ca66`](https://github.com/php/php-src/commit/d27328ca66) | open: php-src PR #24304 (base PHP-8.4) is not merged; Wolfi carries the same change | a release of this version carries the fix, or the version stops building against OpenSSL 4 |
+
+### PHP 8.3
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `010-openssl-ssl-ctx-options-uint64` | php_openssl_setup_crypto() keeps the SSL_CTX options in an int, sign-extending SSL_OP_ALL; with OpenSSL 4 every TLS client stream sends an ECH GREASE extension and the handshake aborts under the FIPS provider. | [php-src#24304](https://github.com/php/php-src/pull/24304), [`d27328ca66`](https://github.com/php/php-src/commit/d27328ca66) | open: php-src PR #24304 (base PHP-8.4) is not merged; Wolfi carries the same change | a release of this version carries the fix, or the version stops building against OpenSSL 4 |
+
+### PHP 8.4
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `010-openssl-ssl-ctx-options-uint64` | php_openssl_setup_crypto() keeps the SSL_CTX options in an int, sign-extending SSL_OP_ALL; with OpenSSL 4 every TLS client stream sends an ECH GREASE extension and the handshake aborts under the FIPS provider. | [php-src#24304](https://github.com/php/php-src/pull/24304), [`d27328ca66`](https://github.com/php/php-src/commit/d27328ca66) | open: php-src PR #24304 (base PHP-8.4) is not merged; Wolfi carries the same change | a release of this version carries the fix, or the version stops building against OpenSSL 4 |
+| `020-jit-arm64-restore-stub-handlers-on-restart` | On ARM64 an OPcache restart keeps veneer addresses in zend_jit_stub_handlers[], so later traces branch into overwritten code and FPM workers crash or spin. | [php-src#24273](https://github.com/php/php-src/pull/24273), [`0c9d9df691`](https://github.com/php/php-src/commit/0c9d9df691) | open: php-src PR #24273 (base PHP-8.4) is not merged | a release of this version carries the fix (patch --forward fails the build if it is applied twice) |
+
+### PHP 8.5
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `010-preserve-none-probe-clobbers` | The preserve_none probe in Zend/Zend.m4 leaves x20 out of its aarch64 clobbers, so clang 19 with ThinLTO fails it and arm64 silently gets the CALL VM instead of TAILCALL. | [`a1cb5a37c0`](https://github.com/php/php-src/commit/a1cb5a37c0) | merged: php-src master (#23883); no PHP-8.5 release carries it yet | an 8.5 release carries the commit (patch --forward fails the build if it is applied twice) |
+| `020-arm64-interpreter-noinline` | clang 19 with PGO and ThinLTO inlines execute_ex() into zend_do_link_class(), whose frame base x19 a preserve_none handler clobbers, so interface autoloading corrupts execution on ARM64. | own | n/a: local toolchain workaround, not a php-src defect | a compiler upgrade passes the autoload regression without it on baseline and v3 builds with PGO and ThinLTO on aarch64 |
+| `030-openssl-ssl-ctx-options-uint64` | php_openssl_setup_crypto() keeps the SSL_CTX options in an int, sign-extending SSL_OP_ALL; with OpenSSL 4 every TLS client stream sends an ECH GREASE extension and the handshake aborts under the FIPS provider. | [php-src#24304](https://github.com/php/php-src/pull/24304), [`d27328ca66`](https://github.com/php/php-src/commit/d27328ca66) | open: php-src PR #24304 (base PHP-8.4) is not merged; Wolfi carries the same change | a release of this version carries the fix, or the version stops building against OpenSSL 4 |
+| `040-jit-arm64-restore-stub-handlers-on-restart` | On ARM64 an OPcache restart keeps veneer addresses in zend_jit_stub_handlers[], so later traces branch into overwritten code and FPM workers crash or spin. | [php-src#24273](https://github.com/php/php-src/pull/24273), [`0c9d9df691`](https://github.com/php/php-src/commit/0c9d9df691) | open: php-src PR #24273 (base PHP-8.4) is not merged | a release of this version carries the fix (patch --forward fails the build if it is applied twice) |
+
+### snuffleupagus v0.14.0
+
+| Patch | Fixes | Origin | Upstream | Drop when |
+|---|---|---|---|---|
+| `010-keep-fortify-source-3` | src/config.m4 appends -D_FORTIFY_SOURCE=2 after the build's level 3, so the module was compiled at level 2. | own | unfixed: v0.14.0 is the latest release | a release stops forcing the fortify level |
+| `020-upload-validation-array-fields` | sp_rfc1867_callback() reads $_FILES entries as scalars, so every upload to a bracketed field name or an empty file input is rejected. | own | unfixed: v0.14.0 is the latest release | a release handles array-valued $_FILES entries |
+
+<!-- patches:end -->
+
+### Other patched components
 
 `ext-<name>-<tag>/` holds patches for a GitHub-sourced extension in `php/ext.json`, keyed by the tag
 its `url` pins. `php/build-shared-ext.sh` applies them with the same `patch --fuzz=0` command at the
 tarball root, before descending into `subdir`, and prints the count. Keying by tag means a version
 bump in `ext.json` finds no directory and applies nothing, so the patch has to be re-reviewed against
-the new release to come back.
+the new release to come back (`python3 ci/patches.py check` fails on a directory whose tag `ext.json`
+no longer pins). Their `Origin` is `own` or a pull request or commit URL in the extension's own repository
+(`https://github.com/<repo>/pull/<n>`), never a php-src reference.
 
-| Patch | Extension | Problem |
-|---|---|---|
-| `ext-snuffleupagus-v0.14.0/010-keep-fortify-source-3` | snuffleupagus v0.14.0 | `src/config.m4` appends `-D_FORTIFY_SOURCE=2` to `CFLAGS` after the build's `-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3` (`php/cflags.sh`). The last definition wins, so the module was compiled at fortify level 2. The patch drops upstream's define. Its other flags (`-fstack-protector-strong`, `-Wl,-z,relro,-z,now`, warnings) match ours or weaken nothing; `-O0` is debug-only. Remove it once a release stops forcing the level. |
-| `ext-snuffleupagus-v0.14.0/020-upload-validation-array-fields` | snuffleupagus v0.14.0 | `sp_rfc1867_callback()` in `src/sp_upload_validation.c` reads `$_FILES[field]` `tmp_name`, `size` and `name` as scalars. A bracketed field name (`f[]`, `attachment[file]`, `a[b][c]`) makes each of them an array, so the validation script gets a garbage path and size, rejects, and the request fails whatever the content. An empty file input (`UPLOAD_ERR_NO_FILE`, `tmp_name` `""`) runs the script on `""` and is rejected too. The patch walks `name`, `tmp_name`, `size` and `error` in parallel, recursively, with type-checked sibling lookups by `tmp_name`'s keys, and validates only leaves with a non-empty `tmp_name` and `UPLOAD_ERR_OK`. Fork, `execve`, `waitpid`, the `SP_*` environment and logging are unchanged per file. Not fixed upstream as of v0.14.0. Remove it once a release handles array-valued `$_FILES` entries. |
+The legacy-era builds (7.0-8.0) also apply Debian's own patch series to the vendored libxml2 and
+libxslt (`deps/build-deps.sh`, `apply_debian_series`, same zero-fuzz rule). That series ships inside
+the pinned `debian.tar.xz` rows of `deps/versions.lock`, so the row is the record; nothing under
+`deps/patches/` carries it.
 
 No other registry extension (PECL or GitHub) or vendored dependency overrides a hardening flag.
 Their `-O0` and `-fno-omit-frame-pointer` blocks sit behind debug, developer or coverage switches
@@ -88,31 +182,23 @@ together:
 Diff timestamps are stripped from every patch header so that identical changes are identical bytes.
 Check with `sha256sum deps/patches/*/*.patch`.
 
-### When each can go
-
-- **curl:** when these versions stop being built, or when Wolfi's libcurl reports a version string
-  the old probe understands (it will not).
-- **dom, zip:** when their PHP versions are dropped, or when `zip` leaves `php/ext.json`
-  for them. These are genuine php-src bugs on branches that will not get another release.
-- **intl msgformat:** if `deps/build-deps.sh` ever builds ICU shared instead of static for 7.0-7.3.
-  The collision comes from the static link, not the source. Shared ICU would put an end-of-life
-  library and ICU's 30 MB data blob back into every layer, which is what `--disable-shared` avoids.
-- **openssl uint64:** per version, once a release of that version carries the fix, or when it stops
-  being built against OpenSSL 4.
-- **opaque ASN1 (8.1):** when 8.1 leaves the matrix. It is end-of-life and will not get the change.
-- **JIT root-trace limit (8.1):** when 8.1 leaves the matrix, for the same reason. 8.2 and later carry the fix.
-- **ARM64 JIT stub veneers (8.4, 8.5):** per version, once a release of that version carries the fix
-  (`patch --forward` fails the build if it is applied twice).
-- **preserve-none:** see the table.
-- **ARM64 interpreter inlining:** after a compiler upgrade passes the autoload regression without
-  the patch on both baseline and v3 builds with PGO and ThinLTO.
-
 ## Adding one
 
 1. Confirm that steps 1 and 2 of the policy cannot solve it, and say so in the patch header.
-2. Write the header first: what breaks, why, which upstream version fixed it, and what would make the
-   patch unnecessary. The diff is the small part.
+2. Write the header first: the four fields, then what breaks, why, which upstream version fixed it,
+   and what would make the patch unnecessary. The diff is the small part.
 3. Verify it applies to that exact release with zero fuzz and zero offset:
    `patch -p1 --dry-run --fuzz=0`.
-4. If a version needs more than three or four patches, stop. That version does not belong in the
+4. `python3 ci/patches.py write`.
+5. If a version needs more than three or four patches, stop. That version does not belong in the
    matrix.
+
+## Bumping a pin
+
+On every php-src release bump in `matrix.json` and every extension tag bump in `php/ext.json`, run
+`python3 ci/patches.py online --only <php-8.4 | ext-snuffleupagus>` first. `DROP` lines name patches
+the new pin already carries: delete them, then `python3 ci/patches.py write`. `REVIEW` lines are a
+header that disagrees with upstream (a pull request merged or closed) or a patch that no longer
+matches. A bump runs `patch --forward`, which fails the build on a patch the release already carries,
+so this step finds it in seconds instead of in the build log. For an extension, re-review and rename
+the `ext-<name>-<tag>/` directory to the new tag.

@@ -1,3 +1,8 @@
+Fixes: clang 19 with PGO and ThinLTO inlines execute_ex() into zend_do_link_class(), whose frame base x19 a preserve_none handler clobbers, so interface autoloading corrupts execution on ARM64.
+Origin: own
+Upstream: n/a: local toolchain workaround, not a php-src defect
+Drop-when: a compiler upgrade passes the autoload regression without it on baseline and v3 builds with PGO and ThinLTO on aarch64
+
 PHP 8.5 / clang aarch64: keep execute_ex out of class-linking callers.
 
 With PGO + ThinLTO, clang 19 can inline execute_ex into zend_do_link_class,

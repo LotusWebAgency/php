@@ -1,3 +1,7 @@
+Fixes: On ARM64 an OPcache restart keeps veneer addresses in zend_jit_stub_handlers[], so later traces branch into overwritten code and FPM workers crash or spin.
+Origin: php-src pull 24273 commit 0c9d9df691
+Upstream: open: php-src PR #24273 (base PHP-8.4) is not merged
+Drop-when: a release of this version carries the fix (patch --forward fails the build if it is applied twice)
 Source: php-src pull request #24273 ("Fix JIT stub veneers being reused after an OPcache restart on AArch64"), commit 0c9d9df691, applied verbatim with this release's line numbers. The pull request targets PHP-8.4 and is not merged yet; its test (ext/opcache/tests/jit/restart_stub_veneers.phpt) is left out because the image ships no tests.
 
 On AArch64 a conditional branch from JIT code reaches only +-1 MB, so once the JIT buffer holds more than that, IR emits a veneer next to the new code and zend_jit_commit_veneers() replaces the stub's address in zend_jit_stub_handlers[] (kept in the JIT buffer, shared by every FPM worker) with the veneer's. An OPcache restart (opcache_reset(), or an out-of-memory restart) rewinds the buffer below those veneers but keeps the table, so traces compiled afterwards branch to addresses that new code has overwritten: workers die with SIGSEGV or spin at full CPU when they take an exception, leave a function, or handle an interrupt through a stub. PrestaShop's cache clear calls opcache_reset(). x86-64 has no veneers and is not affected. The fix keeps the original stub addresses in a third block of the table and restores them in zend_jit_restart().

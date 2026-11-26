@@ -1,3 +1,8 @@
+Fixes: The bundled libzip mkstemp.c calls getpid() without `<unistd.h>`, which clang 16+ rejects.
+Origin: php-src commit 613ee726a8
+Upstream: never: merged in PHP-7.2 (7.2.0); 7.0 and 7.1 are EOL and will not get it
+Drop-when: the version leaves the matrix, or zip leaves php/ext.json for it
+
 Include <unistd.h> in the bundled libzip mkstemp, the way php-src does from 7.2.
 
 ext/zip/lib/mkstemp.c calls getpid() with no declaration in scope. clang 16 and

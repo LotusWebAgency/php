@@ -1,3 +1,7 @@
+Fixes: sp_rfc1867_callback() reads $_FILES entries as scalars, so every upload to a bracketed field name or an empty file input is rejected.
+Origin: own
+Upstream: unfixed: v0.14.0 is the latest release
+Drop-when: a release handles array-valued $_FILES entries
 Source: local. sp_rfc1867_callback() reads $_FILES[field]["tmp_name"], ["size"] and ["name"] with
 Z_STRVAL_P / Z_LVAL_P, assuming scalars. For a bracketed field name (`f[]`, `attachment[file]`,
 `a[b][c]`) PHP stores each of them as an array, so the validation script gets a garbage path and

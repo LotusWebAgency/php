@@ -1,3 +1,7 @@
+Fixes: src/config.m4 appends -D_FORTIFY_SOURCE=2 after the build's level 3, so the module was compiled at level 2.
+Origin: own
+Upstream: unfixed: v0.14.0 is the latest release
+Drop-when: a release stops forcing the fortify level
 Source: local. src/config.m4 appends -D_FORTIFY_SOURCE=2 to CFLAGS after the build's
 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 (php/cflags.sh). The last definition wins, so
 snuffleupagus.so was compiled at level 2. Drop upstream's define; the rest of its flag block
