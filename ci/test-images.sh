@@ -24,7 +24,8 @@
 #                   (--full-is-builder)
 #   ext-builder     ext-builder only: tests/test-ext-builder.sh against the entry's fpm and cli
 #   trivy           vulnerability gate, KEV report + gate, OS package floor, AGPL license gate:
-#                   the flags of the Trivy steps in ci.yml
+#                   the flags of the Trivy steps in ci.yml; digest mode scans the registry's
+#                   platform manifest (ci/platform-digest.sh), load mode the daemon's image
 #   predicate       digest mode only, once everything above passed
 # Every target runs whatever the others do; the exit status is 0 when all passed, 1 when any
 # target failed, 2 for a usage error. A summary per target goes to stdout and to
@@ -203,8 +204,13 @@ fi
 # ----------------------------------------------------------------- one target
 TRIVY_ENV=(TRIVY_CACHE_DIR="$TRIVY_CACHE_DIR" TRIVY_SKIP_DB_UPDATE=true TRIVY_SKIP_VERSION_CHECK=true)
 [ "$JOBS" -eq 1 ] || TRIVY_ENV+=(TRIVY_CACHE_BACKEND=memory)
-# A loaded image is the one in the daemon, never a same-named tag on a registry.
-[ "$MODE" != load ] || TRIVY_ENV+=(TRIVY_IMAGE_SRC=docker)
+# A loaded image is the one in the daemon, never a same-named tag on a registry. A pushed
+# one is scanned in the registry by its platform manifest digest (run_steps), the bytes the
+# merge job publishes: Trivy's daemon source reads the image back through `docker save`,
+# which on the arm64 runners' containerd image store returned an archive without the
+# image's config blob after the fpm smoke run ("file blobs/sha256/<config> not found in
+# tar"), so the daemon copy is not what the gate depends on.
+if [ "$MODE" = load ]; then TRIVY_ENV+=(TRIVY_IMAGE_SRC=docker); else TRIVY_ENV+=(TRIVY_IMAGE_SRC=remote); fi
 
 trivy_scan() {  # trivy_scan <image> <TRIVY_* assignments...>
   local image="$1"; shift
@@ -269,11 +275,16 @@ run_steps() {  # <name>; the first failing step's name is left in $step
   fi
 
   step="trivy vulnerability gate"
-  trivy_scan "$ref" TRIVY_EXIT_CODE=1 TRIVY_SEVERITY="$SEVERITY" TRIVY_IGNORE_UNFIXED=true || return 1
+  local scan_ref="$ref" platform
+  if [ "$MODE" = digest ]; then
+    platform="$("$HERE/platform-digest.sh" "$ref" "$ARCH")" || return 1
+    scan_ref="${ref%@*}@$platform"
+  fi
+  trivy_scan "$scan_ref" TRIVY_EXIT_CODE=1 TRIVY_SEVERITY="$SEVERITY" TRIVY_IGNORE_UNFIXED=true || return 1
   step="trivy KEV gate and package floor"
-  kev_and_floor "$ref" "$tdir/kev.json" || return 1
+  kev_and_floor "$scan_ref" "$tdir/kev.json" || return 1
   step="trivy license gate"
-  trivy_scan "$ref" TRIVY_CONFIG="$ROOT/ci/trivy-license.yaml" TRIVY_EXIT_CODE=1 TRIVY_SCANNERS=license TRIVY_SEVERITY=CRITICAL || return 1
+  trivy_scan "$scan_ref" TRIVY_CONFIG="$ROOT/ci/trivy-license.yaml" TRIVY_EXIT_CODE=1 TRIVY_SCANNERS=license TRIVY_SEVERITY=CRITICAL || return 1
 
   if [ "$MODE" = digest ]; then
     step="test-result predicate"
