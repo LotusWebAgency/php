@@ -727,6 +727,7 @@ jobs:
           path: ${{ runner.temp }}/stage/${{ matrix.job.targets[0].name }}
           if-no-files-found: ignore
           retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
 
       - name: Upload digest (target 2)
         if: ${{ !cancelled() && steps.stage.conclusion == 'success' && matrix.job.targets[1] }}
@@ -736,6 +737,7 @@ jobs:
           path: ${{ runner.temp }}/stage/${{ matrix.job.targets[1].name }}
           if-no-files-found: ignore
           retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
 
       - name: Upload digest (target 3)
         if: ${{ !cancelled() && steps.stage.conclusion == 'success' && matrix.job.targets[2] }}
@@ -745,6 +747,7 @@ jobs:
           path: ${{ runner.temp }}/stage/${{ matrix.job.targets[2].name }}
           if-no-files-found: ignore
           retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
 
       - name: Upload digest (target 4)
         if: ${{ !cancelled() && steps.stage.conclusion == 'success' && matrix.job.targets[3] }}
@@ -754,6 +757,7 @@ jobs:
           path: ${{ runner.temp }}/stage/${{ matrix.job.targets[3].name }}
           if-no-files-found: ignore
           retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
 
       - name: Upload digest (target 5)
         if: ${{ !cancelled() && steps.stage.conclusion == 'success' && matrix.job.targets[4] }}
@@ -763,6 +767,7 @@ jobs:
           path: ${{ runner.temp }}/stage/${{ matrix.job.targets[4].name }}
           if-no-files-found: ignore
           retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
 
       - name: Upload digest (target 6)
         if: ${{ !cancelled() && steps.stage.conclusion == 'success' && matrix.job.targets[5] }}
@@ -772,6 +777,7 @@ jobs:
           path: ${{ runner.temp }}/stage/${{ matrix.job.targets[5].name }}
           if-no-files-found: ignore
           retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
 
       # Only targets that passed every test above get a per-arch tag, so a tag
       # on php/dev is a tested image; dev-manifest joins the arches.
@@ -797,6 +803,7 @@ jobs:
           path: ${{ runner.temp }}/candidate/${{ matrix.job.name }}.json
           if-no-files-found: error
           retention-days: 10
+          overwrite: true
 
       # Last, whatever happened above.
       - name: Disk usage
