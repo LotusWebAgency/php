@@ -31,6 +31,20 @@
 # are used instead: lotuswebagency/php:<tag> and
 # ghcr.io/lotuswebagency/php/corpus:php<tier>, as ci.yml's verify job tags them.
 #
+# With EXTENDED_CANDIDATE=<release-candidate.json> (ci/candidate.py; extended.yml's
+# plan verifies the one of the ci run that started it and freezes it for the legs) pull takes no tag at all:
+# every image is pulled as $EXTENDED_DEV_REPO@<index digest> of that file, for the
+# --platform asked, after ci/verify-pin.sh has read that index and found the
+# platform manifest the candidate recorded. A target the candidate lacks, a
+# digest or platform that differs, or a candidate that is not for this commit,
+# this tree's inputs-hash or EXTENDED_CANDIDATE_RUN (a ci run id) fails that
+# image's row, never falls back to a tag. dev:<tag>-<sha12> is mutable (a
+# develop rebuild of the same commit re-points it), so without a candidate (a
+# dispatch, an extended-run push) the tag pull stands, and what it tests is not
+# what main copies: ci/release_source.py only copies an image set that an
+# extended run of exactly this candidate tested. Not with --latest or
+# --best-effort. The PGO corpus tiers stay hash-pinned tags.
+#
 # The inputs-hash rule has no override. tests/smoke.sh and tests/test-pgo.sh
 # fail an image whose label disagrees with the tree, and
 # SMOKE_ALLOW_STALE would turn that into a green run that proved nothing, so a
@@ -89,6 +103,8 @@
 #
 # Environment:
 #   EXTENDED_DEV_REPO      default ghcr.io/lotuswebagency/php/dev
+#   EXTENDED_CANDIDATE     pull: a release-candidate.json whose digests are pulled (see above)
+#   EXTENDED_CANDIDATE_RUN pull: the ci run id that candidate must name (optional)
 #   EXTENDED_CORPUS_REPO   default ghcr.io/lotuswebagency/php/corpus
 #   EXTENDED_LOG_DIR       logs; default a fresh mktemp -d
 #
@@ -190,6 +206,12 @@ esac
 [ "$CMD" = pull ] || [ "$BEST_EFFORT" -eq 0 ] || usage_die "--best-effort applies to pull only"
 [ "$CMD" = bench ] || [ "$BENCH_PREPARE" -eq 0 ] || usage_die "--prepare applies to bench only"
 { [ "$LATEST" -eq 0 ] || [ -z "$SHA_REF" ]; } || usage_die "--sha and --latest are exclusive"
+CANDIDATE="${EXTENDED_CANDIDATE:-}"
+CANDIDATE_RUN="${EXTENDED_CANDIDATE_RUN:-}"
+if [ -n "$CANDIDATE" ] && { [ "$CMD" = pull ] || [ "$CMD" = all ]; }; then
+  [ "$LATEST" -eq 0 ] || usage_die "EXTENDED_CANDIDATE and --latest are exclusive: a floating tag has no digest to pin"
+  [ "$BEST_EFFORT" -eq 0 ] || usage_die "EXTENDED_CANDIDATE and --best-effort are exclusive: a mismatch must fail"
+fi
 
 # Selection: same validation as tests/build-all.sh (tests/matrix-lib.sh).
 # shellcheck source=tests/matrix-lib.sh
@@ -357,6 +379,8 @@ corpus_floating() { matrix_target_corpus "$1"; }
 
 # ---------------------------------------------------------------------- pull
 PULL_DIR=""
+declare -A PIN_PLATFORM=()  # candidate pull: target name -> the platform digest the candidate recorded
+declare -A PIN_ERROR=()     # candidate pull: target name -> why the candidate cannot supply it
 
 # pull_one <key> <ref> <kind: image|corpus> -> writes $PULL_DIR/<key>.status:
 # status<TAB>detail<TAB>revision<TAB>image id. A status other than ok is a
@@ -364,6 +388,23 @@ PULL_DIR=""
 pull_one() {
   local ref="$2" kind="$3" out="$PULL_DIR/$1.status" log="$PULL_DIR/$1.log" arch rev hash id info
   rm -f "$out"
+  if [ "$kind" = image ] && [ -n "$CANDIDATE" ]; then
+    if [ -n "${PIN_ERROR[$1]:-}" ]; then
+      printf 'NOT-IN-CANDIDATE\t%s\t\t\n' "${PIN_ERROR[$1]}" >"$out"
+      return 0
+    fi
+    # The index is content-addressed; this proves the candidate describes it.
+    if ! "$ROOT/ci/verify-pin.sh" "$ref" "${PLATFORM#linux/}" "${PIN_PLATFORM[$1]}" >"$log" 2>&1; then
+      if grep -q 'the candidate recorded' "$log"; then
+        printf 'PLATFORM-MISMATCH\t%s\t\t\n' "$(tail -1 "$log" | cut -c1-200)" >"$out"
+      elif grep -qiE 'not found|manifest unknown|name unknown' "$log"; then
+        printf 'MISSING\t%s\t\t\n' "$ref is not in the registry" >"$out"
+      else
+        printf 'PULL-FAILED\t%s\t\t\n' "$(tail -1 "$log" | cut -c1-160)" >"$out"
+      fi
+      return 0
+    fi
+  fi
   # Retried on a registry 429/5xx/network error. A missing tag matches nothing
   # transient and fails at once, so the MISSING classification below holds.
   if ! "$ROOT/ci/retry.sh" docker pull --platform "$PLATFORM" "$ref" >"$log" 2>&1; then
@@ -455,10 +496,37 @@ cmd_pull() {
   PULL_DIR="$LOG_DIR/pull"
   mkdir -p "$PULL_DIR"
 
+  if [ -n "$CANDIDATE" ]; then
+    if ! python3 "$ROOT/ci/candidate.py" check --candidate "$CANDIDATE" --sha "$SHA_FULL" --inputs-hash "$TREE_HASH" \
+        ${CANDIDATE_RUN:+--run-id "$CANDIDATE_RUN"} >"$PULL_DIR/candidate.log" 2>&1; then
+      record pull candidate REFUSED 0 "$(tail -1 "$PULL_DIR/candidate.log" | cut -c1-200)"
+      { echo "REFUSED: $CANDIDATE cannot be pulled from for ${SHA_FULL:0:12}:"; cat "$PULL_DIR/candidate.log"; } >&2
+      return 3
+    fi
+    echo "pull: by digest, from the candidate $CANDIDATE (ci run ${CANDIDATE_RUN:-unchecked})"
+  else
+    echo "pull: by tag, no release candidate: what this run tests is not what main copies"
+  fi
+
   local -a keys=() refs=() canon=() kinds=()
+  local ref pin pin_ref pin_platform
   for row in "${SELECTED[@]}"; do
     IFS=$'\t' read -r name flavor php tag <<<"$row"
-    keys+=("$name"); refs+=("$DEV_REPO:${tag#*:}$suffix"); canon+=("$tag"); kinds+=(image)
+    ref="$DEV_REPO:${tag#*:}$suffix"
+    if [ -n "$CANDIDATE" ]; then
+      if pin="$(python3 "$ROOT/ci/candidate.py" pin --candidate "$CANDIDATE" --target "$name" --arch "${PLATFORM#linux/}" \
+          --sha "$SHA_FULL" --inputs-hash "$TREE_HASH" ${CANDIDATE_RUN:+--run-id "$CANDIDATE_RUN"} 2>&1)"; then
+        IFS=$'\t' read -r pin_ref pin_platform <<<"$pin"
+        if [ "${pin_ref%@*}" = "$DEV_REPO" ]; then
+          ref="$pin_ref"; PIN_PLATFORM[$name]="$pin_platform"
+        else
+          PIN_ERROR[$name]="the candidate's repository ${pin_ref%@*} is not $DEV_REPO"
+        fi
+      else
+        PIN_ERROR[$name]="$(tail -1 <<<"$pin" | cut -c1-200)"
+      fi
+    fi
+    keys+=("$name"); refs+=("$ref"); canon+=("$tag"); kinds+=(image)
   done
   declare -A seen_tier=()
   for row in "${SELECTED[@]}"; do

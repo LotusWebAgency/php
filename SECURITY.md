@@ -63,7 +63,24 @@ only, and every image carries `org.opencontainers.image.base.name` and
 
 Only `main` publishes. A release is built, tested, signed and attested in a GHCR staging repository,
 then each multi-arch list is copied to Docker Hub with its signatures and attestations and tagged
-there. `develop` builds push only unsigned test images, tested by digest, to a GHCR package (`php/dev`). Two jobs use the
+there. A release copies a `develop` run's images into the staging repository by digest instead of
+rebuilding them only when all of this holds, and rebuilds on any doubt: the merge commit's tree is
+identical to the tested `develop` commit's tree; the `ci` run of that commit, in its latest attempt,
+succeeded as a whole and built every image itself (a run that reused older images does not qualify);
+the `extended` run that the completion of exactly that `ci` run and attempt started (event
+`workflow_run`, run from `main`'s copy of the workflow, titled with the commit and the attempt)
+succeeded on the commit's own tree, so a dispatch of the suites from any branch or a status posted by
+another workflow counts for nothing; that run pulled every image it tested by the digest recorded in
+that `ci` run's release candidate, and failed a leg whose platform digest differed, so what the suites
+tested is what is copied (a dispatch or a push of the suites pulls by mutable tag and never qualifies);
+no develop `ci` run of the commit, of any event, was created after the run that qualified (a rebuild of
+the commit re-points its dev tags and invalidates the earlier run, and the dev tags of a commit are
+otherwise never moved to another digest); if GitHub's API cannot be read after three attempts, the
+release rebuilds; the images' inputs hash and the sha256 of `ci.yml` equal the
+release's; every image is at most seven days old when the decision is made and again in each leg that
+copies; and the repository variable `RELEASE_HOLD` is empty. Every copied image is scanned again with
+the day's vulnerability database before it is signed. The signatures and the signing identity are the
+release's own, the provenance and test results name the `develop` commit. `develop` builds push only unsigned test images, tested by digest, to a GHCR package (`php/dev`). Two jobs use the
 Docker Hub credentials, the promotion and the description sync. Both run on `main` only, in the
 `release` deployment environment, which holds the Docker Hub secrets and only `main` may deploy to.
 

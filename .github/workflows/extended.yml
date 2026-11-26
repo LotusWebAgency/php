@@ -39,6 +39,14 @@
 #                      tree's, and logs which path it took.
 #   workflow_run       after `ci` completes successfully on a develop push (or a
 #                      develop dispatch): that run's head sha, images and tree.
+#                      The images are pulled BY DIGEST from that ci run's
+#                      release-candidate artifact (downloaded by run id, verified
+#                      by plan, frozen as this run's extended-candidate artifact):
+#                      dev:<tag>-<sha12> is mutable, and a rebuild of the same
+#                      commit re-points it, so a tag pull could test other images
+#                      than the ones main copies. A missing or mismatching digest
+#                      fails that leg. Dispatch and push runs have no candidate,
+#                      pull by tag (plan logs it) and never qualify a copy.
 #                      GitHub fires workflow_run only for a workflow file on the
 #                      default branch; elsewhere the trigger is inert.
 #
@@ -50,9 +58,10 @@
 #      +-----> bench (per arch, only when asked, report-only) ------+
 #
 #   plan          picks ONE image commit (sha) and the tree to test it from, and
-#                 the versions; every later job pulls dev:<tag>-<sha12>, never a
-#                 floating tag, so a develop run that finishes mid-way cannot
-#                 make two jobs test two commits.
+#                 the versions; every later job pulls that commit's images (by
+#                 digest from the frozen candidate for a workflow_run, else
+#                 dev:<tag>-<sha12>), never a floating tag, so a develop run
+#                 that finishes mid-way cannot make two jobs test two commits.
 #   fixtures      builds and pushes to GHCR (ghcr.io/lotuswebagency/php/apptest,
 #                 tags <app>-<set>-<arch>) every app fixture that is missing or
 #                 stale, so the parallel version jobs only pull and never race to
@@ -71,8 +80,8 @@
 #   summary       every job's result and every results.tsv in one table; fails
 #                 when a required job did. For a full run on the commit's own
 #                 images (plan.outputs.own and .full) it then posts the
-#                 `release/extended` commit status on that commit and re-runs
-#                 the failed ci run of its open promote PR (ci/extended-status.sh).
+#                 `release/extended` commit status on that commit (only when the
+#                 tests ran from the commit's own tree; ci/extended-status.sh).
 #
 # No job here holds Docker Hub credentials. The Docker Hub images it needs --
 # the stock dementev/php-fpm-with-ext builder of the fixture builds and of the
@@ -94,9 +103,15 @@
 # Upload steps run always (a timed-out job keeps its logs) and overwrite, so a
 # re-run of a failed job replaces its artifact instead of conflicting with it.
 name: extended
-# The commit under test in the run list: a workflow_run run is otherwise only
-# "extended" on a title of the ci run.
-run-name: extended ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+# The commit under test in the run list. A workflow_run run also names the ci
+# run and attempt it tested: `extended <sha> ci <run id>.<attempt>`.
+# ci/release_source.py requires exactly that title, on an event of workflow_run
+# (GitHub runs a workflow_run workflow from the default branch's copy, so only
+# a merge to main can change this line), before main copies a commit's images
+# instead of rebuilding them. Dispatch and push runs get a title without the
+# ci part and can never qualify, whatever they are given as input: they pull
+# by tag, which is not what main copies.
+run-name: ${{ github.event_name == 'workflow_run' && format('extended {0} ci {1}.{2}', github.event.workflow_run.head_sha, github.event.workflow_run.id, github.event.workflow_run.run_attempt) || format('extended {0}', inputs.sha || github.sha) }}
 
 on:
   workflow_dispatch:
@@ -158,6 +173,7 @@ jobs:
     permissions:
       contents: read
       packages: read
+      actions: read # the release candidate artifact of the triggering ci run
     outputs:
       sha: ${{ steps.plan.outputs.sha }}
       checkout: ${{ steps.plan.outputs.checkout }}
@@ -187,9 +203,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The ci run's own artifact, by run id: what that run tested and pushed,
+      # as digests. Verified and frozen below; the legs download the frozen
+      # copy, not this one (a re-run of the ci run overwrites its artifact).
+      - name: Download the release candidate of the triggering ci run
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-candidate
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/release-candidate
+
       - name: Plan
         id: plan
         env:
+          EXT_CANDIDATE: ${{ github.event_name == 'workflow_run' && format('{0}/release-candidate/release-candidate.json', runner.temp) || '' }}
+          EXT_CI_RUN: ${{ github.event.workflow_run.id || '' }}
           EXT_RUN_SHA: ${{ github.event.workflow_run.head_sha || (github.event_name == 'push' && github.sha) || '' }}
           EXT_EVENT: ${{ github.event_name }}
           EXT_SHA_INPUT: ${{ inputs.sha }}
@@ -198,6 +228,18 @@ jobs:
           EXT_APPS: ${{ inputs.apps }}
           EXT_BENCH: ${{ inputs.bench }}
         run: ci/extended-plan.sh
+
+      # One copy for the whole run: every leg pulls the digests of exactly this
+      # file, so a re-run of a single leg cannot test other images.
+      - name: Freeze the verified candidate for the legs
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: extended-candidate
+          path: ${{ runner.temp }}/release-candidate/release-candidate.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 5
 
   # --------------------------------------------------------------- fixtures
   fixtures:
@@ -307,7 +349,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Download the release candidate of the tested ci run
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: extended-candidate
+          path: ${{ runner.temp }}/extended-candidate
+
       - name: Pull
+        env:
+          EXTENDED_CANDIDATE: ${{ github.event_name == 'workflow_run' && format('{0}/extended-candidate/release-candidate.json', runner.temp) || '' }}
+          EXTENDED_CANDIDATE_RUN: ${{ github.event.workflow_run.id || '' }}
         run: ci/extended-run.sh pull pull --no-corpus
 
       # The steps below run after a failed one on purpose: each reports on its
@@ -386,7 +438,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Download the release candidate of the tested ci run
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: extended-candidate
+          path: ${{ runner.temp }}/extended-candidate
+
       - name: Pull
+        env:
+          EXTENDED_CANDIDATE: ${{ github.event_name == 'workflow_run' && format('{0}/extended-candidate/release-candidate.json', runner.temp) || '' }}
+          EXTENDED_CANDIDATE_RUN: ${{ github.event.workflow_run.id || '' }}
         run: ci/extended-run.sh pull pull
 
       - name: corpus-tiers
@@ -456,9 +518,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Download the release candidate of the tested ci run
+        if: ${{ github.event_name == 'workflow_run' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: extended-candidate
+          path: ${{ runner.temp }}/extended-candidate
+
       # Everything the benchmark needs from a registry is fetched here: our
       # cli images and the official php images they are compared against.
       - name: Pull
+        env:
+          EXTENDED_CANDIDATE: ${{ github.event_name == 'workflow_run' && format('{0}/extended-candidate/release-candidate.json', runner.temp) || '' }}
+          EXTENDED_CANDIDATE_RUN: ${{ github.event.workflow_run.id || '' }}
         run: |
           ci/extended-run.sh pull pull --no-corpus
           ci/extended-run.sh bench-prepare bench --prepare
@@ -490,8 +562,6 @@ jobs:
     permissions:
       contents: read
       statuses: write # release/extended on the commit under test
-      actions: write # re-run the failed ci run of its promote PR
-      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

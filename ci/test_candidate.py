@@ -15,6 +15,7 @@ import candidate  # noqa: E402
 REPO = "ghcr.io/lotuswebagency/php/dev"
 CREATED = "2026-11-26T10:00:00Z"
 BUILT = "123"
+CI_HASH = "e" * 64
 
 
 def sha(char):
@@ -52,7 +53,7 @@ def targets(names=("php-8_5-fpm", "php-8_5-cli")):
 
 def merge(records, wanted=None, **kw):
     return candidate.merge_records(
-        records, wanted if wanted is not None else targets(), "c" * 40, "d" * 40, "hash", 123, 2, **kw
+        records, wanted if wanted is not None else targets(), "c" * 40, "d" * 40, "hash", 123, 2, ci_hash=kw.pop("ci_hash", CI_HASH), **kw
     )
 
 
@@ -110,7 +111,7 @@ class TestMerge(unittest.TestCase):
     def test_complete_set(self):
         doc = merge([record("amd64"), record("arm64", created="2026-11-26T11:00:00Z")])
         self.assertEqual(doc["schema"], 1)
-        self.assertEqual((doc["sha"], doc["tree"], doc["inputs_hash"]), ("c" * 40, "d" * 40, "hash"))
+        self.assertEqual((doc["sha"], doc["tree"], doc["inputs_hash"], doc["ci_hash"]), ("c" * 40, "d" * 40, "hash", CI_HASH))
         self.assertEqual((doc["run_id"], doc["run_attempt"], doc["repository"]), ("123", "2", REPO))
         self.assertEqual(doc["built_run"], BUILT)
         self.assertEqual(list(doc["targets"]), ["php-8_5-fpm", "php-8_5-cli"])
@@ -118,6 +119,11 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(fpm["tag"], "8.5-fpm")
         self.assertEqual(fpm["archs"]["amd64"], {"index": sha("1"), "platform": sha("2"), "created": CREATED, "built_run": BUILT})
         self.assertEqual(fpm["archs"]["arm64"]["created"], "2026-11-26T11:00:00Z")
+
+    def test_ci_hash_must_be_a_sha256(self):
+        for bad in ("", "abc", "E" * 64, None):
+            with self.assertRaises(candidate.CandidateError):
+                merge([record("amd64"), record("arm64")], ci_hash=bad)
 
     def test_missing_arch_target_lists_every_gap(self):
         with self.assertRaises(candidate.CandidateError) as cm:
@@ -201,10 +207,12 @@ class TestCli(unittest.TestCase):
             (tmp / "targets.json").write_text(json.dumps(targets()))
             dest = tmp / "release-candidate.json"
             rc, stdout, _ = self.run_cli("merge", "--targets", str(tmp / "targets.json"), "--records", str(records),
-                                         "--sha", "c" * 40, "--tree", "d" * 40, "--inputs-hash", "h",
+                                         "--sha", "c" * 40, "--tree", "d" * 40, "--inputs-hash", "h", "--ci-hash", CI_HASH,
                                          "--run-id", "9", "--run-attempt", "1", "--out", str(dest))
             self.assertEqual(rc, 0, stdout)
-            self.assertEqual(sorted(json.loads(dest.read_text())["targets"]["php-8_5-cli"]["archs"]), ["amd64", "arm64"])
+            doc = json.loads(dest.read_text())
+            self.assertEqual(sorted(doc["targets"]["php-8_5-cli"]["archs"]), ["amd64", "arm64"])
+            self.assertEqual(doc["ci_hash"], CI_HASH)
 
     def test_merge_of_an_incomplete_set_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,11 +221,69 @@ class TestCli(unittest.TestCase):
             (tmp / "records").mkdir()
             (tmp / "records" / "a.json").write_text(json.dumps(record("amd64")))
             rc, _, err = self.run_cli("merge", "--targets", str(tmp / "targets.json"), "--records", str(tmp / "records"),
-                                      "--sha", "c" * 40, "--tree", "d" * 40, "--inputs-hash", "h",
+                                      "--sha", "c" * 40, "--tree", "d" * 40, "--inputs-hash", "h", "--ci-hash", CI_HASH,
                                       "--run-id", "9", "--run-attempt", "1", "--out", str(tmp / "out.json"))
             self.assertEqual(rc, 1)
             self.assertIn("is missing", err)
             self.assertFalse((tmp / "out.json").exists())
+
+
+class TestPin(unittest.TestCase):
+    def cand(self):
+        records = [
+            {"name": f"8.5-{a}", "php": "8.5", "uarch": "baseline", "arch": a, "created": CREATED, "built_run": BUILT, "repository": REPO,
+             "targets": {n: {"tag": f"8.5-{n.split('-', 2)[2]}", "index": sha("1" if a == "amd64" else "2"), "platform": sha("3" if a == "amd64" else "4")}
+                         for n in ("php-8_5-fpm", "php-8_5-cli")}}
+            for a in ("amd64", "arm64")
+        ]
+        return merge(records)
+
+    def pin(self, cand=None, name="php-8_5-fpm", arch="amd64", **kw):
+        args = dict(sha="c" * 40, inputs_hash="hash", run_id="123")
+        args.update(kw)
+        return candidate.pin(cand or self.cand(), name, arch, args["sha"], args["inputs_hash"], args["run_id"])
+
+    def test_the_index_ref_and_platform_of_one_arch(self):
+        self.assertEqual(self.pin(), (f"{REPO}@{sha('1')}", sha("3")))
+        self.assertEqual(self.pin(arch="arm64"), (f"{REPO}@{sha('2')}", sha("4")))
+
+    def test_a_candidate_of_another_commit_hash_or_run_is_refused(self):
+        for kw, text in (({"sha": "e" * 40}, "commit"), ({"inputs_hash": "other"}, "inputs hash"), ({"run_id": "999"}, "ci run 123")):
+            with self.assertRaisesRegex(candidate.CandidateError, text):
+                self.pin(**kw)
+
+    def test_no_run_id_means_any_run(self):
+        self.assertEqual(self.pin(run_id="")[0], f"{REPO}@{sha('1')}")
+
+    def test_a_target_or_arch_the_candidate_lacks(self):
+        with self.assertRaisesRegex(candidate.CandidateError, "no php-8_5-zts amd64"):
+            self.pin(name="php-8_5-zts")
+        cand = self.cand()
+        del cand["targets"]["php-8_5-fpm"]["archs"]["arm64"]
+        with self.assertRaisesRegex(candidate.CandidateError, "no php-8_5-fpm arm64"):
+            self.pin(cand, arch="arm64")
+
+    def test_a_malformed_digest_is_refused(self):
+        cand = self.cand()
+        cand["targets"]["php-8_5-fpm"]["archs"]["amd64"]["index"] = "sha256:short"
+        with self.assertRaisesRegex(candidate.CandidateError, "not a sha256 digest"):
+            self.pin(cand)
+
+    def test_cli_pin_and_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "release-candidate.json"
+            f.write_text(json.dumps(self.cand()))
+            base = ["--candidate", str(f), "--sha", "c" * 40, "--inputs-hash", "hash", "--run-id", "123"]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(candidate.main(["pin", *base, "--target", "php-8_5-cli", "--arch", "amd64"]), 0)
+                self.assertEqual(candidate.main(["check", *base]), 0)
+            self.assertIn(f"{REPO}@{sha('1')}\t{sha('3')}", out.getvalue())
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(candidate.main(["pin", *base[:-1], "999", "--target", "php-8_5-cli", "--arch", "amd64"]), 1)
+                self.assertEqual(candidate.main(["check", "--candidate", str(Path(tmp) / "missing.json"), *base[2:]]), 1)
+            self.assertIn("FAIL:", err.getvalue())
 
 
 if __name__ == "__main__":

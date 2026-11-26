@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reuse the last develop build when nothing it was built from has changed.
 
-    python3 ci/reuse_plan.py plan --repo OWNER/REPO --event E --ref REF --rebuild BOOL --inputs-hash H \
+    python3 ci/reuse_plan.py plan --repo OWNER/REPO --event E --ref REF --rebuild BOOL --inputs-hash H --ci-hash H \
         --targets TARGETS.json --dev-repo REPO --run-id ID --save-candidate FILE > decision.json
     python3 ci/reuse_plan.py entry --candidate FILE --entry ENTRY.json --digests-out FILE > created.json
 
@@ -16,12 +16,14 @@ rebuild always build, and so does a dispatch with `rebuild`):
     the run as a whole: a run whose preflight failed can still have uploaded a candidate, and
     its images are not a release candidate. This run itself is not a candidate;
   - an unexpired `release-candidate` artifact on that run (ci/candidate.py), written for that
-    run's commit, naming this tree's inputs hash, the dev repository, and every target of this
+    run's commit, naming this tree's inputs hash, the sha256 of this tree's ci.yml (how the
+    images are built is not part of the inputs hash), the dev repository, and every target of this
     run's matrix on both architectures and nothing else;
   - the oldest `created` in it at most five days old, so the base layers and Wolfi packages of a
     reused image are never much older than a rebuild would have taken.
-Anything else, including any failure to read GitHub, is `build`, with the reason in the output:
-the decision never fails the run.
+Anything else is `build`, with the reason in the output: the decision never fails the run. That
+includes a GitHub call that fails: a transient error (a 5xx, 429 or 408 answer, a dropped connection, a
+timeout) is first retried twice, 5 and 15 seconds later, and only a call that still fails is `build`.
 
 `entry` runs in each `images` job of a reuse run: the {"<target>": "<repo>@sha256:<index>"} map
 ci/test-images.sh --mode digest takes, for this entry's targets and architecture, from the
@@ -30,10 +32,10 @@ candidate `plan` verified, and the `created` and `built_run` the new candidate r
 import argparse
 import io
 import json
-import os
 import re
 import subprocess
 import sys
+import time
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,8 +47,9 @@ SCHEMA = 1
 MAX_AGE = timedelta(days=5)
 DEVELOP = "refs/heads/develop"
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+RUN_ID = re.compile(r"^\d+$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-HERE = Path(__file__).resolve().parent
 
 
 class NoReuse(Exception):
@@ -62,6 +65,13 @@ def parse_time(text, what):
         return datetime.strptime(text, TIME_FORMAT).replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         raise NoReuse(f"{what} '{text}' is not a UTC timestamp") from None
+
+
+def parse_time_strict(text):
+    try:
+        return parse_time(text, "created")
+    except NoReuse as exc:
+        raise ReuseError(str(exc)) from None
 
 
 def newest_green_run(runs_doc, current_run_id):
@@ -90,14 +100,20 @@ def candidate_artifact(artifacts_doc, run_id):
     return max(live, key=lambda a: a["created_at"])
 
 
-def check_candidate(cand, run, inputs_hash, targets, dev_repo, now, max_age):
-    """The oldest `created` of a candidate that may be reused, or NoReuse."""
+def check_candidate(cand, run, inputs_hash, targets, dev_repo, now, max_age, *, ci_hash):
+    """The oldest `created` of a candidate that may be reused (or copied to release), or NoReuse."""
     if cand.get("schema") != SCHEMA:
         raise NoReuse(f"candidate schema {cand.get('schema')} is not {SCHEMA}")
     if cand.get("sha") != run["head_sha"]:
         raise NoReuse(f"candidate names commit {str(cand.get('sha'))[:12]}, run {run['id']} is {run['head_sha'][:12]}")
     if cand.get("inputs_hash") != inputs_hash:
         raise NoReuse(f"inputs hash changed: {str(cand.get('inputs_hash'))[:12]} -> {inputs_hash[:12]}")
+    if not SHA256.match(str(ci_hash)):
+        raise NoReuse(f"this tree's ci.yml hash '{ci_hash}' is not a sha256")
+    if cand.get("ci_hash") != ci_hash:
+        raise NoReuse(f"ci.yml changed since the images were built: {str(cand.get('ci_hash'))[:12]} -> {ci_hash[:12]}")
+    if not RUN_ID.match(str(cand.get("run_id", ""))):
+        raise NoReuse(f"candidate run id '{cand.get('run_id')}' is not a run id")
     if cand.get("repository") != dev_repo:
         raise NoReuse(f"candidate images are in {cand.get('repository')}, not {dev_repo}")
     wanted = {t["name"]: t["tags"][0].split(":", 1)[1] for t in targets}
@@ -119,6 +135,9 @@ def check_candidate(cand, run, inputs_hash, targets, dev_repo, now, max_age):
             if not all(isinstance(slot.get(k), str) and DIGEST.match(slot[k]) for k in ("index", "platform")):
                 problems.append(f"{name} {arch} has no valid digests")
                 continue
+            if not RUN_ID.match(str(slot.get("built_run", cand["run_id"]))):
+                problems.append(f"{name} {arch} has build run '{slot.get('built_run')}'")
+                continue
             created.append(parse_time(slot.get("created"), f"{name} {arch} created"))
     if problems:
         raise NoReuse("candidate does not cover this matrix: " + "; ".join(problems[:6]) + ("; ..." if len(problems) > 6 else ""))
@@ -129,7 +148,7 @@ def check_candidate(cand, run, inputs_hash, targets, dev_repo, now, max_age):
     return oldest
 
 
-def decide(api, *, event, ref, rebuild, inputs_hash, targets, dev_repo, run_id, now, max_age=MAX_AGE):
+def decide(api, *, event, ref, rebuild, inputs_hash, ci_hash, targets, dev_repo, run_id, now, max_age=MAX_AGE):
     """{"mode": "reuse"|"build", "reason", and for reuse "run_id", "built_run", "candidate"}."""
     try:
         if event not in ("push", "workflow_dispatch") or ref != DEVELOP:
@@ -139,7 +158,7 @@ def decide(api, *, event, ref, rebuild, inputs_hash, targets, dev_repo, run_id, 
         run = newest_green_run(api.runs(), run_id)
         artifact = candidate_artifact(api.artifacts(run["id"]), run["id"])
         cand = api.candidate(artifact["id"])
-        oldest = check_candidate(cand, run, inputs_hash, targets, dev_repo, now, max_age)
+        oldest = check_candidate(cand, run, inputs_hash, targets, dev_repo, now, max_age, ci_hash=ci_hash)
     except NoReuse as exc:
         return {"mode": "build", "reason": str(exc)}
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
@@ -153,21 +172,45 @@ def decide(api, *, event, ref, rebuild, inputs_hash, targets, dev_repo, run_id, 
     }
 
 
-class GhApi:
-    """The three GitHub calls `decide` makes, through gh (GH_TOKEN) under ci/retry.sh."""
+TRANSIENT = re.compile(
+    r"\(http (408|429|5\d\d)\)|http/[0-9.]+ (408|429|5\d\d)|error connecting to|timed? ?out|connection (reset|refused)"
+    r"|temporary failure|no such host|tls handshake|unexpected eof|\beof\b|network is unreachable|server error|bad gateway"
+    r"|service unavailable|gateway time-?out",
+    re.IGNORECASE,
+)
 
-    def __init__(self, repo, run=subprocess.run):
+
+class GhApi:
+    """The GitHub calls `decide` makes, through `gh api` (GH_TOKEN).
+
+    A call that fails the way GitHub or the network fails now and then (see TRANSIENT, or a timeout of
+    `gh` itself) is made again after each of DELAYS seconds, so three attempts in all; any other
+    failure, a 404 or a refused token, is final at once. A call that still fails raises NoReuse, which
+    every decision turns into its fallback (build, rebuild, no copy).
+    """
+
+    DELAYS = (5, 15)
+
+    def __init__(self, repo, run=subprocess.run, sleep=time.sleep):
         self.repo = repo
-        self.run = run
+        self._runner = run  # not `run`: ReleaseApi has a method of that name
+        self._sleep = sleep
 
     def _get(self, path):
-        env = {**os.environ, "RETRY_KIND": "http", "RETRY_ATTEMPTS": "3", "RETRY_DELAYS": "5 15"}
-        try:
-            done = self.run([str(HERE / "retry.sh"), "gh", "api", path], capture_output=True, env=env, check=True, timeout=300)
-        except (subprocess.SubprocessError, OSError) as exc:
-            detail = getattr(exc, "stderr", b"") or b""
-            raise NoReuse(f"GitHub API {path} failed: {detail.decode(errors='replace').strip() or exc}") from None
-        return done.stdout
+        failure = ""
+        for attempt in range(len(self.DELAYS) + 1):
+            if attempt:
+                self._sleep(self.DELAYS[attempt - 1])
+            try:
+                return self._runner(["gh", "api", path], capture_output=True, check=True, timeout=300).stdout
+            except subprocess.TimeoutExpired as exc:
+                failure = str(exc)
+            except (subprocess.SubprocessError, OSError) as exc:
+                detail = getattr(exc, "stderr", b"") or b""
+                failure = detail.decode(errors="replace").strip() or str(exc)
+                if not isinstance(exc, subprocess.CalledProcessError) or not TRANSIENT.search(failure):
+                    break
+        raise NoReuse(f"GitHub API {path} failed: {failure}")
 
     def _json(self, path):
         try:
@@ -203,7 +246,13 @@ def entry_digests(cand, entry):
         built.add(str(slot.get("built_run") or cand.get("built_run") or cand["run_id"]))
     if len(built) != 1:
         raise ReuseError(f"entry {entry['name']} spans more than one build run: {sorted(built)}")
-    return {"digests": digests, "created": min(created), "built_run": built.pop()}
+    built_run = built.pop()
+    # Both go to $GITHUB_ENV: nothing but a run id and a UTC timestamp may reach it.
+    if not RUN_ID.match(built_run):
+        raise ReuseError(f"build run '{built_run}' is not a run id")
+    for stamp in created:
+        parse_time_strict(stamp)
+    return {"digests": digests, "created": min(created), "built_run": built_run}
 
 
 def main(argv=None):
@@ -215,6 +264,7 @@ def main(argv=None):
     p.add_argument("--ref", required=True)
     p.add_argument("--rebuild", default="", help="true to force a build")
     p.add_argument("--inputs-hash", required=True)
+    p.add_argument("--ci-hash", required=True, help="sha256 of .github/workflows/ci.yml")
     p.add_argument("--targets", required=True, help="scripts/gen_matrix.py --github targets, .include")
     p.add_argument("--dev-repo", required=True)
     p.add_argument("--run-id", required=True, type=int)
@@ -229,7 +279,7 @@ def main(argv=None):
             targets = json.loads(Path(args.targets).read_text())
             decision = decide(
                 GhApi(args.repo), event=args.event, ref=args.ref, rebuild=args.rebuild.lower() == "true",
-                inputs_hash=args.inputs_hash, targets=targets, dev_repo=args.dev_repo, run_id=args.run_id,
+                inputs_hash=args.inputs_hash, ci_hash=args.ci_hash, targets=targets, dev_repo=args.dev_repo, run_id=args.run_id,
                 now=datetime.now(timezone.utc),
             )
             cand = decision.pop("candidate", None)

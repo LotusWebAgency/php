@@ -3,7 +3,9 @@
 
     python3 ci/candidate.py entry --entry ENTRY.json --out TEST_OUT_DIR --created TS --built-run ID --repository REPO > record.json
     python3 ci/candidate.py merge --targets TARGETS.json --records DIR --sha SHA --tree TREE \
-        --inputs-hash HASH --run-id ID --run-attempt N --out release-candidate.json
+        --inputs-hash HASH --ci-hash HASH --run-id ID --run-attempt N --out release-candidate.json
+    python3 ci/candidate.py check --candidate FILE --sha SHA --inputs-hash HASH --run-id ID
+    python3 ci/candidate.py pin --candidate FILE --target NAME --arch ARCH --sha SHA --inputs-hash HASH --run-id ID
 
 `entry` runs in each `images` job after ci/test-images.sh --mode digest: for every target
 in passed.txt it records the per-arch index digest the build pushed (the file the merge job
@@ -14,13 +16,23 @@ per-entry records and refuses anything but a complete set, every target of
 on disk always means "this commit's whole matrix was built and passed".
 
 release-candidate.json:
-    {"schema": 1, "sha", "tree", "inputs_hash", "run_id", "run_attempt", "built_run", "repository",
+    {"schema": 1, "sha", "tree", "inputs_hash", "ci_hash", "run_id", "run_attempt", "built_run", "repository",
      "targets": {"<name>": {"tag": "8.5-fpm", "archs": {"amd64": {"index", "platform", "created", "built_run"}, ...}}}}
 
 `sha`, `tree`, `run_id` and `run_attempt` name the run that tested and tagged these images (its
 digest-<target>-<arch> artifacts and test-result predicates). `created` and `built_run` name the
 build: they are this run's when it built the images, and the original build's when ci/reuse_plan.py
 found the same inputs hash and the images were only re-tested (`built_run` != `run_id`).
+`ci_hash` is the sha256 of .github/workflows/ci.yml the images were built under (a reuse run only
+reuses images whose `ci_hash` equals its own, so it is still the build's): how the images are built
+(bake flags, SBOM, provenance) is not part of the inputs hash, and ci/release_source.py copies a
+candidate to the release repository only when it equals main's.
+
+`check` and `pin` are what extended.yml's jobs use to test exactly the images of a candidate and not
+whatever a mutable dev:<tag>-<sha12> names later (ci/dev-tag.sh re-points those tags on a rebuild).
+`check` refuses a candidate that is not for this commit, this inputs hash and this ci run. `pin`
+does the same and prints `<repository>@<index digest><TAB><platform digest>` of one target on one
+architecture: the ref to pull and the platform manifest that pull must resolve to.
 """
 import argparse
 import json
@@ -33,6 +45,7 @@ ARCHES = ("amd64", "arm64")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 RUN_ID = re.compile(r"^\d+$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class CandidateError(ValueError):
@@ -79,8 +92,10 @@ def entry_record(entry, out_dir, created, repository, built_run):
     }
 
 
-def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, arches=ARCHES):
+def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, arches=ARCHES, *, ci_hash):
     """release-candidate.json from the per-entry records, or CandidateError listing every gap."""
+    if not SHA256.match(str(ci_hash)):
+        raise CandidateError(f"ci hash '{ci_hash}' is not a sha256 hex digest")
     wanted_tags = {t["name"]: t["tags"][0].split(":", 1)[1] for t in wanted}
     problems = []
     repositories = {r["repository"] for r in records}
@@ -128,12 +143,38 @@ def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, 
         "sha": sha,
         "tree": tree,
         "inputs_hash": inputs_hash,
+        "ci_hash": ci_hash,
         "run_id": str(run_id),
         "run_attempt": str(run_attempt),
         "built_run": built_runs.pop(),
         "repository": repositories.pop(),
         "targets": {name: merged[name] for name in wanted_tags},
     }
+
+
+def check_header(cand, sha, inputs_hash, run_id):
+    """CandidateError unless `cand` is the candidate of ci run `run_id` for commit `sha` and this inputs hash."""
+    if not isinstance(cand, dict) or cand.get("schema") != SCHEMA:
+        raise CandidateError(f"candidate schema {cand.get('schema') if isinstance(cand, dict) else cand!r} is not {SCHEMA}")
+    if cand.get("sha") != sha:
+        raise CandidateError(f"candidate is for commit {str(cand.get('sha'))[:12]}, not {sha[:12]}")
+    if cand.get("inputs_hash") != inputs_hash:
+        raise CandidateError(f"candidate is for inputs hash {str(cand.get('inputs_hash'))[:12]}, not {inputs_hash[:12]}")
+    if run_id and str(cand.get("run_id")) != str(run_id):
+        raise CandidateError(f"candidate was written by ci run {cand.get('run_id')}, not {run_id}")
+    if not isinstance(cand.get("repository"), str) or not cand["repository"]:
+        raise CandidateError("candidate names no repository")
+
+
+def pin(cand, name, arch, sha, inputs_hash, run_id):
+    """(`<repository>@<index digest>`, platform digest) of one target on one architecture of the candidate."""
+    check_header(cand, sha, inputs_hash, run_id)
+    slot = (((cand.get("targets") or {}).get(name) or {}).get("archs") or {}).get(arch)
+    if not slot:
+        raise CandidateError(f"candidate has no {name} {arch}")
+    index = _digest(slot.get("index"), f"{name} {arch} index")
+    platform = _digest(slot.get("platform"), f"{name} {arch} platform")
+    return f"{cand['repository']}@{index}", platform
 
 
 def load_records(directory):
@@ -158,19 +199,35 @@ def main(argv=None):
     m.add_argument("--sha", required=True)
     m.add_argument("--tree", required=True)
     m.add_argument("--inputs-hash", required=True)
+    m.add_argument("--ci-hash", required=True, help="sha256 of .github/workflows/ci.yml")
     m.add_argument("--run-id", required=True)
     m.add_argument("--run-attempt", required=True)
     m.add_argument("--out", required=True)
+    for cmd in ("check", "pin"):
+        c = sub.add_parser(cmd)
+        c.add_argument("--candidate", required=True, help="release-candidate.json")
+        c.add_argument("--sha", required=True, help="the commit the images must be of (40 hex digits)")
+        c.add_argument("--inputs-hash", required=True)
+        c.add_argument("--run-id", default="", help="the ci run that wrote the candidate")
+        if cmd == "pin":
+            c.add_argument("--target", required=True)
+            c.add_argument("--arch", required=True, choices=ARCHES)
     args = parser.parse_args(argv)
     try:
-        if args.cmd == "entry":
+        if args.cmd == "check":
+            check_header(json.loads(Path(args.candidate).read_text()), args.sha, args.inputs_hash, args.run_id)
+            print(f"ok: {args.candidate} is the candidate of {args.sha[:12]}")
+        elif args.cmd == "pin":
+            ref, platform = pin(json.loads(Path(args.candidate).read_text()), args.target, args.arch, args.sha, args.inputs_hash, args.run_id)
+            print(f"{ref}\t{platform}")
+        elif args.cmd == "entry":
             entry = json.loads(Path(args.entry).read_text())
             json.dump(entry_record(entry, args.out, args.created, args.repository, args.built_run), sys.stdout, indent=2)
             print()
         else:
             wanted = json.loads(Path(args.targets).read_text())
             doc = merge_records(load_records(args.records), wanted, args.sha, args.tree, args.inputs_hash,
-                                args.run_id, args.run_attempt)
+                                args.run_id, args.run_attempt, ci_hash=args.ci_hash)
             Path(args.out).write_text(json.dumps(doc, indent=2) + "\n")
             print(f"ok: {len(doc['targets'])} targets x {len(ARCHES)} architectures in {args.out}")
     except (CandidateError, KeyError, OSError, json.JSONDecodeError) as exc:

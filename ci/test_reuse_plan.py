@@ -29,6 +29,7 @@ FAILED = RUNS["workflow_runs"][1]
 
 REPO = "ghcr.io/lotuswebagency/php/dev"
 HASH = "a" * 64
+CI_HASH = "c" * 64
 NOW = datetime(2026, 11, 26, 12, 0, 0, tzinfo=timezone.utc)
 THIS_RUN = 45800000000
 NAMES = ("php-8_5-fpm", "php-8_5-cli")
@@ -46,7 +47,7 @@ def targets(names=NAMES):
     return [{"name": n, "tags": [f"lotuswebagency/php:8.5-{n.split('-', 2)[2]}"]} for n in names]
 
 
-def make_candidate(run=NEWEST_GREEN, inputs_hash=HASH, created=None, names=NAMES, repo=REPO, built_run=None):
+def make_candidate(run=NEWEST_GREEN, inputs_hash=HASH, created=None, names=NAMES, repo=REPO, built_run=None, ci_hash=CI_HASH):
     created = created or stamp(timedelta(hours=3))
     records = [
         {
@@ -56,7 +57,7 @@ def make_candidate(run=NEWEST_GREEN, inputs_hash=HASH, created=None, names=NAMES
         }
         for arch in reuse_plan.ARCHES
     ]
-    return candidate.merge_records(records, targets(names), run["head_sha"], "t" * 40, inputs_hash, run["id"], 1)
+    return candidate.merge_records(records, targets(names), run["head_sha"], "t" * 40, inputs_hash, run["id"], 1, ci_hash=ci_hash)
 
 
 def artifact_doc(run=NEWEST_GREEN, expired=False, name="release-candidate"):
@@ -89,7 +90,7 @@ class FakeApi:
 
 
 def decide(api, **kw):
-    args = dict(event="push", ref="refs/heads/develop", rebuild=False, inputs_hash=HASH, targets=targets(),
+    args = dict(event="push", ref="refs/heads/develop", rebuild=False, inputs_hash=HASH, ci_hash=CI_HASH, targets=targets(),
                 dev_repo=REPO, run_id=THIS_RUN, now=NOW)
     args.update(kw)
     return reuse_plan.decide(api, **args)
@@ -210,6 +211,21 @@ class TestBuild(unittest.TestCase):
         self.assertIn("inputs hash changed", reason)
         self.assertIn("bbbbbbbbbbbb -> aaaaaaaaaaaa", reason)
 
+    def test_ci_workflow_changed_since_the_build(self):
+        reason = self.build_reason(FakeApi(cand=make_candidate(ci_hash="d" * 64)))
+        self.assertIn("ci.yml changed", reason)
+        self.assertIn("dddddddddddd -> cccccccccccc", reason)
+
+    def test_candidate_without_a_ci_hash(self):
+        cand = make_candidate()
+        del cand["ci_hash"]
+        self.assertIn("ci.yml changed", self.build_reason(FakeApi(cand=cand)))
+
+    def test_a_build_run_that_is_not_a_number(self):
+        cand = make_candidate()
+        cand["targets"]["php-8_5-fpm"]["archs"]["amd64"]["built_run"] = "1\nPATH=/x"
+        self.assertIn("build run", self.build_reason(FakeApi(cand=cand)))
+
     def test_missing_target(self):
         reason = self.build_reason(FakeApi(cand=make_candidate(names=("php-8_5-fpm",))))
         self.assertIn("php-8_5-cli is missing", reason)
@@ -288,16 +304,15 @@ class TestGhApi(unittest.TestCase):
 
         def run(cmd, **kw):
             seen.append(cmd)
-            self.assertEqual(cmd[1:3], ["gh", "api"])
-            self.assertEqual(kw["env"]["RETRY_KIND"], "http")
-            return completed(next(v for k, v in answers.items() if cmd[3].endswith(k)))
+            self.assertEqual(cmd[:2], ["gh", "api"])
+            return completed(next(v for k, v in answers.items() if cmd[2].endswith(k)))
 
         api = reuse_plan.GhApi("LotusWebAgency/php", run=run)
         self.assertEqual(api.runs(), RUNS)
         self.assertEqual(api.artifacts(7), ARTIFACTS)
         self.assertEqual(api.candidate(8), cand)
-        self.assertEqual(seen[1][3], "repos/LotusWebAgency/php/actions/runs/7/artifacts?name=release-candidate&per_page=20")
-        self.assertEqual(seen[2][3], "repos/LotusWebAgency/php/actions/artifacts/8/zip")
+        self.assertEqual(seen[1][2], "repos/LotusWebAgency/php/actions/runs/7/artifacts?name=release-candidate&per_page=20")
+        self.assertEqual(seen[2][2], "repos/LotusWebAgency/php/actions/artifacts/8/zip")
 
     def test_a_failing_call_means_build_not_a_failed_plan(self):
         def run(cmd, **kw):
@@ -306,6 +321,64 @@ class TestGhApi(unittest.TestCase):
         got = decide(reuse_plan.GhApi("o/r", run=run))
         self.assertEqual(got["mode"], "build")
         self.assertIn("HTTP 403", got["reason"])
+
+    def test_a_transient_failure_is_retried_and_the_decision_is_normal(self):
+        cand = make_candidate()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("release-candidate.json", json.dumps(cand))
+        answers = {"runs?": json.dumps(RUNS).encode(), "artifacts?": json.dumps(artifact_doc()).encode(), "/zip": buf.getvalue()}
+        calls, slept = {}, []
+
+        def run(cmd, **kw):
+            key = next(k for k in answers if k in cmd[2])
+            calls[key] = calls.get(key, 0) + 1
+            if calls[key] == 1:
+                raise subprocess.CalledProcessError(1, cmd, b"", b"gh: Bad Gateway (HTTP 502)")
+            return completed(answers[key])
+
+        got = decide(reuse_plan.GhApi("o/r", run=run, sleep=slept.append))
+        self.assertEqual(got["mode"], "reuse", got)
+        self.assertEqual(calls, {"runs?": 2, "artifacts?": 2, "/zip": 2})
+        self.assertEqual(slept, [5, 5, 5])
+
+    def test_a_timeout_and_a_dropped_connection_are_retried(self):
+        for failure in (subprocess.TimeoutExpired(["gh"], 300), subprocess.CalledProcessError(1, ["gh"], b"", b"error connecting to api.github.com")):
+            seen = []
+
+            def run(cmd, **kw):
+                seen.append(cmd)
+                if len(seen) == 1:
+                    raise failure
+                return completed(b"{}")
+
+            self.assertEqual(reuse_plan.GhApi("o/r", run=run, sleep=lambda s: None)._json("x"), {})
+            self.assertEqual(len(seen), 2)
+
+    def test_a_persistent_failure_is_three_attempts_then_build(self):
+        seen, slept = [], []
+
+        def run(cmd, **kw):
+            seen.append(cmd)
+            raise subprocess.CalledProcessError(1, cmd, b"", b"gh: Service Unavailable (HTTP 503)")
+
+        got = decide(reuse_plan.GhApi("o/r", run=run, sleep=slept.append))
+        self.assertEqual(got["mode"], "build")
+        self.assertIn("HTTP 503", got["reason"])
+        self.assertEqual(len(seen), 3)
+        self.assertEqual(slept, [5, 15])
+
+    def test_a_final_error_is_not_retried(self):
+        for stderr in (b"gh: Not Found (HTTP 404)", b"gh: Resource not accessible by integration (HTTP 403)", b"gh: Bad credentials (HTTP 401)"):
+            seen = []
+
+            def run(cmd, **kw):
+                seen.append(cmd)
+                raise subprocess.CalledProcessError(1, cmd, b"", stderr)
+
+            with self.assertRaises(reuse_plan.NoReuse):
+                reuse_plan.GhApi("o/r", run=run, sleep=lambda s: self.fail("slept"))._get("x")
+            self.assertEqual(len(seen), 1, stderr)
 
     def test_a_zip_without_the_file_means_build(self):
         buf = io.BytesIO()
@@ -348,6 +421,18 @@ class TestEntryDigests(unittest.TestCase):
         with self.assertRaisesRegex(reuse_plan.ReuseError, "no php-8_5-cli-builder arm64"):
             reuse_plan.entry_digests(make_candidate(), entry(names=NAMES + ("php-8_5-cli-builder",)))
 
+    def test_a_build_run_or_time_that_could_inject_into_the_environment(self):
+        cand = make_candidate(built_run="99")
+        for arch in reuse_plan.ARCHES:
+            for t in cand["targets"].values():
+                t["archs"][arch]["built_run"] = "99\nPATH=/x"
+        with self.assertRaisesRegex(reuse_plan.ReuseError, "not a run id"):
+            reuse_plan.entry_digests(cand, entry())
+        cand = make_candidate(built_run="99")
+        cand["targets"]["php-8_5-fpm"]["archs"]["arm64"]["created"] = "2026-11-23T08:00:00Z\nX=1"
+        with self.assertRaisesRegex(reuse_plan.ReuseError, "not a UTC timestamp"):
+            reuse_plan.entry_digests(cand, entry())
+
     def test_one_entry_never_spans_two_builds(self):
         cand = make_candidate(built_run="99")
         cand["targets"]["php-8_5-cli"]["archs"]["arm64"]["built_run"] = "98"
@@ -365,7 +450,7 @@ class TestCli(unittest.TestCase):
     def plan_args(self, tmp, **over):
         (tmp / "targets.json").write_text(json.dumps(targets()))
         args = {"--repo": "LotusWebAgency/php", "--event": "push", "--ref": "refs/heads/develop", "--rebuild": "",
-                "--inputs-hash": HASH, "--targets": str(tmp / "targets.json"), "--dev-repo": REPO,
+                "--inputs-hash": HASH, "--ci-hash": CI_HASH, "--targets": str(tmp / "targets.json"), "--dev-repo": REPO,
                 "--run-id": str(THIS_RUN), "--save-candidate": str(tmp / "candidate.json")}
         args.update(over)
         return [x for kv in args.items() for x in kv]
