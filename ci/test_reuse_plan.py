@@ -159,7 +159,7 @@ class TestRunSelection(unittest.TestCase):
         api = FakeApi(runs=self.runs_of(older, NEWEST_GREEN))
         self.assertEqual(decide(api)["run_id"], str(NEWEST_GREEN["id"]))
 
-    def test_unfinished_cancelled_and_foreign_runs_are_skipped(self):
+    def test_unfinished_canceled_and_foreign_runs_are_skipped(self):
         def variant(**kw):
             r = copy.deepcopy(NEWEST_GREEN)
             r.update(kw)

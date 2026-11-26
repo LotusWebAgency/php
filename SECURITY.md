@@ -80,7 +80,7 @@ release rebuilds; the images' inputs hash and the sha256 of `ci.yml` equal the
 release's; every image is at most seven days old when the decision is made and again in each leg that
 copies; and the repository variable `RELEASE_HOLD` is empty. Every copied image is scanned again with
 the day's vulnerability database before it is signed. The signatures and the signing identity are the
-release's own, the provenance and test results name the `develop` commit. `develop` builds push only unsigned test images, tested by digest, to a GHCR package (`php/dev`). Two jobs use the
+release's own, the provenance and test results name the `develop` commit. `develop` builds push every image by digest, unsigned, to a GHCR package (`php/dev`), test it from there, and tag only the ones that pass; untagged leftovers are pruned. Two jobs use the
 Docker Hub credentials, the promotion and the description sync. Both run on `main` only, in the
 `release` deployment environment, which holds the Docker Hub secrets and only `main` may deploy to.
 

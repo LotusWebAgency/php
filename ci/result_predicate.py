@@ -4,7 +4,7 @@
     python3 ci/result_predicate.py platform ... --trivy-outcome success --trivy-severity CRITICAL,HIGH --out amd64.test-result.json
     python3 ci/result_predicate.py aggregate amd64.json arm64.json --out list.json
 
-`platform` runs in the build job once smoke and the Trivy gate have passed
+`platform` runs in the images job once smoke and the Trivy gate have passed
 against the pushed digest, and refuses to write anything if the captured smoke
 log does not show a passing run. `aggregate` merges the per-architecture files
 into the one that goes on the multi-arch manifest list. ci/attest-image.sh

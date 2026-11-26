@@ -26,7 +26,7 @@ The re-review deadline is the token `review-by: YYYY-MM-DD` inside status_notes
 exclusive, like Trivy's `exp:`: from that day on the generated .trivyignore line
 has expired, so the Trivy gate itself fails on the finding again (that is the
 only thing that gates a build). Nothing else does: the unit tests deliberately
-do not look at the date, because tests/preflight.sh runs before every build job
+do not look at the date, because tests/preflight.sh runs before every images job
 and a date-triggered failure there would stop the whole publish. `check` is the
 tool people and CI use to see the date coming: plain, it exits 1 once a deadline
 has passed; with --warn-within N it prints GitHub ::warning:: lines for every

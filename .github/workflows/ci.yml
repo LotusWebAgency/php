@@ -190,7 +190,7 @@ jobs:
   # matrix.gen.hcl drift, PGO tier coverage, bake --print + COMPILER
   # cross-check, shellcheck, the python unit suite, build-all.sh/bake target
   # list drift. Runs on every push and PR, beside `plan` rather than in front of
-  # the build jobs: it catches a stale generated file or a shellcheck regression
+  # the images job: it catches a stale generated file or a shellcheck regression
   # in minutes, and what it gates is whatever publishes or moves a floating tag
   # (dev-manifest, promote) and the PR gate, not the builds themselves.
   preflight:
@@ -244,7 +244,7 @@ jobs:
         run: ./tests/test-attest.sh
 
   # -------------------------------------------------------------------- plan
-  # Everything the build jobs take as a given, computed once per run, so no entry
+  # Everything the images job takes as a given, computed once per run, so no entry
   # does it again and no two entries can disagree:
   #   - the base image's signature (below), before any job builds on it;
   #   - the Wolfi index state, the inputs hash and the toolchain epoch;
@@ -678,7 +678,7 @@ jobs:
   #
   # The registry cache (CACHE_REGISTRY/cache:<php>-<uarch>-<arch>-<week>) is
   # written on develop and main by the entry's deps-cache target in the same bake
-  # call, and read by every build.
+  # call, and read by every build. The package is public: reading it needs no login.
   #
   # A pull request that changes any build input (a Renovate base-digest bump, say)
   # has an inputs hash no corpus job has built, so its hash-pinned corpus ref does
@@ -693,7 +693,7 @@ jobs:
   # other entry.
   #
   # A failed test leaves the targets that passed their tags and artifacts (the
-  # steps after the test run unless the run was cancelled) and fails the job.
+  # steps after the test run unless the run was canceled) and fails the job.
   images:
     needs: [plan, release-source, promote-check, corpus-merge, trivy-db, sources]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.trivy-db.result == 'success' && needs.release-source.outputs.mode != 'copy' && (needs.plan.outputs.promote != 'true' || (needs.promote-check.result == 'success' && needs.promote-check.outputs.copy == 'false')) && (github.event_name == 'pull_request' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') }}
@@ -706,7 +706,7 @@ jobs:
     timeout-minutes: 240
     permissions:
       contents: read
-      # GHCR: the corpus pull, the cache, and the develop and main image pushes.
+      # GHCR: the corpus pull, the cache push, and the develop and main image pushes.
       # A pull request never pushes (and a fork's token is read-only whatever is
       # asked for here).
       packages: write
@@ -803,7 +803,7 @@ jobs:
             echo "::warning::no source cache restored; the build fetches its sources itself"
           fi
 
-      - name: Log in to GHCR (corpus and cache pull, image pull and push)
+      - name: Log in to GHCR (corpus pull, image pull, image and cache push)
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io

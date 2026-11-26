@@ -29,7 +29,7 @@
 # $PHP_LOCAL_REPO-corpus:php<tier> that tests/test-pgo.sh reads. Under GitHub
 # Actions, or with PHP_LOCAL_REPO set to the empty string, the canonical names
 # are used instead: lotuswebagency/php:<tag> and
-# ghcr.io/lotuswebagency/php/corpus:php<tier>, as ci.yml's verify job tags them.
+# ghcr.io/lotuswebagency/php/corpus:php<tier>, as ci.yml's corpus-merge job tags them.
 #
 # With EXTENDED_CANDIDATE=<release-candidate.json> (ci/candidate.py; extended.yml's
 # plan verifies the one of the ci run that started it and freezes it for the legs) pull takes no tag at all:

@@ -99,7 +99,7 @@ class TestStatus(unittest.TestCase):
             if os.path.exists(self.calls):
                 os.remove(self.calls)
 
-    def test_no_status_when_cancelled_or_verdict_unknown(self):
+    def test_no_status_when_canceled_or_verdict_unknown(self):
         r, calls = self.go(needs(others=("success", "cancelled")))
         self.assertEqual(self.posts(calls), [])
         r, calls = self.go(needs(), verdict="cancelled")

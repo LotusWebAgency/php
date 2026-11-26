@@ -5,7 +5,7 @@
 #
 # A buildx push with provenance/SBOM is an index (image manifest plus
 # attestation manifests, which carry platform unknown/unknown), so the digest
-# the build job gets back is not the digest a pulled image runs from. The
+# the images job gets back is not the digest a pulled image runs from. The
 # platform manifest is, and it is the same bytes inside the published manifest
 # list, which is why test results and VEX are attached to it.
 set -euo pipefail

@@ -14,9 +14,9 @@
 #   - plan.outputs.checkout equals plan.outputs.sha: the tests and scripts that
 #     ran are the commit's own tree. A dispatch that tests the commit's images
 #     with another ref's tests/ and ci/ says nothing about the commit's release;
-#   - no job was cancelled, and EXT_VERDICT (the verdict step's outcome) is
+#   - no job was canceled, and EXT_VERDICT (the verdict step's outcome) is
 #     `success` or `failure`: success posts state success, failure posts failure.
-#     A cancelled run posts nothing, so it neither passes nor fails the commit.
+#     A canceled run posts nothing, so it neither passes nor fails the commit.
 #
 # Context `release/extended`, target the run. The status is only a pointer to
 # the run: ci/release_source.py trusts the run (its event, path and title, and
@@ -55,7 +55,7 @@ if [ "$(plan checkout)" != "$sha" ]; then
 fi
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: plan.outputs.sha '$sha' is not a full commit sha" >&2; exit 1; }
 if jq -e '[.[].result] | any(. == "cancelled")' <<<"$needs" >/dev/null; then
-  say "$context: no status, the run was cancelled"; exit 0
+  say "$context: no status, the run was canceled"; exit 0
 fi
 case "$verdict" in
   success) state=success; description="extended tests passed" ;;

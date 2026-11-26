@@ -136,7 +136,7 @@ build_arch() {  # build_arch <content> <arch> -> the pushed index digest
 
 # push_arches <content> -> sets IDX_amd64/IDX_arm64 and PLAT_amd64/PLAT_arm64;
 # per-arch pushes by digest with provenance (so each is an index with an
-# attestation manifest), as the build job does. No tag exists afterwards.
+# attestation manifest), as the images job does. No tag exists afterwards.
 push_arches() {
   local content="$1"
   mkdir -p "$WORK/ctx-$content"
@@ -189,7 +189,7 @@ predicate() {  # predicate <arch> <image-digest> <smoke-log> <out>
     --trivy-info "$WORK/trivy-info.json" --out "$4"
 }
 
-# index_files <dir>: writes the per-arch index digest files the build job
+# index_files <dir>: writes the per-arch index digest files the images job
 # uploads (<arch>), next to the <arch>.test-result.json files.
 index_files() {
   printf '%s' "$IDX_amd64" > "$1/amd64"
