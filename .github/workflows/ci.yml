@@ -512,7 +512,7 @@ jobs:
           name: copy-candidate
           path: ${{ runner.temp }}/copy/release-candidate.json
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
           overwrite: true
 
       - name: Publish the decision
