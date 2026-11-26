@@ -319,14 +319,26 @@ got=$(opcache_sizes -m 512m)
 [ "$got" = "256 $interned_cap started" ] || fail "512m: opcache memory/interned/state is '$got', expected '256 $interned_cap started' (the floor is 256MB, interned an eighth of it up to the cap)"
 got=$(opcache_sizes -m 256m)
 [ "$got" = "128 16 started" ] || fail "256m: opcache memory/interned/state is '$got', expected '128 16 started' (the floor gives way to half of the limit)"
-if [ "${PHP_MM%%.*}" -ge 8 ]; then
-  jit_size() { drun --rm "$@" "$IMAGE" php -r 'echo ini_get("opcache.jit_buffer_size");' 2>/dev/null || true; }
+# The JIT buffer exists wherever opcache has a JIT compiled in: PHP 8.0+, except 8.0 on
+# arm64 (8.0's opcache builds the JIT for x86 only; aarch64 arrived in 8.1), where the
+# opcache.jit* directives are not registered at all. The size is set whether or not
+# the JIT is on by default (8.0 and 8.1 ship it off), so it is checked on both.
+jit_size() { drun --rm "$@" "$IMAGE" php -r 'var_export(ini_get("opcache.jit_buffer_size"));' 2>/dev/null || true; }
+case "$PHP_MM" in
+  7.*) jit_built=0 ;;
+  8.0) if [ "$(docker image inspect --format '{{.Architecture}}' "$IMAGE")" = arm64 ]; then jit_built=0; else jit_built=1; fi ;;
+  *) jit_built=1 ;;
+esac
+if [ "$jit_built" = 1 ]; then
   got=$(jit_size -m 256m)
-  [ "$got" = "32M" ] || fail "256m: opcache.jit_buffer_size is '$got', expected 32M (a quarter of the 128MB segment)"
+  [ "$got" = "'32M'" ] || fail "256m: opcache.jit_buffer_size is $got, expected '32M' (a quarter of the 128MB segment)"
   got=$(jit_size -m 512m)
-  [ "$got" = "64M" ] || fail "512m: opcache.jit_buffer_size is '$got', expected 64M"
+  [ "$got" = "'64M'" ] || fail "512m: opcache.jit_buffer_size is $got, expected '64M'"
   got=$(jit_size -m 256m -e PHP_OPCACHE_JIT_BUFFER=16M)
-  [ "$got" = "16M" ] || fail "256m with PHP_OPCACHE_JIT_BUFFER=16M: opcache.jit_buffer_size is '$got', expected 16M (an explicit size is used exactly)"
+  [ "$got" = "'16M'" ] || fail "256m with PHP_OPCACHE_JIT_BUFFER=16M: opcache.jit_buffer_size is $got, expected '16M' (an explicit size is used exactly)"
+elif [ "$PHP_MM" = 8.0 ]; then
+  got=$(jit_size -m 256m)
+  [ "$got" = false ] || fail "PHP 8.0/arm64: opcache.jit_buffer_size is $got, expected no such directive (8.0 builds no aarch64 JIT)"
 fi
 got=$(opcache_sizes -m 4g)
 [ "$got" = "512 $interned_cap started" ] || fail "4g: opcache memory/interned/state is '$got', expected '512 $interned_cap started'"
