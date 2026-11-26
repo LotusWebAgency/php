@@ -3,25 +3,16 @@
 PHP 7.0 through 8.5, compiled from source on Wolfi (`cgr.dev/chainguard/wolfi-base`, pinned by
 digest) with profile-guided optimization (PGO) trained on real PrestaShop, WordPress, Laravel,
 Symfony and Drupal applications. Binaries are hardened at the ELF level, Snuffleupagus virtual
-patching is available, and a read-only root filesystem is supported. A complete hardened setup is in
+patching is available, and a read-only root filesystem is supported. A complete hardened setup:
 [Hardened deployment](https://github.com/LotusWebAgency/php#hardened-deployment); the [Image contract](https://github.com/LotusWebAgency/php#image-contract) lists the
 facts a deployment script or agent needs.
 
 Source and full docs: [github.com/LotusWebAgency/php](https://github.com/LotusWebAgency/php).
-Replaces `dementev/php-fpm-with-ext`
-([migration notes](https://github.com/LotusWebAgency/php#migrating-from-php-fpm-with-ext)).
-
-```yaml
-services:
-  php:
-    image: lotuswebagency/php:8.5-fpm
-    volumes:
-      - ./:/app
-```
+Replaces `dementev/php-fpm-with-ext` ([migration notes](https://github.com/LotusWebAgency/php#migrating-from-php-fpm-with-ext)).
 
 ## Tags
 
-All 11 PHP versions ship all six flavors for `linux/amd64` and `linux/arm64`. Support status and EOL
+All 11 versions ship all six flavors for `linux/amd64` and `linux/arm64`. Support status and EOL
 dates are upstream's ([php.net](https://www.php.net/supported-versions.php)) and are also image labels.
 
 | PHP | Compiler | `-v3` | Support | EOL date |
@@ -38,8 +29,8 @@ dates are upstream's ([php.net](https://www.php.net/supported-versions.php)) and
 | `8.4` | gcc | yes | active | 2028-12-31 |
 | `8.5` | clang | yes | active | 2029-12-31 |
 
-End-of-life tags are still published and rebuilt weekly for base-image and package updates, but their PHP
-interpreter (8.1 and below) gets no upstream security fixes. Policy:
+End-of-life tags are still published and rebuilt weekly for base-image and package updates, but PHP
+8.1 and below get no upstream security fixes. Policy:
 [SUPPORT.md](https://github.com/LotusWebAgency/php/blob/main/SUPPORT.md).
 
 ### Older PHP versions
@@ -50,7 +41,7 @@ interpreter (8.1 and below) gets no upstream security fixes. Policy:
   `mysql_native_password`. 7.0 and 7.1 speak TLS 1.0 only, which MySQL 8.4 and MariaDB 11 refuse.
 - No JIT below 8.0 (8.0: amd64 only).
 
-Every caveat and workaround: [Older PHP versions](https://github.com/LotusWebAgency/php/blob/main/README.md#older-php-versions).
+All caveats and workarounds: [Older PHP versions](https://github.com/LotusWebAgency/php/blob/main/README.md#older-php-versions).
 
 | Tag shape | Example | Meaning |
 |---|---|---|
@@ -67,7 +58,7 @@ not Graviton2/3, Ampere Altra or Apple silicon. Use the baseline tag on a Mac.
 The amd64 baseline is `x86-64-v2` (SSE4.2 and POPCNT; Intel Nehalem and newer, AMD Bulldozer and
 newer), not plain `x86-64`, because Wolfi's packages are built for it. Both baselines and amd64
 `-v3` tune generic; arm64 `-v3` tunes for `neoverse-v2`. The vendored ImageMagick and heif stack are
-baseline builds in every image, `-v3` included.
+baseline builds in every image.
 
 ## Flavors
 
@@ -106,8 +97,8 @@ about 45 MB smaller. Tags: `8.5-fpm-slim`, `8.5.13-cli-slim`, `8.5-fpm-slim-v3`.
   `sh`, tini, unzip, bzip2, xz and a busybox applet allowlist ([list](https://github.com/LotusWebAgency/php/blob/main/README.md#slim-flavors)).
 - Not a sandbox: PHP still has curl, sockets, ftp, pcntl and posix, and `busybox <applet>` still
   reaches every applet; a pruned name only fails as a bare command.
-- No package manager, no curl for custom healthchecks, no `update-ca-certificates` (mount a CA
-  bundle or set `openssl.cafile`). To add a runtime library, use the full flavor, or `apk add` in a
+- No `update-ca-certificates` (mount a CA bundle or set `openssl.cafile`) and no curl for custom
+  healthchecks. To add a runtime library, use the full flavor, or `apk add` in a
   stage from the matching full tag and `COPY` the files.
 
 ## Quick start
@@ -123,7 +114,7 @@ services:
       PHP_MEMORY_LIMIT: 512M
 ```
 
-Point your FastCGI proxy at `php:9000`. Multi-stage build:
+Point your FastCGI proxy at `php:9000`. A multi-stage build:
 
 ```dockerfile
 FROM lotuswebagency/php:8.5-cli-builder AS build
@@ -138,12 +129,11 @@ COPY --from=build /app /app
 
 ## Image contract
 
-The facts a deployment script, CI job or coding agent needs. Everything here holds for
-every tag unless the row says otherwise.
+Facts a deployment script, CI job or coding agent needs. All hold for every tag unless a row says otherwise.
 
 | Item | Value |
 |---|---|
-| Entrypoint | `/usr/bin/tini -- docker-php-entrypoint`. tini is already PID 1: do not add `--init` / `init: true`, or tini warns that it is not PID 1. |
+| Entrypoint | `/usr/bin/tini -- docker-php-entrypoint`. tini is already PID 1: do not add `--init` / `init: true` (tini warns). |
 | Default command | `fpm`, `fpm-slim`: `php-fpm -F`. `cli`, `cli-slim`: `php -a`. `cli-builder`, `ext-builder`: `bash`. |
 | Working directory | `/app`, owned by `www-data`. |
 | Port | `fpm`, `fpm-slim`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
@@ -208,22 +198,21 @@ services:
       PHP_EXT_ENABLE: ldap,uuid
 ```
 
-`/tmp` holds sessions, upload temp files and the env-driven ini (written to a private mode-0700
+`/tmp` holds sessions, upload temp files and the env-driven ini (in a private mode-0700
 directory when `conf.d` is not writable). Size it for the largest upload times concurrent uploads,
 plus sessions; it counts against the memory limit. `cli-builder` needs
 `/tmp:exec,size=256m` because `npx` runs packages from `/tmp`.
 
-Without a writable `/tmp`, `PHP_EXT_ENABLE` and `PHP_SNUFFLEUPAGUS` refuse to start, and the other
-`PHP_*` ini variables are ignored with a warning naming each one. The application's own writes and a
+Without a writable `/tmp`, `PHP_EXT_ENABLE` and `PHP_SNUFFLEUPAGUS` refuse to start, and other
+`PHP_*` ini variables are ignored with a warning naming each. The application's own writes and a
 FastCGI unix socket need their own writable mounts. Details:
 [README](https://github.com/LotusWebAgency/php#read-only-root-filesystem).
 
 ## Hardened deployment
 
 The image is already non-root, with setuid bits stripped, ELF-hardened binaries and a baked
-`disable_functions` list. A production `fpm` container adds the controls below. Together they leave
-workers with an empty capability set and `NoNewPrivs`; the container still starts healthy and
-serves requests.
+`disable_functions` list. A production `fpm` container adds the controls below, which leave
+workers with an empty capability set and `NoNewPrivs`; it still starts healthy and serves requests.
 
 ```yaml
 services:
@@ -251,7 +240,7 @@ networks:
     internal: true
 ```
 
-Bake the code into the image and make it root-owned, so `www-data` can read but not modify it.
+Bake the code into the image, root-owned, so `www-data` can read but not modify it.
 `COPY --from` keeps the build stage's owner (UID 33 here), hence `--chown=root:root`:
 
 ```dockerfile
@@ -269,7 +258,7 @@ RUN mkdir -p /app/storage /app/bootstrap/cache \
 USER www-data
 ```
 
-A named volume mounted at `/app/storage` starts with the image's contents and owner. A bind mount of
+A named volume at `/app/storage` starts with the image's contents and owner. A bind mount of
 the code (`./:/app:ro`) works too.
 
 What each setting needs:
@@ -278,22 +267,19 @@ What each setting needs:
   and `cli`; `cli-builder` needs `exec` for `npx`. See [Read-only root filesystem](https://github.com/LotusWebAgency/php#read-only-root-filesystem).
 - **`cap_drop: [ALL]`.** Nothing in `fpm` or `cli` needs a capability. The FPM master already runs as
   `www-data`, so the log notes that the pool's `user` and `group` lines are ignored; that is expected.
-  Keep `PHP_FPM_LISTEN` on a port above 1024.
+  Keep `PHP_FPM_LISTEN` above port 1024.
 - **`no-new-privileges`.** No setuid binary is left; this closes the path for anything added later.
 - **Snuffleupagus.** Pick the ruleset that matches the application, or start a custom one from
-  `default` (see [Hardening](https://github.com/LotusWebAgency/php#hardening)). Rulesets are for serving: run Composer and other build
-  steps in `cli-builder` without one. Snuffleupagus hooks the executor, so PHP turns the JIT off
+  `default` (see [Hardening](https://github.com/LotusWebAgency/php#hardening)). Rulesets are for serving: run Composer and other build steps in `cli-builder` without one. Snuffleupagus hooks the executor, so PHP turns the JIT off
   and logs a startup warning. `PHP_OPCACHE_JIT=disable` removes the warning; `off` does not, because it keeps the JIT buffer.
 - **`PHP_DISABLE_FUNCTIONS`.** Adds names to the baked list and a mounted ini's (as in PHP, only the
   last mounted `disable_functions` counts), for example `proc_open` when nothing starts processes
   (Composer, Symfony Process and Laravel queues do). It refuses to
   start if a name does not end up disabled: a later-sorting ini replaces the list, or a bare
   `--read-only` has no writable `/tmp`. `php -n`, `-c` or `-d disable_functions=` bypasses the check.
-- **Limits.** `pids_limit` bounds runaway forks; the memory limit bounds the container and drives FPM
-  and opcache autotuning.
-- **Network.** `fpm` speaks FastCGI on 9000 and should only be reachable by the web server. Never
-  publish 9000 to the host.
-- **Errors.** `PHP_DISPLAY_ERRORS` stays `Off`; errors go to stderr.
+- **Limits.** `pids_limit` bounds runaway forks; the memory limit bounds the container and sizes FPM
+  and opcache.
+- **Network.** FastCGI on 9000 is for the web server only. Never publish it to the host.
 
 The `docker run` flags and the Kubernetes `securityContext` for the same setup are in the
 [README](https://github.com/LotusWebAgency/php#hardened-deployment).
@@ -347,17 +333,17 @@ ENV PHP_EXT_ENABLE=myext
 
 - Use the same PHP version tag in both stages, ideally pinned by digest. An extension built for one
   PHP minor does not load in another. For a `-v3` runtime use `ext-builder-v3`.
-- Install runtime libraries (not `-dev` packages) in the final stage as root, then switch back to
+- Install runtime libraries (not `-dev` packages) in the final stage as root, then return to
   `www-data`.
-- Package names are Wolfi's, not Debian's: `apk search` finds one by name, and
-  `apk info -W /usr/lib/libfoo.so.1` names the package that owns a file. On 8.1 and later PHP uses
+- Package names are Wolfi's, not Debian's: `apk search` finds a package by name,
+  `apk info -W /usr/lib/libfoo.so.1` the owner of a file. On 8.1 and later PHP uses
   OpenSSL 4, so the header package is `openssl-4.0-dev`. `openssl-dev` is the OpenSSL 3 package and conflicts with it.
 - For a `zend_extension` other than xdebug, opcache or snuffleupagus, put a
   `zend_extension=myext.so` file in `/usr/local/etc/php/conf.d/` instead of using `PHP_EXT_ENABLE`.
 
 ## Hardening
 
-Measured on the shipped ELF binaries, not assumed from compiler flags: PIE, full RELRO (`GNU_RELRO`
+Measured on the shipped ELF binaries: PIE, full RELRO (`GNU_RELRO`
 and `BIND_NOW`), non-executable stack, `-fstack-protector-strong`, `_FORTIFY_SOURCE=3`, and
 `-fcf-protection=full` on amd64. On arm64, PAC and BTI (`-mbranch-protection=standard`) are compiled
 in.
@@ -391,32 +377,29 @@ cosign verify \
 ```
 
 Use cosign 3. Signatures and attestations are created in the GHCR staging repository
-`ghcr.io/lotuswebagency/php/release` and copied to Docker Hub digest for digest
-before any tag moves, so they verify there. A release matching `develop`'s inputs copies
+`ghcr.io/lotuswebagency/php/release` and copied digest for digest to Docker Hub before any tag moves. A release matching `develop`'s inputs copies
 those tested images; their provenance names the `develop` commit. Verify commands: [README](https://github.com/LotusWebAgency/php#verifying-images).
 
 CI verifies the base image's Chainguard cosign signature before building on it, and every image
-carries `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest` labels.
+carries `org.opencontainers.image.base.name` and `.digest` labels.
 
 Pull requests and `develop` pushes build and test without publishing to Docker Hub. A Trivy gate
-fails the build on any fixable CRITICAL or HIGH finding. Two
-findings are accepted, both without an upstream fix: CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s
+fails the build on any fixable CRITICAL or HIGH finding. Two findings are accepted, both without an upstream fix: CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s
 semantic-release, HIGH) and CVE-2026-15534 (perl 5.44.0 in `ext-builder`, MEDIUM); see
 [Accepted findings](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md#accepted-findings).
 They are suppressed through the `.trivyignore` generated from `vex/php.openvex.json`, so a scan
 without that file shows them. Trivy reads the apk database, so it cannot see libraries built from source
-(static or under `/opt`): ImageMagick in
-every image, OpenSSL 1.1.1w, ICU,
+(static or under `/opt`): ImageMagick in every image, OpenSSL 1.1.1w, ICU,
 libxml2 and libxslt in the 7.0-8.0 builds (the last two are Debian trixie's 2.9.14 and 1.1.35 with
 Debian's security patches), curl in 7.0-7.2. Those are tracked by hand through `deps/versions.lock`, as are the
 `mariadb-dump`, `mariadb-admin` and `mariadb-check` binaries copied into the image. Reporting
 channel: [SECURITY.md](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md).
 
-Two further gates fail the build on any finding in CISA's Known Exploited Vulnerabilities catalog, fixed or not, and on any AGPL-licensed package.
+Two more gates fail the build on any finding in CISA's Known Exploited Vulnerabilities catalog, fixed or not, and on any AGPL-licensed package.
 
 ## Moving from a Debian or Alpine base
 
-Coming from a Debian or Alpine PHP image? Package, path and OpenSSL differences:
+Package, path and OpenSSL differences from a Debian or Alpine PHP image:
 [README](https://github.com/LotusWebAgency/php/blob/main/README.md#moving-from-a-debian-or-alpine-base).
 
 ## Related images
