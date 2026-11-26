@@ -136,13 +136,13 @@ fi
 # ------------------------------------------------------------- 4. shellcheck
 section "4/12 shellcheck on every shell file"
 command -v shellcheck >/dev/null || fail "shellcheck not found on this host"
+php_files=()
 if command -v shellcheck >/dev/null; then
   # rootfs's runtime scripts have no .sh extension (they ship as bare
   # executables in the image). A shell shebang sends one to shellcheck, a php
   # shebang to `php -l` (php-fcgi runs under `php -n` and is written in PHP 7.0
   # syntax; shellcheck cannot parse it), and anything else fails the gate.
   shell_files=()
-  php_files=()
   while IFS= read -r f; do shell_files+=("$f"); done < <(find . -name '*.sh' -not -path './.git/*' -not -path './.claude/*' | sort)
   while IFS= read -r f; do
     shebang="$(head -n1 "$f")"

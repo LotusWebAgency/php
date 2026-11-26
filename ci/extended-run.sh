@@ -10,6 +10,10 @@
 # the service images and the fixtures under ci/retry.sh before the `apps` step
 # runs anything.
 #
+# The subcommand `ext-builder` is followed by `jit-stress` (its own log directory and
+# results.tsv) in the same step: workflow_run takes extended.yml from the default
+# branch, so a jit-stress step added to the yml would not run until it is on main.
+#
 # Logs go to ${EXT_LOG_ROOT:-$RUNNER_TEMP/extended-logs}/<name>/ (what the
 # workflow uploads). Exits with extended.sh's own status.
 set -uo pipefail
@@ -66,4 +70,8 @@ rc="${PIPESTATUS[0]}"
   echo '```'
   echo "</details>"
 } >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+if [ "$sub" = ext-builder ] && [ -z "${EXT_RUN_CHAINED:-}" ]; then
+  EXT_RUN_CHAINED=1 ci/extended-run.sh jit-stress jit-stress || rc=1
+fi
 exit "$rc"

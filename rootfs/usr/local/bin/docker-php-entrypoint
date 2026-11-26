@@ -34,6 +34,7 @@ for _v in PHP_MEMORY_LIMIT PHP_MAX_EXECUTION_TIME PHP_MAX_INPUT_TIME PHP_MAX_INP
           PHP_FPM_PM PHP_FPM_MAX_CHILDREN PHP_FPM_START_SERVERS PHP_FPM_MIN_SPARE \
           PHP_FPM_MAX_SPARE PHP_FPM_MAX_REQUESTS PHP_FPM_LISTEN PHP_FPM_STATUS_PATH \
           PHP_FPM_ACCESS_LOG PHP_FPM_SLOWLOG_TIMEOUT PHP_FPM_REQUEST_TERMINATE_TIMEOUT \
+          PHP_FPM_EMERGENCY_RESTART_THRESHOLD PHP_FPM_EMERGENCY_RESTART_INTERVAL \
           PHP_FPM_WORKER_MEMORY \
           PHP_EXT_ENABLE PHP_SNUFFLEUPAGUS PHP_CHMOD_SHIM; do
   if [ -z "${!_v+set}" ]; then
@@ -352,6 +353,23 @@ to_int() {
   fi
 }
 
+# Emergency restart (fpm images only, marked by the baked pool defaults): php-fpm
+# reloads when this many workers die on SIGSEGV or SIGBUS within the interval, and
+# both must be non-zero for it to act. php-fpm.conf reads the values from the
+# environment; only the format is checked here, ahead of the `php-fpm -tt` checks
+# below, so a typo stops the container naming the variable instead of surfacing as
+# a failure of an unrelated check.
+if [ -n "${PHP_FPM_MAX_CHILDREN_EFFECTIVE+set}" ]; then
+  if [ -n "${PHP_FPM_EMERGENCY_RESTART_THRESHOLD+set}" ]; then
+    to_int PHP_FPM_EMERGENCY_RESTART_THRESHOLD "$PHP_FPM_EMERGENCY_RESTART_THRESHOLD" >/dev/null
+  fi
+  if [ -n "${PHP_FPM_EMERGENCY_RESTART_INTERVAL+set}" ] \
+     && [[ ! "$PHP_FPM_EMERGENCY_RESTART_INTERVAL" =~ ^[0-9]+[smhd]?$ ]]; then
+    echo "docker-php-entrypoint: invalid PHP_FPM_EMERGENCY_RESTART_INTERVAL=${PHP_FPM_EMERGENCY_RESTART_INTERVAL} (expected seconds, or a number with an s, m, h or d suffix, e.g. 1m; 0 disables)" >&2
+    exit 1
+  fi
+fi
+
 # ---------------------------------------------------------------- memory
 detect_memory_limit() {
   local limit=""
@@ -379,7 +397,10 @@ clamp() { local v=$1 lo=$2 hi=$3; [ "$v" -lt "$lo" ] && v=$lo; [ "$v" -gt "$hi" 
 if [ -n "${PHP_OPCACHE_MEMORY:-}" ]; then
   OPCACHE_MB="$(to_mb PHP_OPCACHE_MEMORY "$PHP_OPCACHE_MEMORY")"
 else
-  OPCACHE_MB="$(clamp $(( MEM_MB / 8 )) 128 512)"
+  # The 256MB floor leaves the JIT headroom: a full cache is one of the paths on
+  # which arm64 workers have crashed in generated code, and small containers
+  # would otherwise fill 128MB with an ordinary framework application.
+  OPCACHE_MB="$(clamp $(( MEM_MB / 8 )) 256 512)"
 fi
 # The interned strings buffer is carved out of the opcache segment, so it scales
 # with it: an eighth, 8-32 MB.
@@ -1224,6 +1245,14 @@ if [ -n "${PHP_FPM_MAX_CHILDREN_EFFECTIVE+set}" ]; then
     worker_mb=64
   fi
 
+  # The reserve takes the whole opcache segment, although its pages are charged to
+  # the cgroup only as they are touched. A long-running container converges on
+  # the segment being full (opcache returns memory only on a reset or restart),
+  # and a full cache is the case the 256MB floor exists to survive: counting
+  # only what is resident today would have the workers and a full cache
+  # together exceed the limit. max_children is a ceiling, so over-reserving costs
+  # concurrency on containers under 2GB, never memory; PHP_FPM_MAX_CHILDREN
+  # overrides it.
   reserve=$(( OPCACHE_MB + 64 ))
   # 0.8 headroom: the raw budget (limit - reserve) commits every remaining MB to
   # workers, leaving nothing for the FPM master, this script, or a worker that

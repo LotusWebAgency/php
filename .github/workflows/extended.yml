@@ -2,7 +2,8 @@
 # images develop CI already tested and pushed to GHCR
 # (ghcr.io/lotuswebagency/php/dev, see ci.yml and README.md): the -v3
 # instruction-set check, the PGO corpus-tier replay, the
-# Laravel/WordPress/PrestaShop suites and, on request, the benchmark. It also
+# Laravel/WordPress/PrestaShop suites, the JIT stress test (opcache restarts and a full
+# opcache under load) and, on request, the benchmark. It also
 # repeats the ext-builder end to end against the pushed images. It is the only
 # coverage these suites get on arm64 (arm64 under QEMU crashes in
 # opcache, so they cannot be run on an amd64 workstation).
@@ -58,7 +59,8 @@
 #                 build one.
 #   versions      one job per PHP version and arch: pulls that version's images
 #                 (no corpus), then uarch (a SKIP on versions without a -v3
-#                 target), ext-builder and the app suites. Not one job per
+#                 target), ext-builder, the JIT stress test (fpm image; 8.0 and
+#                 8.1 report only, older versions have no JIT) and the app suites. Not one job per
 #                 target: the org has ~5 concurrent runners.
 #   corpus-tiers  per arch, the fpm images of every version plus the corpus tiers.
 #   summary       every job's result and every results.tsv in one table; fails
@@ -301,6 +303,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: ci/extended-run.sh uarch uarch
 
+      # Also runs the JIT stress test (ci/extended-run.sh chains it, so that a develop
+      # run exercises it with this file from main).
       - name: ext-builder
         if: ${{ !cancelled() }}
         run: ci/extended-run.sh ext-builder ext-builder

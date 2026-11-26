@@ -112,7 +112,12 @@ These caveats apply to the end-of-life tags. PHP 8.2 and later have none of them
 - **JIT.** PHP 8.1+ has it on both architectures, 8.0 on amd64 only. On 8.0 and 8.1 it is off by
   default: their tracing JIT crashes workers under real applications and gets no upstream fixes;
   `PHP_OPCACHE_JIT=tracing` turns it on. Below 8.0 there is no JIT, so
-  `PHP_OPCACHE_JIT` and `PHP_OPCACHE_JIT_BUFFER` have no effect.
+  `PHP_OPCACHE_JIT` and `PHP_OPCACHE_JIT_BUFFER` have no effect. The JIT's risky paths are
+  `opcache_reset()` under load (PrestaShop's cache clear calls it) and a full opcache, where
+  workers have crashed in generated code on arm64. Size `PHP_OPCACHE_MEMORY` with headroom, watch
+  `opcache_get_status()` (`cache_full`, `oom_restarts`) and run `opcache_reset()` off peak. If a
+  worker does crash, php-fpm reloads itself after repeated crashes (`PHP_FPM_EMERGENCY_RESTART_*`
+  below), so a bad moment costs a reload instead of a pool of dying workers.
 - **Locale.** Under a non-UTF-8 `LC_CTYPE`, PHP 7.x's `basename()` and `pathinfo()` drop multibyte
   characters, and `ZipArchive::extractTo()` mangles such names. The images set `LANG=C.UTF-8`; do
   not override `LANG` or `LC_ALL` with `C` or `POSIX` on 7.x.
@@ -279,7 +284,7 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_DISPLAY_ERRORS` | `Off` | `display_errors`. Errors go to stderr regardless. |
 | `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec` (the variable's baked value). cli, ext-builder: the variable is unset; the same list is baked into `10-php.ini`. cli-builder: none | Names to disable in addition to the baked list and any `disable_functions` in a mounted ini. Never replaces either. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
-| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 128-512 MB | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. |
+| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 256-512 MB | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. At 512 MB of container memory or less, set it explicitly: the 256 MB floor is a large share of the container, and a full cache plus JIT can push it toward an OOM kill. |
 | `PHP_OPCACHE_INTERNED_STRINGS` | one eighth of the opcache memory, clamped to 8-32 MB (at most half the opcache memory, also when set; on PHP 7.0-7.2 at most a fifth of it and 16 MB, which is what those versions can start with) | `opcache.interned_strings_buffer`, carved out of the opcache segment. A bare number, in MB. |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS` | `1` | `opcache.validate_timestamps`. Set `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_REVALIDATE_FREQ` | `2` | `opcache.revalidate_freq` |
@@ -306,6 +311,7 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_FPM_ACCESS_LOG` | `/proc/self/fd/2` | `access.log` |
 | `PHP_FPM_SLOWLOG_TIMEOUT` | `10s` | `request_slowlog_timeout` |
 | `PHP_FPM_REQUEST_TERMINATE_TIMEOUT` | `600s` | `request_terminate_timeout`, a wall-clock cap per request. `max_execution_time` does not count time blocked on I/O, so only this stops a hung worker. |
+| `PHP_FPM_EMERGENCY_RESTART_THRESHOLD`, `PHP_FPM_EMERGENCY_RESTART_INTERVAL` | `10`, `1m` | `emergency_restart_threshold`, `emergency_restart_interval` in `php-fpm.conf`: when that many workers die on SIGSEGV or SIGBUS within the interval, the master reloads and starts a fresh pool. The interval takes `s`, `m`, `h` or `d` (a bare number is seconds); `0` for either disables the restart. |
 
 The ping endpoint is fixed at `/fpm-ping` (response `pong`) and is what the healthcheck uses.
 
@@ -847,7 +853,7 @@ compares it with its full flavor (`--full-is-builder` when that is cli-builder, 
 [tests/apps/](tests/apps/README.md). Python unit tests live in `scripts/`, `ci/` and `tests/apps/`.
 
 `tests/extended.sh` runs the suites the main gate does not (`-v3` check, corpus-tier replay,
-application suites, and on request the benchmark) against images a `develop` run pushed to GHCR,
+JIT stress, application suites, and on request the benchmark) against images a `develop` run pushed to GHCR,
 instead of rebuilding all 78 targets. Log in to `ghcr.io` with a token that has `read:packages`, then:
 
 ```sh
@@ -858,7 +864,10 @@ tests/extended.sh pull --only 8.4,8.5 --flavor fpm,cli
 `pull` retags into the local namespace, refuses images whose inputs hash differs from your working
 tree and prints the `git worktree add` command that fixes it (`--best-effort` turns refusals into
 notes and exits 0; `build-all.sh` uses it). Only your daemon's architecture can be tested locally.
-`tests/extended.sh --help` lists the subcommands. The same suites run on native amd64 and arm64
+`tests/extended.sh --help` lists the subcommands. `tests/test-jit-stress.sh FPM_IMAGE` is the JIT
+stress test alone: concurrent load on JIT-heavy scripts with `opcache_reset()` in a loop and in an
+opcache too small for the scripts, failing on any abnormal worker exit or wrong answer (on 8.0 and
+8.1, where the JIT is off by default, `--informational` forces it on and only reports). The same suites run on native amd64 and arm64
 runners through `gh workflow run extended.yml --ref develop` (inputs `sha`, `only`, `flavor`, `apps`,
 `bench`).
 

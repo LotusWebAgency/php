@@ -11,7 +11,8 @@ shimname="fpm-health-shim-$$"
 portname="fpm-health-port-$$"
 sockname="fpm-health-sock-$$"
 v6name="fpm-health-v6-$$"
-trap 'docker rm -f "$name" "$downname" "$shimname" "$portname" "$sockname" "$v6name" >/dev/null 2>&1 || true' EXIT
+emname="fpm-health-emrestart-$$"
+trap 'docker rm -f "$name" "$downname" "$shimname" "$portname" "$sockname" "$v6name" "$emname" >/dev/null 2>&1 || true' EXIT
 
 wait_healthy() {
   local cname="$1" st=none
@@ -386,5 +387,39 @@ set -e
 grep -q 'timed out' <<<"$err" || fail "php-fcgi -t 1 timeout message is '$err'"
 [ $((SECONDS - start)) -lt 4 ] || fail "php-fcgi -t 1 took $((SECONDS - start)) s to give up"
 echo "ok: php-fcgi -t exits 1 on a timeout"
+
+# Emergency restart: workers dying on SIGSEGV (a crashing JIT or extension) past the
+# threshold within the interval make the master reload instead of respawning into the
+# same failure. Threshold 3 keeps the test short; the master keeps its PID across a
+# reload, the workers do not, and the pool has to serve again afterwards.
+drun -d --name "$emname" -m 512m -e PHP_FPM_EMERGENCY_RESTART_THRESHOLD=3 -e PHP_FPM_EMERGENCY_RESTART_INTERVAL=30s "$IMAGE" >/dev/null
+wait_healthy "$emname"
+docker exec -i "$emname" sh -c 'cat > /tmp/em-ok.php' <<'PHP'
+<?php
+echo 'serving ', getmypid();
+PHP
+em_get() {
+  docker exec -e SCRIPT_FILENAME=/tmp/em-ok.php -e SCRIPT_NAME=/em-ok.php -e REQUEST_METHOD=GET "$emname" \
+    php-fcgi -f -t 10 127.0.0.1:9000 | tr -d '\r'
+}
+em_get | grep -q '^serving [0-9]' || fail "emergency restart: the pool did not serve before the test"
+master_pid="$(docker exec "$emname" pgrep -f 'php-fpm: master process' | head -n1)"
+workers_before="$(docker exec "$emname" pgrep -f 'php-fpm: pool www' | sort | tr '\n' ' ')"
+[ -n "$master_pid" ] && [ -n "$workers_before" ] || fail "emergency restart: no master/worker processes found"
+reloaded=0
+for _ in 1 2 3 4 5 6; do
+  docker exec "$emname" sh -c 'for p in $(pgrep -f "php-fpm: pool www"); do kill -SEGV "$p"; done' || true
+  sleep 1
+  if docker logs "$emname" 2>&1 | grep -q 'failed processes threshold (3 in 30 sec) is reached, initiating reload'; then reloaded=1; break; fi
+done
+[ "$reloaded" = 1 ] || { docker logs "$emname" >&2; fail "emergency restart: SIGSEGV on the workers did not trigger the master's reload"; }
+wait_healthy "$emname"
+for _ in $(seq 1 20); do em_get | grep -q '^serving [0-9]' && break; sleep 1; done
+em_get | grep -q '^serving [0-9]' || { docker logs "$emname" >&2; fail "emergency restart: the pool did not serve after the reload"; }
+[ "$(docker exec "$emname" pgrep -f 'php-fpm: master process' | head -n1)" = "$master_pid" ] \
+  || fail "emergency restart: the master PID changed (the container would have restarted, not php-fpm reloaded)"
+[ "$(docker exec "$emname" pgrep -f 'php-fpm: pool www' | sort | tr '\n' ' ')" != "$workers_before" ] \
+  || fail "emergency restart: the workers are the ones that were killed"
+echo "ok: SIGSEGV workers past PHP_FPM_EMERGENCY_RESTART_THRESHOLD make the master reload and the pool serves again"
 
 echo "FPM HEALTH TESTS PASSED"
