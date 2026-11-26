@@ -10,9 +10,12 @@
 # Two more jobs keep caches from piling up. `prune-actions-caches` runs the shared
 # cache-cleanup workflow (caches of closed pull requests and deleted branches,
 # idle ones, and all but the newest php-src and Trivy DB cache per ref).
-# `prune-registry-cache` clears the legacy build-cache package `php/cache`, which
-# no job writes or reads any more: untagged versions older than two days, and
-# tagged ones whose ISO-week suffix is neither this week nor last. Nothing else.
+# `prune-registry-cache` clears the build-cache package `php/cache`, which holds
+# the toolchain, ImageMagick and deps layers (docker-bake.hcl's deps-cache target
+# writes `<php>-<uarch>-<arch>-<YYYY>-W<WW>`, one ref per toolchain epoch):
+# untagged versions older than two days, and tagged ones whose ISO-week suffix is
+# neither this week nor last. The epoch turns over on Monday evening, so the week
+# in use is always one of those two. Nothing else.
 #
 # A scheduled run deletes; a manual run is a dry run unless dry_run is switched
 # off. (GitHub runs cron and lists dispatchable workflows only from the default
@@ -91,7 +94,7 @@ jobs:
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
       PACKAGE: php/cache
     steps:
-      - name: Prune the legacy build cache
+      - name: Prune the build cache
         run: |
           set -euo pipefail
           url="/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/${PACKAGE//\//%2F}/versions"

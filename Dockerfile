@@ -49,11 +49,17 @@ ARG NM_COMPILER=llvm-nm
 # upgrade: the digest-pinned base can hold a library older than the -dev package the
 # deps stages install next (sqlite-libs 3.54.0 beside sqlite-dev 3.54.1, whose
 # libsqlite3.so names a file only 3.54.1 ships), and lld, unlike GNU ld, fails the
-# link on that dangling symlink. WOLFI_INDEX_STATE re-runs this layer whenever the
-# index stamp changes instead of replaying a cached upgrade.
-ARG WOLFI_INDEX_STATE=""
+# link on that dangling symlink. TOOLCHAIN_EPOCH (ci/toolchain-epoch.sh: the ISO
+# week, shifted so it turns over once a week) re-runs this layer weekly instead of
+# on every Wolfi index change, so the registry cache keeps hitting for the compile
+# toolchain, ImageMagick and the deps stages; the build toolchain may lag Wolfi by
+# up to that week. Every later stage that runs `apk add` runs `apk upgrade` first,
+# so a cache miss in mid-week cannot pair a week-old library with a newer -dev
+# package. The runtime stages below keep WOLFI_INDEX_STATE: what ships stays
+# current.
+ARG TOOLCHAIN_EPOCH=""
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}" \
+    echo "toolchain epoch: ${TOOLCHAIN_EPOCH:-unset}" \
     && echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
     && apk upgrade --cache-dir /var/cache/apk -U \
     && apk add --cache-dir /var/cache/apk \
@@ -115,7 +121,8 @@ FROM toolchain-select-${COMPILER} AS toolchain
 # UARCH: ImageMagick is always baseline.
 FROM toolchain AS imagemagick
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    apk add --cache-dir /var/cache/apk -U \
+    apk upgrade --cache-dir /var/cache/apk -U \
+    && apk add --cache-dir /var/cache/apk \
       libpng-dev libjpeg-turbo-dev libwebp-dev tiff-dev freetype-dev \
       openjpeg-dev cmake samurai meson nasm
 COPY deps/build-imagemagick.sh deps/build-heif.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
@@ -133,7 +140,8 @@ ENV PKG_CONFIG_PATH=/opt/imagemagick/lib/pkgconfig
 FROM imagemagick AS deps-modern
 # GD also needs libavif-dev; the other image libraries come from the imagemagick stage.
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    apk add --cache-dir /var/cache/apk -U \
+    apk upgrade --cache-dir /var/cache/apk -U \
+    && apk add --cache-dir /var/cache/apk \
       openssl-4.0-dev curl-dev libxml2-dev libxslt-dev icu-dev \
       oniguruma-dev libzip-dev sqlite-dev postgresql-18-dev zlib-dev zstd-dev \
       brotli-dev libavif-dev \
@@ -185,7 +193,8 @@ ARG PHP_VERSION
 # libavif-dev: GD has no AVIF before 8.1.
 # Otherwise the package set mirrors deps-modern and must be kept in sync by hand.
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    apk add --cache-dir /var/cache/apk -U \
+    apk upgrade --cache-dir /var/cache/apk -U \
+    && apk add --cache-dir /var/cache/apk \
       openssl-4.0-dev curl-dev pkgconf-dev \
       oniguruma-dev libzip-dev sqlite-dev postgresql-18-dev zlib-dev zstd-dev \
       brotli-dev \
@@ -288,8 +297,13 @@ RUN for pc in libargon2 libmemcached; do \
 # rather than in `toolchain` because only this stage compiles with a profile
 # flag; upstream it would put ImageMagick and the legacy vendored libraries in
 # the invalidation path of every PGO change.
+# The upgrade comes first for the reason given at toolchain-base; the compiler
+# revisions are recorded again because ccache's compiler check (CCACHE_COMPILERCHECK)
+# reads them and the upgrade may have moved a compiler.
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    apk add --cache-dir /var/cache/apk -U compiler-rt-19 \
+    apk upgrade --cache-dir /var/cache/apk -U \
+    && apk add --cache-dir /var/cache/apk compiler-rt-19 \
+    && apk list -I gcc binutils clang-19 lld-19 llvm-19 | sort > /etc/compiler-revisions \
     && { command -v llvm-profdata >/dev/null || { echo "llvm-profdata is missing; two-pass PGO cannot merge a profile" >&2; exit 1; }; } \
     && { [ -n "$(find /usr/lib/llvm-* -name 'libclang_rt.profile*' -print -quit)" ] \
          || { echo "no libclang_rt.profile under /usr/lib/llvm-*; -fprofile-generate cannot link" >&2; exit 1; }; }

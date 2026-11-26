@@ -8,8 +8,9 @@
 variable "PUSH" { default = false }
 
 # Empty by default so a local build touches no registry and the default `docker`
-# driver, which cannot export cache, still works. CI leaves it empty: no layer that
-# matters survives a WOLFI_INDEX_STATE change, so a registry cache never hits.
+# driver, which cannot export cache, still works. CI sets it to the cache
+# repository: every php target reads the layers of the compile toolchain,
+# ImageMagick and the deps stages from it, and the deps-cache target writes them.
 variable "CACHE_REGISTRY" { default = "" }
 
 # What the image was built from, not when: scripts/inputs-hash.sh's output
@@ -25,10 +26,10 @@ variable "INPUTS_HASH" { default = "" }
 variable "REVISION" { default = "" }
 variable "CREATED" { default = "" }
 
-# Registry cache for manual builds only: CI sets none of CACHE_REGISTRY,
-# CACHE_PUSH or CACHE_WEEK, because toolchain-base keys on WOLFI_INDEX_STATE and
-# no compile stage ever hit the cache. A mode=max export replaces the whole ref,
-# so ARCH and CACHE_WEEK keep two concurrent writers apart.
+# Registry cache scope: ARCH and CACHE_WEEK complete the ref (php version, uarch,
+# arch, week) so concurrent writers never share one. CACHE_WEEK is the
+# TOOLCHAIN_EPOCH week label without its optional ".N" suffix, which keeps the
+# ref in the form .github/workflows/dev-prune.yml prunes by.
 variable "ARCH" { default = "" }
 
 # false makes CACHE_REGISTRY read-only (cache-from stays, cache-to is dropped).
@@ -37,6 +38,10 @@ variable "CACHE_WEEK" { default = "" }
 # Busts only the runtime apk layers when Wolfi's package index changes (see the
 # Dockerfile's runtime-base stage); ci/wolfi-index-state.sh computes it.
 variable "WOLFI_INDEX_STATE" { default = "" }
+# Keys the compile toolchain (the Dockerfile's toolchain-base stage) and so
+# everything built on it; ci/toolchain-epoch.sh prints it. Changes weekly, not with
+# the Wolfi index, so the registry cache keeps hitting.
+variable "TOOLCHAIN_EPOCH" { default = "" }
 
 target "_common" {
   dockerfile = "Dockerfile"
@@ -44,6 +49,7 @@ target "_common" {
   args = {
     BASE_IMAGE        = BASE_IMAGE
     WOLFI_INDEX_STATE = WOLFI_INDEX_STATE
+    TOOLCHAIN_EPOCH   = TOOLCHAIN_EPOCH
   }
   labels = {
     "org.opencontainers.image.source"        = "https://github.com/LotusWebAgency/php"
@@ -124,18 +130,45 @@ target "php" {
   }
   tags       = item.tags
   platforms  = item.platforms
-  # Keyed on php+uarch+flavor+arch+week; ARCH and CACHE_WEEK are pure cache
-  # disambiguators (see above).
-  # item.cache_flavor is the flavor whose scope a target shares: ext-builder is
-  # built with cli (RIDES_WITH in scripts/gen_matrix.py), so it reads cli's scope
-  # and exports none of its own.
-  cache-from = CACHE_REGISTRY != "" ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${item.cache_flavor}-${ARCH}-${CACHE_WEEK}"] : []
-  cache-to   = CACHE_REGISTRY != "" && CACHE_PUSH && item.cache_flavor == item.flavor ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${item.flavor}-${ARCH}-${CACHE_WEEK},mode=max"] : []
+  # Read-only: only deps-cache below exports. The ref is keyed on php+uarch+arch+week
+  # because the layers it holds (toolchain, ImageMagick, deps) do not depend on the flavor.
+  cache-from = CACHE_REGISTRY != "" ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${ARCH}-${CACHE_WEEK}"] : []
   output     = [PUSH ? "type=registry" : "type=docker"]
 }
 
 group "default" {
   targets = ["php"]
+}
+
+# Exports the registry cache: the `deps` stage (toolchain, ImageMagick, deps) of
+# each fpm target, built to nothing but the cache. One target per php+uarch, since
+# every flavor of a version shares those layers. mode=max with image-manifest and
+# OCI media types stores the cache as an image manifest that registries accept.
+# Exports only when CACHE_REGISTRY is set and CACHE_PUSH is true; otherwise it
+# builds the stage and writes no cache. No attestations: the output is no image.
+target "deps-cache" {
+  inherits = ["_common"]
+  name     = "deps-cache-${item.name}"
+  matrix   = { item = [for t in TARGETS : t if t.flavor == "fpm"] }
+  target   = "deps"
+  args = {
+    PHP_VERSION     = item.php
+    PHP_ERA         = item.era
+    COMPILER        = item.compiler
+    CXX_COMPILER    = item.compiler == "gcc" ? "g++" : "clang++"
+    AR_COMPILER     = item.compiler == "gcc" ? "ar" : "llvm-ar"
+    RANLIB_COMPILER = item.compiler == "gcc" ? "ranlib" : "llvm-ranlib"
+    NM_COMPILER     = item.compiler == "gcc" ? "nm" : "llvm-nm"
+  }
+  attest     = []
+  platforms  = item.platforms
+  cache-from = CACHE_REGISTRY != "" ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${ARCH}-${CACHE_WEEK}"] : []
+  cache-to   = CACHE_REGISTRY != "" && CACHE_PUSH ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${ARCH}-${CACHE_WEEK},mode=max,image-manifest=true,oci-mediatypes=true"] : []
+  output     = ["type=cacheonly"]
+}
+
+group "deps-cache" {
+  targets = [for t in TARGETS : "deps-cache-${t.name}" if t.flavor == "fpm"]
 }
 
 # The PR subset: both ends of the range, where breakage concentrates, one
