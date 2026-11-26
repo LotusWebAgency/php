@@ -403,12 +403,24 @@ em_get() {
     php-fcgi -f -t 10 127.0.0.1:9000 | tr -d '\r'
 }
 em_get | grep -q '^serving [0-9]' || fail "emergency restart: the pool did not serve before the test"
-master_pid="$(docker exec "$emname" pgrep -f 'php-fpm: master process' | head -n1)"
-workers_before="$(docker exec "$emname" pgrep -f 'php-fpm: pool www' | sort | tr '\n' ' ')"
+# em_pids <title prefix>: the PIDs (sorted, space-separated) whose command line starts
+# with the prefix. fpm-slim has no pgrep (procps), so this reads /proc with sh and tr,
+# which every flavor keeps. Docker prints a failed exec's error on stdout, so a result
+# that is not a PID list fails here instead of passing for one.
+em_pids() {
+  local out
+  out="$(docker exec "$emname" sh -c 'for d in /proc/[0-9]*; do c="$(tr "\000" " " <"$d/cmdline" 2>/dev/null)" || continue; case "$c" in "$1"*) echo "${d#/proc/}" ;; esac; done' sh "$1" | sort -n | tr '\n' ' ')" \
+    || fail "emergency restart: listing the '$1' processes failed: $out"
+  [[ "$out" =~ ^([0-9]+\ )*$ ]] || fail "emergency restart: listing the '$1' processes gave '$out'"
+  printf '%s' "$out"
+}
+master_pid="$(em_pids 'php-fpm: master process')"
+workers_before="$(em_pids 'php-fpm: pool www')"
 [ -n "$master_pid" ] && [ -n "$workers_before" ] || fail "emergency restart: no master/worker processes found"
 reloaded=0
 for _ in 1 2 3 4 5 6; do
-  docker exec "$emname" sh -c 'for p in $(pgrep -f "php-fpm: pool www"); do kill -SEGV "$p"; done' || true
+  # shellcheck disable=SC2046 # one argument per PID
+  docker exec "$emname" sh -c 'kill -SEGV "$@"' sh $(em_pids 'php-fpm: pool www') || true
   sleep 1
   if docker logs "$emname" 2>&1 | grep -q 'failed processes threshold (3 in 30 sec) is reached, initiating reload'; then reloaded=1; break; fi
 done
@@ -416,9 +428,9 @@ done
 wait_healthy "$emname"
 for _ in $(seq 1 20); do em_get | grep -q '^serving [0-9]' && break; sleep 1; done
 em_get | grep -q '^serving [0-9]' || { docker logs "$emname" >&2; fail "emergency restart: the pool did not serve after the reload"; }
-[ "$(docker exec "$emname" pgrep -f 'php-fpm: master process' | head -n1)" = "$master_pid" ] \
+[ "$(em_pids 'php-fpm: master process')" = "$master_pid" ] \
   || fail "emergency restart: the master PID changed (the container would have restarted, not php-fpm reloaded)"
-[ "$(docker exec "$emname" pgrep -f 'php-fpm: pool www' | sort | tr '\n' ' ')" != "$workers_before" ] \
+[ "$(em_pids 'php-fpm: pool www')" != "$workers_before" ] \
   || fail "emergency restart: the workers are the ones that were killed"
 echo "ok: SIGSEGV workers past PHP_FPM_EMERGENCY_RESTART_THRESHOLD make the master reload and the pool serves again"
 
