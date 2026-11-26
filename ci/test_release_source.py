@@ -216,6 +216,9 @@ class TestRebuild(unittest.TestCase):
         old = ext_run(id=5, display_title=f"extended {'e' * 40} ci 500.1")
         self.rebuild("is titled", api=FakeApi(ext=old, statuses=[status(target_url=f"https://github.com/{SLUG}/actions/runs/5")]))
 
+    def test_a_run_of_an_extended_yml_without_the_run_name_never_qualifies(self):
+        self.rebuild("is titled", api=FakeApi(ext=ext_run(display_title="promote develop to main")))
+
     def test_a_status_pointing_outside_this_repository(self):
         self.rebuild("not a run of", api=FakeApi(statuses=[status(target_url=f"https://github.com/evil/php/actions/runs/{EXT_RUN}")]))
         self.rebuild("not a run of", api=FakeApi(statuses=[status(target_url="https://example.com/x")]))

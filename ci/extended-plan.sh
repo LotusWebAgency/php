@@ -18,6 +18,10 @@
 # test other images than the ones main copies. A dispatch or an extended-run
 # push has no candidate: its legs pull by tag, and plan logs that this run
 # cannot qualify a copy (ci/release_source.py needs the workflow_run title).
+# A workflow_run whose extended.yml predates the candidate (main's, until the
+# next promotion) leaves EXT_CANDIDATE unset: plan warns and the legs pull by
+# tag too, and that run, titled the old way, cannot qualify a copy either. An
+# EXT_CANDIDATE that is set but names no file is still fatal.
 #
 # For a push to extended-run (EXT_EVENT=push) with no dev:<tag>-<sha12> images
 # of the pushed commit, plan falls back to the floating dev:<tag> images when
@@ -172,11 +176,18 @@ fi
 
 if [ "${EXT_EVENT:-}" = workflow_run ]; then
   [ "$floating" -eq 0 ] || die "a workflow_run run tests its ci run's images, not the floating ones"
-  [ -n "${EXT_CANDIDATE:-}" ] && [ -f "$EXT_CANDIDATE" ] || die "no release candidate of ci run ${EXT_CI_RUN:-?} (the release-candidate artifact is missing or expired): without it the images cannot be pinned by digest"
-  [ -n "${EXT_CI_RUN:-}" ] || die "EXT_CI_RUN is not set"
-  python3 ci/candidate.py check --candidate "$EXT_CANDIDATE" --sha "$sha" --inputs-hash "$(bash scripts/inputs-hash.sh)" --run-id "$EXT_CI_RUN" \
-    || die "the release candidate of ci run $EXT_CI_RUN is not for ${sha:0:12} and this tree"
-  echo "plan: by digest, from the release candidate of ci run $EXT_CI_RUN: every leg pulls dev@<index digest>, not the mutable tag"
+  if [ -z "${EXT_CANDIDATE+x}" ]; then
+    # The extended.yml on main (it runs every workflow_run until the next promotion) does not
+    # pass a candidate, give the run a name or freeze one for the legs.
+    echo "::warning::EXT_CANDIDATE is not set (the extended.yml of the default branch predates the release candidate): the legs pull dev:<tag>-<sha12> by tag, and this run is not titled for ci/release_source.py, so it never qualifies a copy"
+    echo "plan: by tag, no release candidate (an older extended.yml): the legs pull dev:<tag>-<sha12>, which a develop rebuild may re-point"
+  else
+    [ -n "$EXT_CANDIDATE" ] && [ -f "$EXT_CANDIDATE" ] || die "no release candidate of ci run ${EXT_CI_RUN:-?} (the release-candidate artifact is missing or expired): without it the images cannot be pinned by digest"
+    [ -n "${EXT_CI_RUN:-}" ] || die "EXT_CI_RUN is not set"
+    python3 ci/candidate.py check --candidate "$EXT_CANDIDATE" --sha "$sha" --inputs-hash "$(bash scripts/inputs-hash.sh)" --run-id "$EXT_CI_RUN" \
+      || die "the release candidate of ci run $EXT_CI_RUN is not for ${sha:0:12} and this tree"
+    echo "plan: by digest, from the release candidate of ci run $EXT_CI_RUN: every leg pulls dev@<index digest>, not the mutable tag"
+  fi
 else
   echo "plan: by tag, no release candidate (a ${EXT_EVENT:-?} run): the legs pull dev:<tag>-<sha12>, which a develop rebuild may re-point. What this run tests is not what main copies, and it never qualifies a copy"
 fi

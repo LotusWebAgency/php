@@ -98,6 +98,21 @@ class TestPlan(unittest.TestCase):
         self.assertIn("cannot read", r.stderr)
         self.assertEqual(o, {})
 
+    def test_a_workflow_run_of_an_older_extended_yml_falls_back_to_tags_with_a_warning(self):
+        r, o = self.plan(own=True, EXT_EVENT="workflow_run", EXT_RUN_SHA=self.head, EXT_CI_RUN="")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("::warning::EXT_CANDIDATE is not set", r.stdout)
+        self.assertIn("by tag", r.stdout)
+        self.assertEqual((o["own"], o["checkout"]), ("true", self.head))
+
+    def test_a_workflow_run_whose_candidate_file_is_missing_is_fatal(self):
+        for name, cand in (("missing file", os.path.join(self.tmp, "nope.json")), ("empty", "")):
+            with self.subTest(name):
+                r, o = self.plan(own=True, EXT_EVENT="workflow_run", EXT_RUN_SHA=self.head, EXT_CI_RUN="1", EXT_CANDIDATE=cand)
+                self.assertEqual(r.returncode, 1)
+                self.assertIn("no release candidate", r.stderr)
+                self.assertEqual(o, {})
+
     def test_floating_images_of_another_tree_are_refused(self):
         r, o = self.plan(floating=True, FAKE_HASH="0" * 64)
         self.assertEqual(r.returncode, 1)
