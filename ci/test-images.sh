@@ -49,11 +49,20 @@
 # its in-memory cache (the verdict is the same; layers are only rescanned per image).
 set -euo pipefail
 
+CALLER="$PWD"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 cd "$ROOT"
 # shellcheck source=tests/matrix-lib.sh
 . "$ROOT/tests/matrix-lib.sh"
+
+# absolute <path>: the path as seen from the directory the script was started in.
+absolute() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s\n' "$CALLER/$1" ;;
+  esac
+}
 
 usage() {
   echo "usage: ci/test-images.sh --entry FILE|- --out DIR [--mode load|digest] [--digests FILE] [--arch amd64|arm64]" >&2
@@ -77,6 +86,9 @@ case "$MODE" in
   digest) [ -n "$DIGESTS" ] || { echo "FAIL: --mode digest needs --digests" >&2; exit 2; } ;;
   *) usage ;;
 esac
+[ "$ENTRY" = - ] || ENTRY="$(absolute "$ENTRY")"
+[ -z "$DIGESTS" ] || DIGESTS="$(absolute "$DIGESTS")"
+OUT="$(absolute "$OUT")"
 JOBS="${TEST_IMAGES_JOBS:-1}"
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL: TEST_IMAGES_JOBS must be a positive integer, got '$JOBS'" >&2; exit 2; }
 
@@ -91,8 +103,8 @@ SUFFIX=""
 
 SEVERITY="${TRIVY_SEVERITY:-CRITICAL,HIGH}"
 MIN_PACKAGES="${TRIVY_MIN_PACKAGES:-20}"
-TRIVY_CACHE_DIR="${TRIVY_CACHE_DIR:-$ROOT/.cache/trivy}"
-KEV_CATALOG="${KEV_CATALOG:-$ROOT/.cache/kev/known_exploited_vulnerabilities.json}"
+TRIVY_CACHE_DIR="$(absolute "${TRIVY_CACHE_DIR:-$ROOT/.cache/trivy}")"
+KEV_CATALOG="$(absolute "${KEV_CATALOG:-$ROOT/.cache/kev/known_exploited_vulnerabilities.json}")"
 export SMOKE_ALLOW_STALE="${SMOKE_ALLOW_STALE:-}" SMOKE_SKIP_PGO="${SMOKE_SKIP_PGO:-}"
 [ -n "$SMOKE_ALLOW_STALE" ] || unset SMOKE_ALLOW_STALE
 [ -n "$SMOKE_SKIP_PGO" ] || unset SMOKE_SKIP_PGO
@@ -157,19 +169,32 @@ done
 if [ "$MODE" = digest ]; then
   for flavor in fpm cli ext-builder; do
     name="${BY_FLAVOR[$flavor]:-}"
-    [ -z "$name" ] || [ -z "${REF[$name]}" ] || docker tag "${REF[$name]}" "${LOCAL[$name]}"
+    [ -n "$name" ] && [ -n "${REF[$name]}" ] || continue
+    if ! docker tag "${REF[$name]}" "${LOCAL[$name]}"; then
+      setup_fail "$name" "docker tag ${REF[$name]} ${LOCAL[$name]} failed"
+      REF[$name]=""
+    fi
   done
 fi
 
-if [ -n "${CORPUS_REF:-}" ]; then
-  docker tag "$CORPUS_REF" "$(local_tag "$CORPUS")"
+if [ -n "${CORPUS_REF:-}" ] && ! docker tag "$CORPUS_REF" "$(local_tag "$CORPUS")"; then
+  for name in "${NAMES[@]}"; do
+    setup_fail "$name" "docker tag $CORPUS_REF $(local_tag "$CORPUS") failed: the PGO corpus is not in the local daemon"
+    REF[$name]=""
+  done
 fi
 
 if [ "$MODE" = digest ]; then
   : "${INPUTS_HASH:=$("$ROOT/scripts/inputs-hash.sh")}"
   : "${DOCKERHUB_IMAGE:=docker.io/$(jq -r .image "$ROOT/matrix.json")}"
   GIT_SHA="${GITHUB_SHA:-$(git -C "$ROOT" rev-parse HEAD)}"
-  GIT_REF="${GITHUB_REF:-refs/heads/$(git -C "$ROOT" branch --show-current)}"
+  if [ -n "${GITHUB_REF:-}" ]; then
+    GIT_REF="$GITHUB_REF"
+  elif branch="$(git -C "$ROOT" symbolic-ref --quiet --short HEAD)"; then
+    GIT_REF="refs/heads/$branch"
+  else
+    GIT_REF="HEAD"
+  fi
   RUN_URL="${GITHUB_SERVER_URL:-local}/${GITHUB_REPOSITORY:-local}/actions/runs/${GITHUB_RUN_ID:-0}"
   trivy --version --format json --cache-dir "$TRIVY_CACHE_DIR" >"$OUT/trivy-info.json" 2>/dev/null \
     || echo '{}' >"$OUT/trivy-info.json"
