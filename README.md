@@ -284,12 +284,12 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_DISPLAY_ERRORS` | `Off` | `display_errors`. Errors go to stderr regardless. |
 | `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec` (the variable's baked value). cli, ext-builder: the variable is unset; the same list is baked into `10-php.ini`. cli-builder: none | Names to disable in addition to the baked list and any `disable_functions` in a mounted ini. Never replaces either. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
-| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 256-512 MB | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. At 512 MB of container memory or less, set it explicitly: the 256 MB floor is a large share of the container, and a full cache plus JIT can push it toward an OOM kill. |
+| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 256-512 MB and to at most half of the limit (at least 16 MB) | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. Below 512 MB of container memory the 256 MB floor gives way to half the limit, and the `PHP_OPCACHE_JIT_BUFFER` default shrinks to a quarter of the segment (8-64 MB). A small container is still a large share for a full cache plus JIT: set it explicitly. |
 | `PHP_OPCACHE_INTERNED_STRINGS` | one eighth of the opcache memory, clamped to 8-32 MB (at most half the opcache memory, also when set; on PHP 7.0-7.2 at most a fifth of it and 16 MB, which is what those versions can start with) | `opcache.interned_strings_buffer`, carved out of the opcache segment. A bare number, in MB. |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS` | `1` | `opcache.validate_timestamps`. Set `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_REVALIDATE_FREQ` | `2` | `opcache.revalidate_freq` |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
-| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing` (8.0, 8.1: `disable`), `64M` | `opcache.jit`, `opcache.jit_buffer_size`. PHP 8.1+, and 8.0 on amd64. 8.0 on arm64 has no JIT: its opcache builds one for x86 only. |
+| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing` (8.0, 8.1: `disable`), `64M` (a quarter of the opcache memory below 512 MB of container memory, at least 8M) | `opcache.jit`, `opcache.jit_buffer_size`. PHP 8.1+, and 8.0 on amd64. 8.0 on arm64 has no JIT: its opcache builds one for x86 only. |
 | `PHP_OPCACHE_HUGE_CODE_PAGES` | off | `1`, `true`, `yes` or `on` sets `opcache.huge_code_pages=1`. `0`, `false`, `no`, `off` leave it off. Anything else is refused. See the huge pages paragraph below. |
 | `PHP_ZEND_ALLOC_HUGE_PAGES` | off | Same spellings. On exports `USE_ZEND_ALLOC_HUGE_PAGES=1`, which php-fpm passes to its workers. |
 | `PHP_EXT_ENABLE` | unset | Comma-separated shared extensions to load. See [Extensions](#extensions). |

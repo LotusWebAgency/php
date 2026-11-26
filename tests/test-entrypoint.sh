@@ -301,7 +301,8 @@ echo "ok: PHP_CHMOD_SHIM rejects ambiguous values instead of silently treating t
 
 # --- opcache segment sizing and huge pages -----------------------------------
 # The interned strings buffer is carved out of the opcache segment, so the segment
-# floor is 256MB (headroom for the JIT: a full cache is a risky path) and the buffer
+# floor is 256MB (headroom for the JIT: a full cache is a risky path) unless the
+# container is under 512MB, where the segment is half of the limit, and the buffer
 # scales with it. PHP 7.0-7.2 cannot allocate more than
 # 16MB of it, and fails to start opcache with more than a fifth of a small segment.
 # ini_get() alone proves nothing here: opcache is not initialized in the CLI unless
@@ -314,11 +315,22 @@ opcache_sizes() {
   drun --rm "$@" "$IMAGE" php -d opcache.enable_cli=1 -r 'echo ini_get("opcache.memory_consumption"), " ", ini_get("opcache.interned_strings_buffer"), " ", (opcache_get_status(false)["opcache_enabled"] ?? false) === true ? "started" : "stopped";' 2>/dev/null || true
 }
 
+got=$(opcache_sizes -m 512m)
+[ "$got" = "256 $interned_cap started" ] || fail "512m: opcache memory/interned/state is '$got', expected '256 $interned_cap started' (the floor is 256MB, interned an eighth of it up to the cap)"
 got=$(opcache_sizes -m 256m)
-[ "$got" = "256 $interned_cap started" ] || fail "256m: opcache memory/interned/state is '$got', expected '256 $interned_cap started' (the floor is 256MB, interned an eighth of it up to the cap)"
+[ "$got" = "128 16 started" ] || fail "256m: opcache memory/interned/state is '$got', expected '128 16 started' (the floor gives way to half of the limit)"
+if [ "${PHP_MM%%.*}" -ge 8 ]; then
+  jit_size() { drun --rm "$@" "$IMAGE" php -r 'echo ini_get("opcache.jit_buffer_size");' 2>/dev/null || true; }
+  got=$(jit_size -m 256m)
+  [ "$got" = "32M" ] || fail "256m: opcache.jit_buffer_size is '$got', expected 32M (a quarter of the 128MB segment)"
+  got=$(jit_size -m 512m)
+  [ "$got" = "64M" ] || fail "512m: opcache.jit_buffer_size is '$got', expected 64M"
+  got=$(jit_size -m 256m -e PHP_OPCACHE_JIT_BUFFER=16M)
+  [ "$got" = "16M" ] || fail "256m with PHP_OPCACHE_JIT_BUFFER=16M: opcache.jit_buffer_size is '$got', expected 16M (an explicit size is used exactly)"
+fi
 got=$(opcache_sizes -m 4g)
 [ "$got" = "512 $interned_cap started" ] || fail "4g: opcache memory/interned/state is '$got', expected '512 $interned_cap started'"
-echo "ok: opcache segment is at least 256MB, the interned strings buffer scales with it, and opcache starts ($got at 4g)"
+echo "ok: opcache segment is 256-512MB but at most half of the limit, the JIT buffer and interned strings buffer scale with it, and opcache starts ($got at 4g)"
 
 got=$(opcache_sizes -m 4g -e PHP_OPCACHE_MEMORY=64M)
 [ "$got" = "64 8 started" ] || fail "PHP_OPCACHE_MEMORY=64M: opcache memory/interned/state is '$got', expected '64 8 started' (an explicit size is used exactly)"

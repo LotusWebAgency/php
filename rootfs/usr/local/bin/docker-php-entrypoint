@@ -394,13 +394,23 @@ MEM_MB=$(( MEM_BYTES / 1024 / 1024 ))
 clamp() { local v=$1 lo=$2 hi=$3; [ "$v" -lt "$lo" ] && v=$lo; [ "$v" -gt "$hi" ] && v=$hi; echo "$v"; }
 
 # ---------------------------------------------------------------- opcache
+JIT_BUFFER_DEFAULT=64M
 if [ -n "${PHP_OPCACHE_MEMORY:-}" ]; then
   OPCACHE_MB="$(to_mb PHP_OPCACHE_MEMORY "$PHP_OPCACHE_MEMORY")"
 else
   # The 256MB floor leaves the JIT headroom: a full cache is one of the paths on
   # which arm64 workers have crashed in generated code, and small containers
-  # would otherwise fill 128MB with an ordinary framework application.
+  # would otherwise fill 128MB with an ordinary framework application. It holds
+  # only while the container can afford it: the segment never takes more than half
+  # of the memory limit (at least 16MB), and the JIT buffer then shrinks to a
+  # quarter of the segment (8-64MB), so a 256MB container is not sized into an OOM.
   OPCACHE_MB="$(clamp $(( MEM_MB / 8 )) 256 512)"
+  OPCACHE_HALF_MB=$(( MEM_MB / 2 ))
+  [ "$OPCACHE_HALF_MB" -ge 16 ] || OPCACHE_HALF_MB=16
+  if [ "$OPCACHE_MB" -gt "$OPCACHE_HALF_MB" ]; then
+    OPCACHE_MB=$OPCACHE_HALF_MB
+    JIT_BUFFER_DEFAULT="$(clamp $(( OPCACHE_MB / 4 )) 8 64)M"
+  fi
 fi
 # The interned strings buffer is carved out of the opcache segment, so it scales
 # with it: an eighth, 8-32 MB.
@@ -462,7 +472,7 @@ if [ "$CONF_WRITABLE" = 1 ]; then
       jit_default=tracing
       case "$PHP_MAJOR_MINOR" in 8.0|8.1) jit_default=disable ;; esac
       echo "opcache.jit=${PHP_OPCACHE_JIT:-$jit_default}"
-      echo "opcache.jit_buffer_size=${PHP_OPCACHE_JIT_BUFFER:-64M}"
+      echo "opcache.jit_buffer_size=${PHP_OPCACHE_JIT_BUFFER:-$JIT_BUFFER_DEFAULT}"
     fi
   } > "${CONF_DIR}/90-opcache-env.ini"
 fi
