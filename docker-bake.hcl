@@ -144,6 +144,8 @@ group "default" {
 # each fpm target, built to nothing but the cache. One target per php+uarch, since
 # every flavor of a version shares those layers. mode=max with image-manifest and
 # OCI media types stores the cache as an image manifest that registries accept.
+# The export is best-effort (ignore-error=true): a registry error while writing the
+# cache must not fail a build whose images are fine.
 # Exports only when CACHE_REGISTRY is set and CACHE_PUSH is true; otherwise it
 # builds the stage and writes no cache. No attestations: the output is no image.
 target "deps-cache" {
@@ -163,7 +165,7 @@ target "deps-cache" {
   attest     = []
   platforms  = item.platforms
   cache-from = CACHE_REGISTRY != "" ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${ARCH}-${CACHE_WEEK}"] : []
-  cache-to   = CACHE_REGISTRY != "" && CACHE_PUSH ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${ARCH}-${CACHE_WEEK},mode=max,image-manifest=true,oci-mediatypes=true"] : []
+  cache-to   = CACHE_REGISTRY != "" && CACHE_PUSH ? ["type=registry,ref=${CACHE_REGISTRY}/cache:${item.php}-${item.uarch}-${ARCH}-${CACHE_WEEK},mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true"] : []
   output     = ["type=cacheonly"]
 }
 
