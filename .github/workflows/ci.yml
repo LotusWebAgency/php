@@ -17,8 +17,8 @@
 #     leg succeeded, moves the floating dev:<tag>. These are unpublished test
 #     builds, pruned by dev-prune.yml. Nothing reaches Docker Hub: no job here
 #     logs in to it, holds the `release` environment or sets a push output on a
-#     bake build. The PGO corpus is built and published to GHCR; the build cache
-#     is read from GHCR but only `build` writes it.
+#     bake build. The PGO corpus is built and published to GHCR. No job uses a
+#     registry build cache (see the CACHE_REGISTRY note in `verify`).
 #   push or dispatch on main, and the weekly cron (default branch only)  `build`
 #     pushes every image by digest, with SBOM + max-mode provenance, to the GHCR
 #     staging repository ghcr.io/lotuswebagency/php/release and tests that digest.
@@ -98,10 +98,7 @@ on:
     branches: [main, develop]
   workflow_dispatch:
   schedule:
-    # Weekly rebuild: fresh base layers and Wolfi package updates. The bake
-    # cache ref includes an ISO-week component (docker-bake.hcl's CACHE_WEEK)
-    # so this run always starts the runtime-package layer's cache scope
-    # empty instead of replaying last week's apk add forever.
+    # Weekly rebuild: fresh base layers and Wolfi package updates.
     - cron: "10 19 * * 1"
 
 concurrency:
@@ -223,7 +220,8 @@ jobs:
       # every verify and build leg on both architectures through needs.preflight,
       # so the image that was verified is built from the same index as the one
       # that is published. The runtime apk-upgrade layer rebuilds whenever this
-      # value moved (cheap; the php-build stages stay cached).
+      # value moved. That is not cheap: toolchain-base takes it too, so every
+      # compile stage rebuilds with it.
       - name: Pin the Wolfi index state for every build leg
         id: wolfi
         run: |
@@ -413,7 +411,7 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: read
-      # GHCR: pull of the PGO corpus image and the build cache, and, on a develop
+      # GHCR: pull of the PGO corpus image and, on a develop
       # push only, the dev image push. A pull request never reaches the push
       # step (and a fork's token is read-only whatever is asked for here).
       packages: write
@@ -432,10 +430,10 @@ jobs:
       RIDER_FLAVOR: ${{ matrix.target.rider_flavor }}
       PLATFORM: ${{ matrix.arch.platform }}
       ARCH: ${{ matrix.arch.name }}
-      # Develop reads main's build cache and never writes it (CACHE_PUSH=false
-      # drops cache-to in docker-bake.hcl); a pull request uses no cache.
-      CACHE_REGISTRY: ${{ github.event_name != 'pull_request' && 'ghcr.io/lotuswebagency/php' || '' }}
-      CACHE_PUSH: "false"
+      # CACHE_REGISTRY stays unset, which drops cache-from and cache-to in
+      # docker-bake.hcl. A registry cache could not help: every compile stage
+      # descends from toolchain-base, which takes WOLFI_INDEX_STATE, so no
+      # heavy layer survives an index change and the cache only cost the export.
       # Only the org.opencontainers.image.revision label (and the dev tag's sha).
       REVISION: ${{ github.sha }}
       DEV_REPO: ghcr.io/lotuswebagency/php/dev
@@ -518,7 +516,6 @@ jobs:
         run: |
           {
             echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)"
-            echo "CACHE_WEEK=$(date -u +%G-W%V)"
           } >> "$GITHUB_ENV"
 
       # A pull request that changes any build input (a Renovate base-digest bump,
@@ -1095,7 +1092,7 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: read
-      packages: write # GHCR: corpus pull, build-cache push, the staged image push
+      packages: write # GHCR: corpus pull, the staged image push
     env:
       # The same value in every leg of both jobs, computed once in preflight.
       WOLFI_INDEX_STATE: ${{ needs.preflight.outputs.wolfi-index-state }}
@@ -1111,7 +1108,6 @@ jobs:
       PLATFORM: ${{ matrix.arch.platform }}
       ARCH_NAME: ${{ matrix.arch.name }}
       REVISION: ${{ github.sha }}
-      CACHE_REGISTRY: ghcr.io/lotuswebagency/php
       # One severity list for the Trivy gate steps and the recorded predicate.
       TRIVY_SEVERITY: CRITICAL,HIGH
     steps:
@@ -1201,7 +1197,6 @@ jobs:
           {
             echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)"
             echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "CACHE_WEEK=$(date -u +%G-W%V)"
           } >> "$GITHUB_ENV"
 
       - name: Pull and verify this target's hash-pinned PGO corpus
