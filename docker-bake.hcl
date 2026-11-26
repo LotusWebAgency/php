@@ -8,7 +8,8 @@
 variable "PUSH" { default = false }
 
 # Empty by default so a local build touches no registry and the default `docker`
-# driver, which cannot export cache, still works. CI sets ghcr.io/lotuswebagency/php.
+# driver, which cannot export cache, still works. CI leaves it empty: no layer that
+# matters survives a WOLFI_INDEX_STATE change, so a registry cache never hits.
 variable "CACHE_REGISTRY" { default = "" }
 
 # What the image was built from, not when: scripts/inputs-hash.sh's output
@@ -24,17 +25,13 @@ variable "INPUTS_HASH" { default = "" }
 variable "REVISION" { default = "" }
 variable "CREATED" { default = "" }
 
-# Cache-ref disambiguators, also fed from the environment. A mode=max export
-# replaces the whole ref, so no ref may have two concurrent writers:
-#   - ARCH: the amd64 and arm64 runners build the same php/uarch pair.
-#   - CACHE_WEEK: an ISO week suffix rotates the ref weekly, so the first build
-#     of each week starts cache-empty and re-resolves apk packages; a stale ref
-#     would replay old Wolfi packages and fail Trivy on fixable HIGHs.
+# Registry cache for manual builds only: CI sets none of CACHE_REGISTRY,
+# CACHE_PUSH or CACHE_WEEK, because toolchain-base keys on WOLFI_INDEX_STATE and
+# no compile stage ever hit the cache. A mode=max export replaces the whole ref,
+# so ARCH and CACHE_WEEK keep two concurrent writers apart.
 variable "ARCH" { default = "" }
 
 # false makes CACHE_REGISTRY read-only (cache-from stays, cache-to is dropped).
-# CI's verify job (PR and develop builds) sets it, so only the publishing job on
-# main writes a cache ref.
 variable "CACHE_PUSH" { default = true }
 variable "CACHE_WEEK" { default = "" }
 # Busts only the runtime apk layers when Wolfi's package index changes (see the
@@ -128,7 +125,7 @@ target "php" {
   tags       = item.tags
   platforms  = item.platforms
   # Keyed on php+uarch+flavor+arch+week; ARCH and CACHE_WEEK are pure cache
-  # disambiguators (see above) and are empty in a local build.
+  # disambiguators (see above).
   # item.cache_flavor is the flavor whose scope a target shares: ext-builder is
   # built with cli (RIDES_WITH in scripts/gen_matrix.py), so it reads cli's scope
   # and exports none of its own.
