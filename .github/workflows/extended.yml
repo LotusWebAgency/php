@@ -44,7 +44,7 @@
 #
 # Job graph (every job below plan is skipped when plan is):
 #
-#   plan -> fixtures (per arch) -> versions (per version x arch) --+
+#   plan -> fixtures (per arch) -> versions (per shard x arch) ----+
 #      |                                                            +-> summary
 #      +-----> corpus-tiers (per arch) ----------------------------+
 #      +-----> bench (per arch, only when asked, report-only) ------+
@@ -57,14 +57,22 @@
 #                 tags <app>-<set>-<arch>) every app fixture that is missing or
 #                 stale, so the parallel version jobs only pull and never race to
 #                 build one.
-#   versions      one job per PHP version and arch: pulls that version's images
-#                 (no corpus), then uarch (a SKIP on versions without a -v3
-#                 target), ext-builder, the JIT stress test (fpm image; 8.0 and
-#                 8.1 report only, older versions have no JIT) and the app suites. Not one job per
-#                 target: the org has ~5 concurrent runners.
+#   versions      one job per shard and arch. A shard is a PHP version, or half of
+#                 a heavy one (`8.4~fpm`, `8.4~cli`; plan decides, longest first,
+#                 ci/extended_shards.py): pulls its images (no corpus), then
+#                 uarch (a SKIP on versions without a -v3 target), ext-builder,
+#                 the JIT stress test (fpm image; 8.0 and 8.1 report only, older
+#                 versions have no JIT) and the app suites. Those three tests
+#                 run in the `~fpm` shard (or the whole version) only; the other
+#                 shard's rows for them are SKIP. ci/extended-run.sh resolves a
+#                 shard id from EXT_ONLY, so this file never needs to know one.
+#                 Not one job per target: the org has 20 concurrent runners.
 #   corpus-tiers  per arch, the fpm images of every version plus the corpus tiers.
 #   summary       every job's result and every results.tsv in one table; fails
-#                 when a required job did.
+#                 when a required job did. For a full run on the commit's own
+#                 images (plan.outputs.own and .full) it then posts the
+#                 `release/extended` commit status on that commit and re-runs
+#                 the failed ci run of its open promote PR (ci/extended-status.sh).
 #
 # No job here holds Docker Hub credentials. The Docker Hub images it needs --
 # the stock dementev/php-fpm-with-ext builder of the fixture builds and of the
@@ -86,6 +94,9 @@
 # Upload steps run always (a timed-out job keeps its logs) and overwrite, so a
 # re-run of a failed job replaces its artifact instead of conflicting with it.
 name: extended
+# The commit under test in the run list: a workflow_run run is otherwise only
+# "extended" on a title of the ci run.
+run-name: extended ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
 
 on:
   workflow_dispatch:
@@ -156,6 +167,8 @@ jobs:
       fpm: ${{ steps.plan.outputs.fpm }}
       apps: ${{ steps.plan.outputs.apps }}
       bench: ${{ steps.plan.outputs.bench }}
+      own: ${{ steps.plan.outputs.own }}
+      full: ${{ steps.plan.outputs.full }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -476,6 +489,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      statuses: write # release/extended on the commit under test
+      actions: write # re-run the failed ci run of its promote PR
+      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -491,6 +507,19 @@ jobs:
           path: ${{ runner.temp }}/extended-artifacts
 
       - name: Verdict
+        id: verdict
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: ci/extended-summary.sh "$RUNNER_TEMP/extended-artifacts"
+
+      # After a failed verdict too: a red run is a status as well. The script
+      # decides whether this run speaks for a commit's release; a tree without
+      # it (an older commit tested from its own tree) has nothing to post.
+      - name: Release status
+        if: ${{ always() && steps.verdict.outcome != 'skipped' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          EXT_VERDICT: ${{ steps.verdict.outcome }}
+        run: |
+          if [ -x ci/extended-status.sh ]; then ci/extended-status.sh; else echo "note: no ci/extended-status.sh in this tree"; fi
