@@ -48,7 +48,7 @@ interpreter (8.1 and below) gets no upstream security fixes. Policy:
 - mysqli/PDO support `caching_sha2_password` from 7.4. 7.1-7.3 need `mysql_native_password`
   accounts on MySQL 8 and cannot reach MySQL 9. 7.0 also needs the server's default plugin set to
   `mysql_native_password`. 7.0 and 7.1 speak TLS 1.0 only, which MySQL 8.4 and MariaDB 11 refuse.
-- No JIT below 8.0 (8.0: amd64 only). `-v3` tags are 8.4 and 8.5 only.
+- No JIT below 8.0 (8.0: amd64 only).
 
 Every caveat and workaround: [Older PHP versions](https://github.com/LotusWebAgency/php/blob/main/README.md#older-php-versions).
 
@@ -145,11 +145,9 @@ every tag unless the row says otherwise.
 |---|---|
 | Entrypoint | `/usr/bin/tini -- docker-php-entrypoint`. tini is already PID 1: do not add `--init` / `init: true`, or tini warns that it is not PID 1. |
 | Default command | `fpm`, `fpm-slim`: `php-fpm -F`. `cli`, `cli-slim`: `php -a`. `cli-builder`, `ext-builder`: `bash`. |
-| User | `www-data`, UID and GID 33. `ext-builder` runs as root. |
 | Working directory | `/app`, owned by `www-data`. |
 | Port | `fpm`, `fpm-slim`: 9000/tcp, FastCGI only (no HTTP). Status `/fpm-status`, ping `/fpm-ping`. |
 | Healthcheck | `fpm` and `fpm-slim` only, baked: `php-fpm-healthcheck` (FastCGI, no web server needed; `PHP_FPM_PING_RESPONSE` is a literal substring). |
-| Stop signal | `fpm`, `fpm-slim`: `SIGQUIT` (graceful). |
 | Logs | stderr only; no log files. |
 | Writable paths at runtime | `/tmp` only, plus whatever the application itself writes. |
 | Configuration | `PHP_*` environment variables, applied at start. Drop-in ini files go in `/usr/local/etc/php/conf.d/` and must sort after `10-php.ini`. |
@@ -175,7 +173,7 @@ variable that is set but empty, or contains a newline, stops the container with 
 | `PHP_DISPLAY_ERRORS` | `Off` | `display_errors`. Errors go to stderr regardless. |
 | `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec`. cli, ext-builder: unset; the same list is baked into `10-php.ini`. cli-builder: none | Adds to the baked and mounted-ini lists, never replaces them. `proc_open` stays enabled for Composer. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
-| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, 128-512 MB | `opcache.memory_consumption` |
+| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, 256-512 MB | `opcache.memory_consumption`. At 512 MB or less set it explicitly: the floor is a big share, and a full cache plus JIT can end in an OOM kill. |
 | `PHP_OPCACHE_INTERNED_STRINGS` | opcache memory / 8, 8-32 MB (max half of it, even when set; 7.0-7.2: a fifth, max 16) | `opcache.interned_strings_buffer` |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS`, `PHP_OPCACHE_REVALIDATE_FREQ` | `1`, `2` | Set validation to `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
@@ -188,7 +186,7 @@ variable that is set but empty, or contains a newline, stops the container with 
 
 `fpm` only: `PHP_FPM_PM` (`dynamic`), `PHP_FPM_MAX_REQUESTS` (`1000`), `PHP_FPM_LISTEN`
 (`0.0.0.0:9000`), `PHP_FPM_STATUS_PATH` (`/fpm-status`), `PHP_FPM_ACCESS_LOG` (`/proc/self/fd/2`),
-`PHP_FPM_SLOWLOG_TIMEOUT` (`10s`), `PHP_FPM_REQUEST_TERMINATE_TIMEOUT` (`600s`). `PHP_FPM_MAX_CHILDREN`, `PHP_FPM_START_SERVERS`,
+`PHP_FPM_SLOWLOG_TIMEOUT` (`10s`), `PHP_FPM_REQUEST_TERMINATE_TIMEOUT` (`600s`), `PHP_FPM_EMERGENCY_RESTART_THRESHOLD` / `_INTERVAL` (`10`, `1m`). `PHP_FPM_MAX_CHILDREN`, `PHP_FPM_START_SERVERS`,
 `PHP_FPM_MIN_SPARE` and `PHP_FPM_MAX_SPARE` are autotuned from the container memory limit and
 `PHP_FPM_WORKER_MEMORY` (default `64` MB per worker). A value you set is used exactly and the
 others adjust to stay consistent. Without a memory limit the entrypoint assumes 512 MB and says so.
@@ -241,7 +239,7 @@ services:
     mem_limit: 1g                             # also sizes the FPM pool and opcache
     environment:
       PHP_SNUFFLEUPAGUS: laravel              # default | wordpress | prestashop | laravel | your own
-      PHP_OPCACHE_JIT: disable                # Snuffleupagus turns the JIT off; this drops the warning
+      PHP_OPCACHE_JIT: disable                # drops Snuffleupagus's JIT warning
       PHP_OPCACHE_VALIDATE_TIMESTAMPS: "0"    # the code never changes inside the container
     volumes:
       - storage:/app/storage                  # only the application's own writable paths

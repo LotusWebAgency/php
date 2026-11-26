@@ -4,10 +4,10 @@
 # rebuild of all 78 targets on this machine.
 #
 #   tests/extended.sh pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--no-corpus] [--best-effort]
-#   tests/extended.sh uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
+#   tests/extended.sh uarch | ext-builder | corpus-tiers | jit-stress | smoke [--only V,..] [--flavor F,..]
 #   tests/extended.sh apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
 #   tests/extended.sh bench [--prepare] [--only V,..] [--flavor F,..]   report only, never fails the run
-#   tests/extended.sh all [pull flags] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, apps
+#   tests/extended.sh all [pull flags] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, jit-stress, apps
 #                                                                  (not smoke, not bench: those are separate subcommands)
 #
 # Typical use:  tests/extended.sh pull && tests/extended.sh all
@@ -71,6 +71,14 @@
 #   tests/extended.sh pull --only 8.0,8.1 && tests/extended.sh all --skip-pull --only 8.0,8.1
 # extended.yml does the same, one job per version.
 #
+# jit-stress runs tests/test-jit-stress.sh against the baseline fpm image of every
+# version from 8.0 up (not the -v3 images, which carry the same JIT; older versions
+# have none, a SKIP): concurrent load on JIT-heavy scripts with opcache_reset() in a
+# loop, and again in an opcache small enough to fill. A few minutes per image. 8.2 and
+# later have the JIT on by default and fail on a crashed worker or a wrong answer; 8.0
+# and 8.1 ship it off, so they are run with it forced on and recorded as `report`,
+# never a failure.
+#
 # apps drops the ext-builder flavor: apps/run.sh has no suites for it and
 # run-matrix.sh does not plan it. What each image runs is tests/apps/sets (via
 # apps/appsets.py): the cells of its php version, flavor and variant, which may
@@ -106,10 +114,10 @@ usage() {
 usage: tests/extended.sh <subcommand> [options]
 
   pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--jobs N] [--no-corpus] [--best-effort]
-  uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
+  uarch | ext-builder | corpus-tiers | jit-stress | smoke [--only V,..] [--flavor F,..]
   apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
   bench [--prepare] [--only V,..] [--flavor F,..]   report only, never fails the run
-  all [pull options] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, apps
+  all [pull options] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, jit-stress, apps
 
   --sha REF          pull: the commit whose images to pull (default: git rev-parse HEAD)
   --latest           pull: the floating tags, i.e. the last fully green develop run
@@ -129,7 +137,7 @@ die() { echo "FAIL: $*" >&2; exit 1; }
 # ------------------------------------------------------------------- options
 CMD="${1:-}"
 case "$CMD" in
-  pull|uarch|ext-builder|corpus-tiers|smoke|apps|bench|all) shift ;;
+  pull|uarch|ext-builder|corpus-tiers|jit-stress|smoke|apps|bench|all) shift ;;
   -h|--help) usage; exit 0 ;;
   '') usage >&2; exit 2 ;;
   *) usage_die "unknown subcommand '$CMD'" ;;
@@ -612,6 +620,36 @@ cmd_ext_builder() {
   done
 }
 
+cmd_jit_stress() {
+  local row name flavor php tag major minor log t0 secs rc ran=0
+  for row in "${SELECTED[@]}"; do
+    IFS=$'\t' read -r name flavor php tag <<<"$row"
+    [ "$flavor" = fpm ] || continue
+    case "$name" in *-v3) continue ;; esac
+    ran=1
+    IFS=. read -r major minor <<<"$php"
+    if [ "$major" -lt 8 ]; then
+      record jit-stress "$name" SKIP 0 "PHP $php has no JIT"
+      echo "--- jit-stress: $name SKIP, PHP $php has no JIT"
+      continue
+    fi
+    gate jit-stress "$name" "$tag" || continue
+    if [ "$major" -eq 8 ] && [ "$minor" -le 1 ]; then
+      echo "--- jit-stress: $name (JIT is off by default here: forced on, report only)"
+      log="$LOG_DIR/jit-stress-$name.log"
+      rc=0
+      t0=$(date +%s)
+      ./tests/test-jit-stress.sh "$tag" --informational >"$log" 2>&1 || rc=$?
+      secs=$(( $(date +%s) - t0 ))
+      grep -E '^(INFORMATIONAL|ok:|note:)' "$log" | sed 's/^/    | /' || true
+      record jit-stress "$name" report "$secs" "exit $rc, JIT forced on (off by default on $php), not a verdict, $log"
+    else
+      run_step jit-stress "$name" "jit-stress-$name" ./tests/test-jit-stress.sh "$tag"
+    fi
+  done
+  [ "$ran" -eq 1 ] || { record jit-stress "-" SKIP 0 "no fpm target in this selection"; echo "--- jit-stress: SKIP, no fpm target in this selection"; }
+}
+
 cmd_corpus_tiers() {
   local floor _release _builder ctag versions v e touched=0 partial control
   local -a tier_versions in_sel sel_fpm control_img
@@ -838,6 +876,7 @@ case "$CMD" in
   uarch) cmd_uarch ;;
   ext-builder) cmd_ext_builder ;;
   corpus-tiers) cmd_corpus_tiers ;;
+  jit-stress) cmd_jit_stress ;;
   apps) cmd_apps ;;
   bench) cmd_bench ;;
   all)
@@ -849,6 +888,7 @@ case "$CMD" in
       cmd_uarch
       cmd_ext_builder
       cmd_corpus_tiers
+      cmd_jit_stress
       cmd_apps
     fi ;;
 esac

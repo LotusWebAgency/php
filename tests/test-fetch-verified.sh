@@ -40,7 +40,8 @@ done
 URL="http://127.0.0.1:${PORT}/thing.txt"
 
 run_fetch() {  # run_fetch <url> <sha> <dest>
-  FETCH_VERIFIED_CACHE_DIR="$CACHE" bash "$HELPER" "$1" "$2" "$3"
+  FETCH_VERIFIED_CACHE_DIR="$CACHE" FETCH_VERIFIED_RETRIES=2 FETCH_VERIFIED_RETRY_DELAY=1 \
+    bash "$HELPER" "$1" "$2" "$3"
 }
 
 # --- 1. cold fetch: nothing cached, server up -------------------------------

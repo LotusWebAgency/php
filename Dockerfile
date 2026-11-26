@@ -815,6 +815,8 @@ ENV PHP_FPM_PM=dynamic \
     PHP_FPM_ACCESS_LOG=/proc/self/fd/2 \
     PHP_FPM_SLOWLOG_TIMEOUT=10s \
     PHP_FPM_REQUEST_TERMINATE_TIMEOUT=600s \
+    PHP_FPM_EMERGENCY_RESTART_THRESHOLD=10 \
+    PHP_FPM_EMERGENCY_RESTART_INTERVAL=1m \
     PHP_DISABLE_FUNCTIONS="passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec"
 # One RUN for everything that edits or verifies the files above.
 RUN set -eux; \
@@ -844,6 +846,22 @@ RUN set -eux; \
     sed -i -E 's|^;?error_log[[:space:]]*=.*|error_log = /proc/self/fd/2|' /usr/local/etc/php-fpm.conf; \
     grep -qx 'error_log = /proc/self/fd/2' /usr/local/etc/php-fpm.conf \
       || { echo "FATAL: php-fpm.conf error_log substitution did not apply" >&2; exit 1; }; \
+# Emergency restart: php-fpm reloads itself when PHP_FPM_EMERGENCY_RESTART_THRESHOLD
+# workers die on SIGSEGV or SIGBUS within PHP_FPM_EMERGENCY_RESTART_INTERVAL, so a
+# crashing JIT or extension costs one reload instead of a pool of respawning
+# corpses. The stock file carries both directives commented out, once each; the
+# values are ${VAR}-driven like www.conf's, with the ENV above as the baked default.
+    for d in emergency_restart_threshold emergency_restart_interval; do \
+      n="$(grep -cE "^;${d}[[:space:]]*=" /usr/local/etc/php-fpm.conf || true)"; \
+      [ "$n" = "1" ] || { echo "FATAL: expected exactly one commented ${d} in php-fpm.conf, found $n" >&2; exit 1; }; \
+    done; \
+    sed -i -E \
+      -e 's|^;emergency_restart_threshold[[:space:]]*=.*|emergency_restart_threshold = ${PHP_FPM_EMERGENCY_RESTART_THRESHOLD}|' \
+      -e 's|^;emergency_restart_interval[[:space:]]*=.*|emergency_restart_interval = ${PHP_FPM_EMERGENCY_RESTART_INTERVAL}|' \
+      /usr/local/etc/php-fpm.conf; \
+    grep -qx 'emergency_restart_threshold = ${PHP_FPM_EMERGENCY_RESTART_THRESHOLD}' /usr/local/etc/php-fpm.conf \
+      && grep -qx 'emergency_restart_interval = ${PHP_FPM_EMERGENCY_RESTART_INTERVAL}' /usr/local/etc/php-fpm.conf \
+      || { echo "FATAL: php-fpm.conf emergency_restart substitution did not apply" >&2; exit 1; }; \
 # docker-php-entrypoint refuses a PHP_FPM_*_EFFECTIVE differing from what this
 # stage baked (they are computed outputs, and the only pool variables
 # `docker image inspect` shows, so operators find and set them by mistake). It
