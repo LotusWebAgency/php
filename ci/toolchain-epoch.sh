@@ -20,5 +20,5 @@ if [ -n "$override" ]; then
   fi
   echo "$override"
 else
-  date -u -d '19 hours 10 minutes ago' +%G-W%V
+  date -u -d "@$(( $(date -u +%s) - 69000 ))" +%G-W%V
 fi
