@@ -7,13 +7,13 @@
     python3 ci/candidate.py check --candidate FILE --sha SHA --inputs-hash HASH --run-id ID
     python3 ci/candidate.py pin --candidate FILE --target NAME --arch ARCH --sha SHA --inputs-hash HASH --run-id ID
 
-`entry` runs in each `images` job after ci/test-images.sh --mode digest: for every target
-in passed.txt it records the per-arch index digest the build pushed (the file the merge job
-reads), the digest of that architecture's platform manifest (from the signed test-result
-predicate), the build timestamp and the run that built it. `merge` runs once in the `candidate` job: it joins the
+`entry` runs in each `images` job after ci/test-images.sh --mode digest: for every target in
+passed.txt it records the per-arch index digest the build pushed (the file the merge job reads), the
+digest of that architecture's platform manifest (from the signed test-result predicate), the build
+timestamp and the run that built it. `merge` runs once in the `candidate` job: it joins the
 per-entry records and refuses anything but a complete set, every target of
-`scripts/gen_matrix.py --github targets` on every architecture exactly once, so a candidate
-on disk always means "this commit's whole matrix was built and passed".
+`scripts/gen_matrix.py --github targets` on every architecture exactly once, so a candidate on
+disk always means "this commit's whole matrix was built and passed".
 
 release-candidate.json:
     {"schema": 1, "sha", "tree", "inputs_hash", "ci_hash", "run_id", "run_attempt", "built_run", "repository",
