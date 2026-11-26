@@ -10,3 +10,4 @@ __pycache__/
 
 # Opt-in local benchmark log (tests/bench.sh --record).
 /tests/bench/results.tsv
+/tests/bench/runs/

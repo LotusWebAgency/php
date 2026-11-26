@@ -846,6 +846,11 @@ busybox links and the other executables equal their lists; `tests/test-slim-pari
 compares it with its full flavor (`--full-is-builder` when that is cli-builder, the host of `cli-slim`). Application suites (Laravel, WordPress, PrestaShop) are in
 [tests/apps/](tests/apps/README.md). Python unit tests live in `scripts/`, `ci/` and `tests/apps/`.
 
+Benchmarks: `tests/bench.sh <ours> auto <php-version>` compares a build with the official image on a
+CPU workload (`--quick` for a short run); `tests/bench-apps.sh` compares php configurations (JIT on and
+off, opcache sizes, any env-driven setting) on the Laravel, WordPress and PrestaShop stacks
+(`--quick` for a smoke run, `--help` for modes and options). Results land in `tests/bench/runs/`.
+
 `tests/extended.sh` runs the suites the main gate does not (`-v3` check, corpus-tier replay,
 application suites, and on request the benchmark) against images a `develop` run pushed to GHCR,
 instead of rebuilding all 78 targets. Log in to `ghcr.io` with a token that has `read:packages`, then:

@@ -253,3 +253,21 @@ Checks run through the application, not around it: pages, forms with their
 CSRF tokens, logins, carts and checkouts, REST APIs, uploads through the
 media pipeline, the app's own console commands. They're additive (unique
 names, never deleting seeded rows), because one stack serves both configs.
+
+## Benchmarks
+
+`tests/bench-apps.sh` reuses these stacks and fixtures to compare php configurations on real
+applications:
+
+```sh
+tests/bench-apps.sh --quick                  # one PHP version, 2 reps x 3 s: large effects only
+tests/bench-apps.sh                          # 3 apps x PHP 8.5 and 8.4, JIT off vs tracing
+tests/bench-apps.sh --app wordpress --php 8.5 \
+  --mode 'small:PHP_OPCACHE_MEMORY=128M' --mode 'large:PHP_OPCACHE_MEMORY=256M'
+```
+
+Prefix the command with `heavy` where that wrapper exists. A stack comes up once per app and PHP version; a mode switch recreates only the php container.
+`tests/bench/apps-override.yml` pins CPUs and adds the sysctls a static pool at several hundred
+req/s needs; the normal suites do not, so the shared compose file is untouched. The run directory
+(`tests/bench/runs/<id>/`, gitignored) holds `manifest.json`, `results.json`, `results.csv`, `summary.md`
+and the raw wrk output. Run it on an otherwise idle machine; `--help` lists the options.
