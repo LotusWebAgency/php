@@ -20,7 +20,8 @@
 # stress run that never reached the risky path proves nothing.
 #
 # Environment: JIT_STRESS_SECONDS (per scenario, default 75), JIT_STRESS_CLIENTS
-# (default 12), JIT_STRESS_KEEP=1 (keep the containers).
+# (default 12), JIT_STRESS_CPUS (docker --cpus, to mimic a slow runner), JIT_STRESS_KEEP=1
+# (keep the containers).
 set -euo pipefail
 IMAGE="${1:?usage: test-jit-stress.sh <image> [--informational]}"
 INFORMATIONAL=0
@@ -85,10 +86,11 @@ print("opcache: memory used=%s free=%s wasted%%=%.1f" % (s["memory"]["used_memor
   st="$(fcgi "$cname" status.php | tr -d '\r')"
   log="$(docker logs "$cname" 2>&1)"
 
-  local requests bad resets abnormal before=${#failures[@]}
+  local requests bad resets fulls abnormal before=${#failures[@]}
   requests="$(grep -oE 'requests=[0-9]+' <<<"$out" | tail -n1 | cut -d= -f2 || true)"
   bad="$(grep -oE 'bad=[0-9]+' <<<"$out" | tail -n1 | cut -d= -f2 || true)"
   resets="$(grep -oE 'resets=[0-9]+' <<<"$out" | tail -n1 | cut -d= -f2 || true)"
+  fulls="$(grep -oE 'fulls=[0-9]+' <<<"$out" | tail -n1 | cut -d= -f2 || true)"
   abnormal="$(grep -E 'exited on signal|exited with code [1-9]|SIGSEGV|SIGBUS|SIGABRT|failed processes threshold|segfault' <<<"$log" || true)"
   [ -n "$requests" ] && [ -n "$bad" ] || { note_fail "$label: the load driver reported nothing: $out"; return 0; }
 
@@ -109,7 +111,8 @@ print("    after: manual_restarts=%s oom_restarts=%s hash_restarts=%s cache_full
       python3 -c 'import json,sys; s=json.loads(sys.argv[1]); sys.exit(0 if s["stats"]["manual_restarts"] >= 5 else 1)' "$st" \
         || note_fail "$label: opcache recorded fewer than 5 manual restarts, the restart path was not exercised" ;;
     full)
-      python3 -c 'import json,sys; s=json.loads(sys.argv[1]); t=s["stats"]; sys.exit(0 if t["oom_restarts"] + t["hash_restarts"] >= 1 or s["full"] else 1)' "$st" \
+      # fulls: the driver saw the cache full (or just restarted for lack of memory) before a reset
+      [ "${fulls:-0}" -ge 1 ] || python3 -c 'import json,sys; s=json.loads(sys.argv[1]); t=s["stats"]; sys.exit(0 if t["oom_restarts"] + t["hash_restarts"] >= 1 or s["full"] else 1)' "$st" \
         || note_fail "$label: the opcache never filled up (no oom restart, not full), the full-cache path was not exercised" ;;
   esac
   python3 -c 'import json,sys; j=json.loads(sys.argv[1])["jit"]; sys.exit(0 if j["buffer_free"] < j["buffer_size"] else 1)' "$st" \
@@ -118,7 +121,8 @@ print("    after: manual_restarts=%s oom_restarts=%s hash_restarts=%s cache_full
 }
 
 jit_env=()
-[ "$INFORMATIONAL" = 0 ] || jit_env=(-e PHP_OPCACHE_JIT=tracing)
+[ -z "${JIT_STRESS_CPUS:-}" ] || jit_env+=(--cpus "$JIT_STRESS_CPUS")
+[ "$INFORMATIONAL" = 0 ] || jit_env+=(-e PHP_OPCACHE_JIT=tracing)
 
 scenario reset 60 8 resets 0.3 0 0 "${jit_env[@]}"
 scenario full 400 60 full 0 8 0 -e PHP_OPCACHE_MEMORY=16 "${jit_env[@]}"

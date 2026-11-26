@@ -5,7 +5,8 @@
 # With WHEN_FULL=1 the resetter holds each reset back until the opcache has run out of
 # memory since the previous one (an oom or hash restart, or cache_full), for at most
 # 20 s, so the resets land on a full cache however fast the pool fills it.
-# Prints one line, "requests=N bad=N resets=N", and a line per bad response on stderr.
+# Prints one line, "requests=N bad=N resets=N fulls=N" (fulls = resets that went out on
+# an observed full cache, WHEN_FULL=1 only), and a line per bad response on stderr.
 #
 #   driver.sh DIR SECONDS CLIENTS RESET CHURN FILES [WHEN_FULL]
 set -u
@@ -46,14 +47,17 @@ full_marks() {  # prints "<oom+hash restarts> <cache_full 0|1>"
 }
 
 resetter() {
-  local n=0 base cur full until
+  local n=0 fulls=0 base cur full until
   base="$(full_marks | cut -d' ' -f1)"
   while [ "$SECONDS" -lt "$end" ]; do
     if [ "$when_full" = 1 ]; then
       until=$((SECONDS + 20))
       while [ "$SECONDS" -lt "$end" ] && [ "$SECONDS" -lt "$until" ]; do
         read -r cur full <<<"$(full_marks)"
-        { [ "$cur" -gt "$base" ] || [ "$full" = 1 ]; } && break
+        if [ "$cur" -gt "$base" ] || [ "$full" = 1 ]; then
+          fulls=$((fulls + 1))
+          break
+        fi
         sleep 0.5
       done
     fi
@@ -61,7 +65,7 @@ resetter() {
     sleep "$reset"
     [ "$when_full" = 0 ] || base="$(full_marks | cut -d' ' -f1)"
   done
-  echo "$n" >"$res/resets"
+  echo "$n $fulls" >"$res/resets"
 }
 
 churner() {
@@ -76,11 +80,11 @@ for id in $(seq 1 "$clients"); do client "$id" & done
 [ "$churn" = 0 ] || churner &
 wait
 
-requests=0 bad=0 resets=0
+requests=0 bad=0 resets=0 fulls=0
 for f in "$res"/client-*; do
   read -r n b <"$f"
   requests=$((requests + n))
   bad=$((bad + b))
 done
-[ ! -f "$res/resets" ] || read -r resets <"$res/resets"
-echo "requests=$requests bad=$bad resets=$resets"
+[ ! -f "$res/resets" ] || read -r resets fulls <"$res/resets"
+echo "requests=$requests bad=$bad resets=$resets fulls=$fulls"
