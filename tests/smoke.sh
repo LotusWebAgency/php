@@ -1418,6 +1418,11 @@ echo "ok: openssl_pkey_new(2048) and openssl_csr_new() work with no explicit con
 # skips the whole block; the run says so, because an image that was never
 # checked against a real CA store must not read as one that was.
 TLS_URL="${BUILD_CHECK_TLS_URL:-https://www.php.net/}"
+# Attempts alternate between TLS_URL and this host, so one endpoint dropping
+# connections (php.net did, twice in a minute) does not fail an image. Only the
+# default URL gets a default fallback; an overridden one gets none unless asked.
+TLS_FALLBACK_URL="${BUILD_CHECK_TLS_FALLBACK_URL:-}"
+[ -n "${BUILD_CHECK_TLS_URL:-}" ] || TLS_FALLBACK_URL="${BUILD_CHECK_TLS_FALLBACK_URL:-https://github.com/}"
 
 # One PHP program for all four checks, so retry and classification cannot
 # drift between them. TLS_VIA picks the client (stream = file_get_contents
@@ -1434,17 +1439,21 @@ TLS_URL="${BUILD_CHECK_TLS_URL:-https://www.php.net/}"
 #   FAIL:<reason>     any other error
 #   TRANSIENT:<why>   DNS, connect, unreachable, timeout, reset or TLS-handshake errors that
 #                     persisted through every attempt
-# A transient error is retried with a short backoff, so one flaky resolver
-# lookup does not fail an image. The negative control passes only on VERIFY: a
+# A transient error is retried with a short backoff, alternating between the
+# endpoint and the fallback host, so one flaky resolver lookup or one endpoint
+# closing the connection does not fail an image. A certificate verification
+# error is never retried. The negative control passes only on VERIFY: a
 # DNS or connection failure there proves nothing about the CA store, so it is
 # retried and, if it persists, fails the check.
 TLS_PHP='
-$url = getenv("TLS_URL"); $via = getenv("TLS_VIA"); $neg = getenv("TLS_EXPECT") === "verify-fail";
+$urls = array_values(array_filter([getenv("TLS_URL"), getenv("TLS_FALLBACK_URL")]));
+$via = getenv("TLS_VIA"); $neg = getenv("TLS_EXPECT") === "verify-fail";
 $verify_re = "/certificate verify failed|failed loading cafile/i";
-$transient_re = "/getaddrinfo|timed out|refused|reset|unreachable|no route to host/i";
+$transient_re = "/getaddrinfo|timed out|refused|reset|unreachable|no route to host|HTTP request failed|connection closed|unexpected eof|name resolution/i";
 $reason = "no attempt made";
 for ($attempt = 1; $attempt <= 4; $attempt++) {
     if ($attempt > 1) { sleep(2 * ($attempt - 1)); }
+    $url = $urls[($attempt - 1) % count($urls)];
     if ($via === "curl") {
         $ch = curl_init($url);
         $opts = [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30];
@@ -1452,8 +1461,8 @@ for ($attempt = 1; $attempt <= 4; $attempt++) {
         curl_setopt_array($ch, $opts);
         $b = curl_exec($ch);
         $no = curl_errno($ch);
-        $reason = "curl_errno $no: " . curl_error($ch);
-        if ($b !== false) { echo "OK:" . strlen($b); exit; }
+        $reason = "$url: curl_errno $no: " . curl_error($ch);
+        if ($b !== false) { echo "OK:" . strlen($b) . " $url"; exit; }
         if ($no === 60 || $no === 77) { echo "VERIFY:$reason"; exit; }
         if (in_array($no, [6, 7, 28, 35, 52, 56], true)) { continue; }
         echo "FAIL:$reason"; exit;
@@ -1464,8 +1473,8 @@ for ($attempt = 1; $attempt <= 4; $attempt++) {
     // as with curl above: an upstream 5xx says nothing about the CA store.
     $b = file_get_contents($url, false, stream_context_create(["http" => ["ignore_errors" => true]]));
     restore_error_handler();
-    $reason = $msgs ? implode(" | ", $msgs) : "no error reported";
-    if ($b !== false) { echo "OK:" . strlen($b); exit; }
+    $reason = "$url: " . ($msgs ? implode(" | ", $msgs) : "no error reported");
+    if ($b !== false) { echo "OK:" . strlen($b) . " $url"; exit; }
     if (preg_match($verify_re, $reason)) { echo "VERIFY:$reason"; exit; }
     if (preg_match($transient_re, $reason)) { continue; }
     echo "FAIL:$reason"; exit;
@@ -1474,7 +1483,7 @@ echo "TRANSIENT:still failing after 4 attempts: $reason";
 '
 tls_probe() {  # tls_probe <stream|curl> <ok|verify-fail> [php args] -> the one-line verdict above
   local via="$1" expect="$2"; shift 2
-  docker run --rm -e TLS_URL="$TLS_URL" -e TLS_VIA="$via" -e TLS_EXPECT="$expect" "$IMAGE" php "$@" -r "$TLS_PHP"
+  docker run --rm -e TLS_URL="$TLS_URL" -e TLS_FALLBACK_URL="$TLS_FALLBACK_URL" -e TLS_VIA="$via" -e TLS_EXPECT="$expect" "$IMAGE" php "$@" -r "$TLS_PHP"
 }
 
 if [ "$TLS_URL" = off ]; then
