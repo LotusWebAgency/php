@@ -21,8 +21,9 @@ rebuild always build, and so does a dispatch with `rebuild`):
     run's matrix on both architectures and nothing else;
   - the oldest `created` in it at most five days old, so the base layers and Wolfi packages of a
     reused image are never much older than a rebuild would have taken.
-Anything else, including any failure to read GitHub, is `build`, with the reason in the output:
-the decision never fails the run.
+Anything else is `build`, with the reason in the output: the decision never fails the run. That
+includes a GitHub call that fails: a transient error (a 5xx, 429 or 408 answer, a dropped connection, a
+timeout) is first retried twice, 5 and 15 seconds later, and only a call that still fails is `build`.
 
 `entry` runs in each `images` job of a reuse run: the {"<target>": "<repo>@sha256:<index>"} map
 ci/test-images.sh --mode digest takes, for this entry's targets and architecture, from the
@@ -31,10 +32,10 @@ candidate `plan` verified, and the `created` and `built_run` the new candidate r
 import argparse
 import io
 import json
-import os
 import re
 import subprocess
 import sys
+import time
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -49,7 +50,6 @@ DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 RUN_ID = re.compile(r"^\d+$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-HERE = Path(__file__).resolve().parent
 
 
 class NoReuse(Exception):
@@ -172,21 +172,45 @@ def decide(api, *, event, ref, rebuild, inputs_hash, ci_hash, targets, dev_repo,
     }
 
 
-class GhApi:
-    """The three GitHub calls `decide` makes, through gh (GH_TOKEN) under ci/retry.sh."""
+TRANSIENT = re.compile(
+    r"\(http (408|429|5\d\d)\)|http/[0-9.]+ (408|429|5\d\d)|error connecting to|timed? ?out|connection (reset|refused)"
+    r"|temporary failure|no such host|tls handshake|unexpected eof|\beof\b|network is unreachable|server error|bad gateway"
+    r"|service unavailable|gateway time-?out",
+    re.IGNORECASE,
+)
 
-    def __init__(self, repo, run=subprocess.run):
+
+class GhApi:
+    """The GitHub calls `decide` makes, through `gh api` (GH_TOKEN).
+
+    A call that fails the way GitHub or the network fails now and then (see TRANSIENT, or a timeout of
+    `gh` itself) is made again after each of DELAYS seconds, so three attempts in all; any other
+    failure, a 404 or a refused token, is final at once. A call that still fails raises NoReuse, which
+    every decision turns into its fallback (build, rebuild, no copy).
+    """
+
+    DELAYS = (5, 15)
+
+    def __init__(self, repo, run=subprocess.run, sleep=time.sleep):
         self.repo = repo
-        self.run = run
+        self._runner = run  # not `run`: ReleaseApi has a method of that name
+        self._sleep = sleep
 
     def _get(self, path):
-        env = {**os.environ, "RETRY_KIND": "http", "RETRY_ATTEMPTS": "3", "RETRY_DELAYS": "5 15"}
-        try:
-            done = self.run([str(HERE / "retry.sh"), "gh", "api", path], capture_output=True, env=env, check=True, timeout=300)
-        except (subprocess.SubprocessError, OSError) as exc:
-            detail = getattr(exc, "stderr", b"") or b""
-            raise NoReuse(f"GitHub API {path} failed: {detail.decode(errors='replace').strip() or exc}") from None
-        return done.stdout
+        failure = ""
+        for attempt in range(len(self.DELAYS) + 1):
+            if attempt:
+                self._sleep(self.DELAYS[attempt - 1])
+            try:
+                return self._runner(["gh", "api", path], capture_output=True, check=True, timeout=300).stdout
+            except subprocess.TimeoutExpired as exc:
+                failure = str(exc)
+            except (subprocess.SubprocessError, OSError) as exc:
+                detail = getattr(exc, "stderr", b"") or b""
+                failure = detail.decode(errors="replace").strip() or str(exc)
+                if not isinstance(exc, subprocess.CalledProcessError) or not TRANSIENT.search(failure):
+                    break
+        raise NoReuse(f"GitHub API {path} failed: {failure}")
 
     def _json(self, path):
         try:

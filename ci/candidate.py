@@ -4,6 +4,8 @@
     python3 ci/candidate.py entry --entry ENTRY.json --out TEST_OUT_DIR --created TS --built-run ID --repository REPO > record.json
     python3 ci/candidate.py merge --targets TARGETS.json --records DIR --sha SHA --tree TREE \
         --inputs-hash HASH --ci-hash HASH --run-id ID --run-attempt N --out release-candidate.json
+    python3 ci/candidate.py check --candidate FILE --sha SHA --inputs-hash HASH --run-id ID
+    python3 ci/candidate.py pin --candidate FILE --target NAME --arch ARCH --sha SHA --inputs-hash HASH --run-id ID
 
 `entry` runs in each `images` job after ci/test-images.sh --mode digest: for every target
 in passed.txt it records the per-arch index digest the build pushed (the file the merge job
@@ -25,6 +27,12 @@ found the same inputs hash and the images were only re-tested (`built_run` != `r
 reuses images whose `ci_hash` equals its own, so it is still the build's): how the images are built
 (bake flags, SBOM, provenance) is not part of the inputs hash, and ci/release_source.py copies a
 candidate to the release repository only when it equals main's.
+
+`check` and `pin` are what extended.yml's jobs use to test exactly the images of a candidate and not
+whatever a mutable dev:<tag>-<sha12> names later (ci/dev-tag.sh re-points those tags on a rebuild).
+`check` refuses a candidate that is not for this commit, this inputs hash and this ci run. `pin`
+does the same and prints `<repository>@<index digest><TAB><platform digest>` of one target on one
+architecture: the ref to pull and the platform manifest that pull must resolve to.
 """
 import argparse
 import json
@@ -144,6 +152,31 @@ def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, 
     }
 
 
+def check_header(cand, sha, inputs_hash, run_id):
+    """CandidateError unless `cand` is the candidate of ci run `run_id` for commit `sha` and this inputs hash."""
+    if not isinstance(cand, dict) or cand.get("schema") != SCHEMA:
+        raise CandidateError(f"candidate schema {cand.get('schema') if isinstance(cand, dict) else cand!r} is not {SCHEMA}")
+    if cand.get("sha") != sha:
+        raise CandidateError(f"candidate is for commit {str(cand.get('sha'))[:12]}, not {sha[:12]}")
+    if cand.get("inputs_hash") != inputs_hash:
+        raise CandidateError(f"candidate is for inputs hash {str(cand.get('inputs_hash'))[:12]}, not {inputs_hash[:12]}")
+    if run_id and str(cand.get("run_id")) != str(run_id):
+        raise CandidateError(f"candidate was written by ci run {cand.get('run_id')}, not {run_id}")
+    if not isinstance(cand.get("repository"), str) or not cand["repository"]:
+        raise CandidateError("candidate names no repository")
+
+
+def pin(cand, name, arch, sha, inputs_hash, run_id):
+    """(`<repository>@<index digest>`, platform digest) of one target on one architecture of the candidate."""
+    check_header(cand, sha, inputs_hash, run_id)
+    slot = (((cand.get("targets") or {}).get(name) or {}).get("archs") or {}).get(arch)
+    if not slot:
+        raise CandidateError(f"candidate has no {name} {arch}")
+    index = _digest(slot.get("index"), f"{name} {arch} index")
+    platform = _digest(slot.get("platform"), f"{name} {arch} platform")
+    return f"{cand['repository']}@{index}", platform
+
+
 def load_records(directory):
     files = sorted(Path(directory).rglob("*.json"))
     if not files:
@@ -170,9 +203,24 @@ def main(argv=None):
     m.add_argument("--run-id", required=True)
     m.add_argument("--run-attempt", required=True)
     m.add_argument("--out", required=True)
+    for cmd in ("check", "pin"):
+        c = sub.add_parser(cmd)
+        c.add_argument("--candidate", required=True, help="release-candidate.json")
+        c.add_argument("--sha", required=True, help="the commit the images must be of (40 hex digits)")
+        c.add_argument("--inputs-hash", required=True)
+        c.add_argument("--run-id", default="", help="the ci run that wrote the candidate")
+        if cmd == "pin":
+            c.add_argument("--target", required=True)
+            c.add_argument("--arch", required=True, choices=ARCHES)
     args = parser.parse_args(argv)
     try:
-        if args.cmd == "entry":
+        if args.cmd == "check":
+            check_header(json.loads(Path(args.candidate).read_text()), args.sha, args.inputs_hash, args.run_id)
+            print(f"ok: {args.candidate} is the candidate of {args.sha[:12]}")
+        elif args.cmd == "pin":
+            ref, platform = pin(json.loads(Path(args.candidate).read_text()), args.target, args.arch, args.sha, args.inputs_hash, args.run_id)
+            print(f"{ref}\t{platform}")
+        elif args.cmd == "entry":
             entry = json.loads(Path(args.entry).read_text())
             json.dump(entry_record(entry, args.out, args.created, args.repository, args.built_run), sys.stdout, indent=2)
             print()

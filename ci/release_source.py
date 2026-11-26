@@ -19,13 +19,16 @@ parent, the develop commit that was tested. `copy` needs all of these:
   - HEAD has exactly two parents and HEAD^{tree} equals D^{tree}: nothing is on main that was
     not on develop. In `promote` mode HEAD is the PR's merge ref and D must be the PR head;
   - the repository variable RELEASE_HOLD is empty;
-  - the newest ci.yml run for D is a push to develop in this repository, completed with the
-    conclusion `success` for the run as a whole (not only `images`);
+  - the newest ci.yml run of D on develop in this repository, of any event but a pull request, is a
+    push, completed with the conclusion `success` for the run as a whole (not only `images`). A
+    dispatch of D created after it (a `rebuild` re-points D's dev tags: ci/dev-tag.sh) means the
+    images the extended run tested are no longer the ones on php/dev, so D is rebuilt;
   - D has an extended.yml run that is the one the `ci` run above started: event `workflow_run`
     (GitHub runs a workflow_run workflow from the default branch's copy, which only a merge to
     main can change), path `.github/workflows/extended.yml`, concluded `success`, and a title
     that is exactly `extended <D> ci <ci run id>.<ci run attempt>` (the workflow's `run-name`),
-    with that attempt the latest of the ci run. It tested D's images with D's own tree. A
+    with that attempt the latest of the ci run. It tested the images of that run's
+    release-candidate, pulled by digest (tests/extended.sh), with D's own tree. A
     dispatch from any branch, a push to extended-run or a re-run of the ci run since all have
     another event or another title. The newest `release/extended` commit status of D, which
     must be `success`, is only the pointer to that run; its creator and text prove nothing;
@@ -36,7 +39,9 @@ parent, the develop commit that was tested. `copy` needs all of these:
     this inputs hash, the sha256 of this tree's ci.yml (how the images are built is not part of the
     inputs hash), the dev repository, every target on both architectures and nothing else, written
     by that run, with the oldest image at most seven days old.
-Anything else, including any failure to read GitHub, is not `copy`, with the reason in the output.
+Anything else is not `copy`, with the reason in the output. A GitHub API call that fails with a
+transient error (a 5xx, 429 or 408 answer, a dropped connection, a timeout) is retried (ci/reuse_plan.py
+GhApi: three attempts, 5 and 15 seconds apart); one that still fails is the same: not `copy`.
 
 `target` runs in each `merge` leg of a copy: the digest-<target>-<arch> artifacts downloaded from
 the develop run must hold exactly the digests the candidate records, so a leg can never publish
@@ -57,6 +62,7 @@ from reuse_plan import NoReuse
 MAX_AGE = timedelta(days=7)
 STATUS_CONTEXT = "release/extended"
 EXTENDED_PATH = ".github/workflows/extended.yml"
+PR_EVENTS = ("pull_request", "pull_request_target")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -93,7 +99,7 @@ class ReleaseApi(reuse_plan.GhApi):
     """GhApi plus the calls about the develop commit: its ci runs, statuses and an extended run."""
 
     def ci_runs(self, sha):
-        return self._json(f"repos/{self.repo}/actions/workflows/ci.yml/runs?head_sha={sha}&branch=develop&event=push&per_page=20")
+        return self._json(f"repos/{self.repo}/actions/workflows/ci.yml/runs?head_sha={sha}&per_page=100")
 
     def statuses(self, sha):
         return self._json(f"repos/{self.repo}/commits/{sha}/statuses?per_page=100")
@@ -120,18 +126,25 @@ def develop_commit(git, mode, head_sha):
 
 
 def ci_run(api, sha, repo):
-    """The newest ci.yml push run of develop for `sha`: it must have completed with success."""
+    """The newest develop run of ci.yml for `sha`, which must be a push that completed with success.
+
+    Every develop run of the commit that is not a pull request counts, a dispatch included: a
+    rebuild of the commit (ci/dev-tag.sh with DEV_TAG_FORCE) re-points its dev tags, so a run that
+    tested the images of an older run did not test what the newest one left there.
+    """
     runs = [
         r for r in api.ci_runs(sha).get("workflow_runs", [])
         if r.get("head_sha") == sha
-        and r.get("event") == "push"
         and r.get("head_branch") == "develop"
+        and r.get("event") not in PR_EVENTS
         and r.get("path", "").endswith("/ci.yml")
         and (r.get("head_repository") or {}).get("full_name") == repo
     ]
     if not runs:
         raise NotCopy(f"no develop push run of ci.yml for {sha[:12]}")
     run = max(runs, key=lambda r: (r["created_at"], r["id"]))
+    if run.get("event") != "push":
+        raise NotCopy(f"the newest develop run of ci.yml for {sha[:12]}, {run['id']}, is a {run.get('event')}, not a push: a rebuild of the commit may have re-pointed its dev tags, so main rebuilds")
     if run.get("status") != "completed" or run.get("conclusion") != "success":
         raise NotCopy(f"the ci run {run['id']} for {sha[:12]} is {run.get('status')}/{run.get('conclusion')}, not a success")
     return run

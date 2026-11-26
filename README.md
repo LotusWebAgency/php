@@ -890,12 +890,15 @@ builds (pruned after 14 days by `dev-prune.yml`); it never touches Docker Hub. W
 nothing the images are built from (`scripts/inputs-hash.sh`, which covers the build context and not the
 tests, CI scripts or docs) and the previous green `develop` run's images are at most five days old,
 nothing is rebuilt: that run's images are tested again with the day's Trivy database and tagged for the
-new commit, and the run says so in its summary. Dispatching `ci.yml` with `rebuild` forces a build. A
+new commit, and the run says so in its summary. Dispatching `ci.yml` with `rebuild` forces a build; it
+re-points the commit's dev tags, so the release of that commit rebuilds instead of copying (a newer `develop`
+`ci` run of the commit, of any event, disqualifies the older one). A
 pull request from `develop` to `main` is the release. Its `promote-check` job decides whether `main`
 could copy the head's images: the `develop` `ci` run of the head commit (its latest
 attempt) must have succeeded as a whole and built every image itself, the `extended` run that the
 completion of that run and attempt started (the `workflow_run` trigger, titled with the commit and the
-attempt; a manual dispatch of `extended` does not count) must have passed on the head's own tree, the
+attempt; a manual dispatch of `extended` does not count) must have passed on the head's own tree, having
+pulled every image by the digest in that `ci` run's release candidate, the
 images must be at most seven days old and match the tree's inputs hash and `ci.yml`, and the merge
 result must have the same tree as the head. When all of that holds nothing is built for the pull
 request and its `pr-gate` passes; when it does not (a stale or reused `develop` run, no `extended`

@@ -6,7 +6,18 @@
 #   EXT_ONLY=<csv of versions> EXT_FLAVOR=<csv of flavors>
 #   EXT_APPS=<true|false> EXT_BENCH=<true|false>   (empty = default: true / false)
 #   EXT_EVENT=<github.event_name>
+#   EXT_CANDIDATE=<release-candidate.json of the triggering ci run> EXT_CI_RUN=<its run id>
+#                            (workflow_run only; extended.yml downloads it by run id)
 #   ci/extended-plan.sh
+#
+# For a workflow_run, plan refuses to go on unless that candidate is for the
+# commit under test, this tree's inputs-hash and that ci run (ci/candidate.py
+# check), and extended.yml then freezes the file as the extended-candidate
+# artifact: every leg pulls the images of that file by digest. dev:<tag>-<sha12>
+# is mutable (a develop rebuild of the commit re-points it), so a tag pull can
+# test other images than the ones main copies. A dispatch or an extended-run
+# push has no candidate: its legs pull by tag, and plan logs that this run
+# cannot qualify a copy (ci/release_source.py needs the workflow_run title).
 #
 # For a push to extended-run (EXT_EVENT=push) with no dev:<tag>-<sha12> images
 # of the pushed commit, plan falls back to the floating dev:<tag> images when
@@ -157,6 +168,17 @@ else
     || die "the floating images are from ${sha:0:12} (inputs-hash ${img_hash:0:12}); this checkout, ${checkout:0:12}, has inputs-hash ${tree_hash:0:12}. Dispatch with sha=${sha} to test them from their own tree, or wait for develop CI to push images of this commit."
   mode="the floating images from develop commit ${sha:0:12}, tests from ${checkout:0:12}${fallback_note}"
   echo "plan: using the floating images, built from ${sha:0:12} (inputs-hash matches this tree's): not own images"
+fi
+
+if [ "${EXT_EVENT:-}" = workflow_run ]; then
+  [ "$floating" -eq 0 ] || die "a workflow_run run tests its ci run's images, not the floating ones"
+  [ -n "${EXT_CANDIDATE:-}" ] && [ -f "$EXT_CANDIDATE" ] || die "no release candidate of ci run ${EXT_CI_RUN:-?} (the release-candidate artifact is missing or expired): without it the images cannot be pinned by digest"
+  [ -n "${EXT_CI_RUN:-}" ] || die "EXT_CI_RUN is not set"
+  python3 ci/candidate.py check --candidate "$EXT_CANDIDATE" --sha "$sha" --inputs-hash "$(bash scripts/inputs-hash.sh)" --run-id "$EXT_CI_RUN" \
+    || die "the release candidate of ci run $EXT_CI_RUN is not for ${sha:0:12} and this tree"
+  echo "plan: by digest, from the release candidate of ci run $EXT_CI_RUN: every leg pulls dev@<index digest>, not the mutable tag"
+else
+  echo "plan: by tag, no release candidate (a ${EXT_EVENT:-?} run): the legs pull dev:<tag>-<sha12>, which a develop rebuild may re-point. What this run tests is not what main copies, and it never qualifies a copy"
 fi
 
 apps="${EXT_APPS:-true}"

@@ -70,7 +70,13 @@ succeeded as a whole and built every image itself (a run that reused older image
 the `extended` run that the completion of exactly that `ci` run and attempt started (event
 `workflow_run`, run from `main`'s copy of the workflow, titled with the commit and the attempt)
 succeeded on the commit's own tree, so a dispatch of the suites from any branch or a status posted by
-another workflow counts for nothing; the images' inputs hash and the sha256 of `ci.yml` equal the
+another workflow counts for nothing; that run pulled every image it tested by the digest recorded in
+that `ci` run's release candidate, and failed a leg whose platform digest differed, so what the suites
+tested is what is copied (a dispatch or a push of the suites pulls by mutable tag and never qualifies);
+no develop `ci` run of the commit, of any event, was created after the run that qualified (a rebuild of
+the commit re-points its dev tags and invalidates the earlier run, and the dev tags of a commit are
+otherwise never moved to another digest); if GitHub's API cannot be read after three attempts, the
+release rebuilds; the images' inputs hash and the sha256 of `ci.yml` equal the
 release's; every image is at most seven days old when the decision is made and again in each leg that
 copies; and the repository variable `RELEASE_HOLD` is empty. Every copied image is scanned again with
 the day's vulnerability database before it is signed. The signatures and the signing identity are the

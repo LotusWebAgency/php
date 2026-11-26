@@ -3,9 +3,11 @@ import contextlib
 import copy
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -163,10 +165,27 @@ class TestRebuild(unittest.TestCase):
     def test_no_ci_run(self):
         self.rebuild("no develop push run", api=FakeApi(runs=[]))
 
-    def test_a_ci_run_of_another_commit_or_event_or_branch(self):
-        for bad in (ci_run(head_sha="e" * 40), ci_run(event="schedule"), ci_run(head_branch="main"), ci_run(path=".github/workflows/x.yml"),
-                    ci_run(head_repository={"full_name": "evil/php"})):
+    def test_a_ci_run_of_another_commit_or_branch_or_workflow_or_repository(self):
+        for bad in (ci_run(head_sha="e" * 40), ci_run(head_branch="main"), ci_run(path=".github/workflows/x.yml"),
+                    ci_run(head_repository={"full_name": "evil/php"}), ci_run(event="pull_request")):
             self.rebuild("no develop push run", api=FakeApi(runs=[bad]))
+
+    def test_a_run_of_another_event_is_not_a_push(self):
+        for event in ("schedule", "workflow_dispatch"):
+            self.rebuild(f"is a {event}, not a push", api=FakeApi(runs=[ci_run(event=event)]))
+
+    def test_a_newer_develop_run_of_any_event_means_rebuild(self):
+        # A rebuild dispatch re-points the dev tags of D: the extended run of the push run no longer tested what they name.
+        for event in ("workflow_dispatch", "push", "schedule"):
+            for conclusion in ("success", "failure", "cancelled", None):
+                newer = ci_run(id=701, event=event, conclusion=conclusion, created_at="2026-11-26T09:00:00Z")
+                got = decide(api=FakeApi(runs=[ci_run(), newer]))
+                self.assertEqual(got["mode"], "rebuild", (event, conclusion, got))
+
+    def test_an_older_dispatch_or_any_pull_request_run_does_not_matter(self):
+        older = ci_run(id=600, event="workflow_dispatch", created_at="2026-11-26T07:00:00Z")
+        pr = ci_run(id=900, event="pull_request", created_at="2026-11-26T11:00:00Z")
+        self.assertEqual(decide(api=FakeApi(runs=[older, ci_run(), pr]))["mode"], "copy")
 
     def test_a_failed_run_is_not_a_success_even_when_images_passed(self):
         self.rebuild("completed/failure", api=FakeApi(runs=[ci_run(conclusion="failure")]))
@@ -299,6 +318,67 @@ class TestRebuild(unittest.TestCase):
             def parents(self):
                 raise release_source.NotCopy("git rev-list failed")
         self.rebuild("git rev-list failed", git=Broken())
+
+
+class FlakyGh:
+    """`gh api` over the recorded answers of FakeApi, failing the first `failures` calls of each path (or all of them)."""
+
+    def __init__(self, failures, stderr=b"gh: Bad Gateway (HTTP 502)"):
+        self.failures, self.stderr, self.count = failures, stderr, {}
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("release-candidate.json", json.dumps(make_candidate()))
+        self.answers = [
+            ("/runs?head_sha=", {"workflow_runs": [ci_run()]}),
+            ("/statuses?", [status()]),
+            (f"/actions/runs/{EXT_RUN}", ext_run()),
+            ("/artifacts?name=release-candidate", {"artifacts": [{"id": 9, "name": "release-candidate", "expired": False, "created_at": "2026-11-26T09:00:00Z"}]}),
+        ]
+        self.zip = buf.getvalue()
+
+    def __call__(self, cmd, **kw):
+        path = cmd[2]
+        self.count[path] = self.count.get(path, 0) + 1
+        if self.count[path] <= self.failures:
+            raise subprocess.CalledProcessError(1, cmd, b"", self.stderr)
+        if path.endswith("/zip"):
+            return subprocess.CompletedProcess(cmd, 0, self.zip, b"")
+        for key, doc in self.answers:
+            if key in path:
+                return subprocess.CompletedProcess(cmd, 0, json.dumps(doc).encode(), b"")
+        raise AssertionError(path)
+
+
+class TestRetry(unittest.TestCase):
+    def api(self, gh, slept):
+        return release_source.ReleaseApi(SLUG, run=gh, sleep=slept.append)
+
+    def test_a_call_that_works_on_its_second_attempt_leaves_the_decision_alone(self):
+        for stderr in (b"gh: Bad Gateway (HTTP 502)", b"gh: Too Many Requests (HTTP 429)", b"error connecting to api.github.com"):
+            gh, slept = FlakyGh(1, stderr), []
+            got = decide(api=self.api(gh, slept))
+            self.assertEqual(got["mode"], "copy", got)
+            self.assertEqual(set(gh.count.values()), {2}, gh.count)
+            self.assertEqual(slept, [5] * len(gh.count))
+
+    def test_a_call_that_keeps_failing_is_three_attempts_then_a_rebuild(self):
+        gh, slept = FlakyGh(99), []
+        got = decide(api=self.api(gh, slept))
+        self.assertEqual(got["mode"], "rebuild")
+        self.assertIn("GitHub API", got["reason"])
+        self.assertEqual(sum(gh.count.values()), 3)
+        self.assertEqual(slept, [5, 15])
+
+    def test_promote_mode_falls_back_to_no_copy_without_blocking(self):
+        gh, slept = FlakyGh(99), []
+        got = decide(api=self.api(gh, slept), mode="promote", head_sha=D)
+        self.assertEqual(got["mode"], "rebuild")
+        self.assertNotIn("blocked", got)
+
+    def test_a_missing_run_is_not_retried(self):
+        gh, slept = FlakyGh(99, b"gh: Not Found (HTTP 404)"), []
+        self.assertEqual(decide(api=self.api(gh, slept))["mode"], "rebuild")
+        self.assertEqual((sum(gh.count.values()), slept), (1, []))
 
 
 class TestPromote(unittest.TestCase):

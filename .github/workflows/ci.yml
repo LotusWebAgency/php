@@ -45,9 +45,10 @@
 #   push on main, when a merge commit of develop carries develop's tree unchanged
 #     (ci/release_source.py, run by `release-source`; the checks are in its
 #     header: the develop run of the second parent succeeded as a whole and built
-#     every image itself, the extended.yml run that completion started (event
-#     workflow_run, titled with that commit and that run attempt) succeeded, and
-#     the run's release candidate is complete, for this inputs hash and this
+#     every image itself and no later develop run of the commit exists, the
+#     extended.yml run that completion started (event workflow_run, titled with
+#     that commit and that run attempt) succeeded having pulled the images by the
+#     digests of the run's release candidate, and that candidate is complete, for this inputs hash and this
 #     ci.yml, at most seven days old, re-checked in every `merge` leg)  copies
 #     instead of building: `images`, `corpus`, `corpus-merge` and `sources` are skipped,
 #     and each `merge` leg takes the develop run's digests and test results by
@@ -138,7 +139,7 @@ on:
   workflow_dispatch:
     inputs:
       rebuild:
-        description: Build the images even when the last develop build has the same inputs
+        description: Build the images even when the last develop build has the same inputs. On develop it re-points the commit's dev tags, so the release of that commit rebuilds instead of copying (an older extended run no longer vouches for them)
         type: boolean
         default: false
   schedule:
@@ -1046,6 +1047,13 @@ jobs:
       # on php/dev is a tested image; dev-manifest joins the arches.
       - name: Tag the passed targets (develop)
         if: ${{ !cancelled() && steps.test.conclusion != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' }}
+        env:
+          # An existing per-arch tag of this commit moves to another digest only on purpose: a
+          # rebuild dispatch or a re-run attempt (ci/dev-tag.sh). A rebuild dispatch leaves a
+          # develop run of this commit newer than the one an extended run tested, so
+          # ci/release_source.py rebuilds the release of this commit; a re-run attempt is
+          # another attempt, which the extended run's title must name.
+          DEV_TAG_FORCE: ${{ ((github.event_name == 'workflow_dispatch' && inputs.rebuild) || github.run_attempt != '1') && '1' || '' }}
         run: ./ci/dev-tag.sh "$RUNNER_TEMP/entry.json" "$RUNNER_TEMP/test-out"
 
       # Reached only when the whole entry passed (success() is the default): the
@@ -1267,9 +1275,10 @@ jobs:
   # that merging it makes would copy develop's images (ci/release_source.py, the same
   # checks `release-source` runs on that push): the merge ref has two parents, its
   # second is the PR head and its tree is the head's, the head's develop ci run
-  # succeeded as a whole and built every image itself, the extended.yml run that its
-  # completion started (event workflow_run, titled with the head and that run
-  # attempt) succeeded, its release candidate is complete, for this inputs hash and
+  # succeeded as a whole and built every image itself and is the newest develop run of
+  # the head, the extended.yml run that its completion started (event workflow_run,
+  # titled with the head and that run attempt) succeeded having pulled the images by
+  # the digests of its release candidate, that candidate is complete, for this inputs hash and
   # this ci.yml and at most seven days old, and the repository variable RELEASE_HOLD
   # is empty. The output `copy` is `true` when all of that holds and `false`
   # otherwise, with the reason in the step summary: `images` then builds the

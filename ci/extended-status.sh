@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Post the `release/extended` commit status of an extended.yml run, and unstick
-# the promote PR that was waiting for it.
+# Post the `release/extended` commit status of an extended.yml run.
 #
 #   NEEDS_JSON='<toJson(needs)>' EXT_VERDICT=<outcome of the verdict step> \
 #     GH_TOKEN=... GITHUB_REPOSITORY=... GITHUB_RUN_ID=... ci/extended-status.sh
@@ -20,14 +19,13 @@
 #     A cancelled run posts nothing, so it neither passes nor fails the commit.
 #
 # Context `release/extended`, target the run. The status is only a pointer to
-# the run: ci/release_source.py trusts the run (its event, path and title), not
-# the status or its creator. The latest status of a context
-# wins, so a green re-run after a red one replaces it. After a success, an open
-# pull request develop -> main of this repository whose head is that commit has
-# its failed ci run re-run (failed jobs only): its pr-gate looked for this
-# status, did not find it and failed. The re-run needs `actions: write`.
+# the run: ci/release_source.py trusts the run (its event, path and title, and
+# the candidate digests it tested), not the status or its creator. The latest
+# status of a context wins, so a green re-run after a red one replaces it.
+# Nothing else reads the status: the promote PR's ci run does not wait for it,
+# so there is no run to re-run once it is posted.
 #
-# The workflow's token needs statuses: write, actions: write, pull-requests: read.
+# The workflow's token needs statuses: write.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
@@ -68,21 +66,3 @@ esac
 gh_retry api -X POST "repos/$repo/statuses/$sha" \
   -f state="$state" -f context="$context" -f description="$description" -f target_url="$url" >/dev/null
 say "$context: $state on ${sha:0:12}"
-[ "$state" = success ] || exit 0
-
-owner="${repo%%/*}"
-prs="$(gh_retry api "repos/$repo/pulls?state=open&base=main&head=$owner:develop&per_page=20" \
-  --jq "[.[] | select(.head.sha == \"$sha\" and .head.repo.full_name == \"$repo\") | .number]")"
-for pr in $(jq -r '.[]' <<<"$prs"); do
-  # The newest ci run of the PR's head: a pull_request run, so the gate that looked for the status.
-  run="$(gh_retry api "repos/$repo/actions/workflows/ci.yml/runs?head_sha=$sha&event=pull_request&per_page=10" \
-    --jq '[.workflow_runs[]] | sort_by(.created_at) | last // empty | "\(.id) \(.status) \(.conclusion)"')"
-  if [ -z "$run" ]; then say "PR #$pr: no ci run of ${sha:0:12} to re-run"; continue; fi
-  read -r id st conclusion <<<"$run"
-  if [ "$st" = completed ] && [ "$conclusion" = failure ]; then
-    gh_retry api -X POST "repos/$repo/actions/runs/$id/rerun-failed-jobs" >/dev/null
-    say "PR #$pr: re-ran the failed jobs of ci run $id"
-  else
-    say "PR #$pr: ci run $id is $st/${conclusion:-none}, left alone"
-  fi
-done

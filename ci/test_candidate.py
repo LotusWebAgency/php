@@ -228,5 +228,63 @@ class TestCli(unittest.TestCase):
             self.assertFalse((tmp / "out.json").exists())
 
 
+class TestPin(unittest.TestCase):
+    def cand(self):
+        records = [
+            {"name": f"8.5-{a}", "php": "8.5", "uarch": "baseline", "arch": a, "created": CREATED, "built_run": BUILT, "repository": REPO,
+             "targets": {n: {"tag": f"8.5-{n.split('-', 2)[2]}", "index": sha("1" if a == "amd64" else "2"), "platform": sha("3" if a == "amd64" else "4")}
+                         for n in ("php-8_5-fpm", "php-8_5-cli")}}
+            for a in ("amd64", "arm64")
+        ]
+        return merge(records)
+
+    def pin(self, cand=None, name="php-8_5-fpm", arch="amd64", **kw):
+        args = dict(sha="c" * 40, inputs_hash="hash", run_id="123")
+        args.update(kw)
+        return candidate.pin(cand or self.cand(), name, arch, args["sha"], args["inputs_hash"], args["run_id"])
+
+    def test_the_index_ref_and_platform_of_one_arch(self):
+        self.assertEqual(self.pin(), (f"{REPO}@{sha('1')}", sha("3")))
+        self.assertEqual(self.pin(arch="arm64"), (f"{REPO}@{sha('2')}", sha("4")))
+
+    def test_a_candidate_of_another_commit_hash_or_run_is_refused(self):
+        for kw, text in (({"sha": "e" * 40}, "commit"), ({"inputs_hash": "other"}, "inputs hash"), ({"run_id": "999"}, "ci run 123")):
+            with self.assertRaisesRegex(candidate.CandidateError, text):
+                self.pin(**kw)
+
+    def test_no_run_id_means_any_run(self):
+        self.assertEqual(self.pin(run_id="")[0], f"{REPO}@{sha('1')}")
+
+    def test_a_target_or_arch_the_candidate_lacks(self):
+        with self.assertRaisesRegex(candidate.CandidateError, "no php-8_5-zts amd64"):
+            self.pin(name="php-8_5-zts")
+        cand = self.cand()
+        del cand["targets"]["php-8_5-fpm"]["archs"]["arm64"]
+        with self.assertRaisesRegex(candidate.CandidateError, "no php-8_5-fpm arm64"):
+            self.pin(cand, arch="arm64")
+
+    def test_a_malformed_digest_is_refused(self):
+        cand = self.cand()
+        cand["targets"]["php-8_5-fpm"]["archs"]["amd64"]["index"] = "sha256:short"
+        with self.assertRaisesRegex(candidate.CandidateError, "not a sha256 digest"):
+            self.pin(cand)
+
+    def test_cli_pin_and_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "release-candidate.json"
+            f.write_text(json.dumps(self.cand()))
+            base = ["--candidate", str(f), "--sha", "c" * 40, "--inputs-hash", "hash", "--run-id", "123"]
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(candidate.main(["pin", *base, "--target", "php-8_5-cli", "--arch", "amd64"]), 0)
+                self.assertEqual(candidate.main(["check", *base]), 0)
+            self.assertIn(f"{REPO}@{sha('1')}\t{sha('3')}", out.getvalue())
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(candidate.main(["pin", *base[:-1], "999", "--target", "php-8_5-cli", "--arch", "amd64"]), 1)
+                self.assertEqual(candidate.main(["check", "--candidate", str(Path(tmp) / "missing.json"), *base[2:]]), 1)
+            self.assertIn("FAIL:", err.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

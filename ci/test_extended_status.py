@@ -95,7 +95,7 @@ class TestStatus(unittest.TestCase):
             r, calls = self.go(needs(checkout=checkout))
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(self.posts(calls), [], checkout)
-            self.assertFalse([c for c in calls if "pulls" in c or "rerun" in c])
+            self.assertEqual(calls, [])
             if os.path.exists(self.calls):
                 os.remove(self.calls)
 
@@ -112,22 +112,11 @@ class TestStatus(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(self.posts(calls), [])
 
-    def test_open_promote_pr_has_its_failed_run_rerun(self):
-        prs = "[7]"
-        r, calls = self.go(needs(), prs=prs, run="900 completed failure")
+    def test_a_success_touches_nothing_but_the_status(self):
+        r, calls = self.go(needs(), prs="[7]", run="900 completed failure")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertTrue(any("actions/runs/900/rerun-failed-jobs" in c for c in calls), calls)
-
-    def test_a_pr_whose_run_is_not_failed_is_left_alone(self):
-        prs = "[7]"
-        for run in ("900 completed success", "900 in_progress none"):
-            r, calls = self.go(needs(), prs=prs, run=run)
-            self.assertFalse([c for c in calls if "rerun" in c], run)
-            os.remove(self.calls)
-
-    def test_no_pr_no_rerun(self):
-        r, calls = self.go(needs(), prs="[]")
-        self.assertFalse([c for c in calls if "rerun" in c or "workflows/ci.yml" in c])
+        self.assertEqual(len(calls), 1, calls)
+        self.assertEqual(len(self.posts(calls)), 1)
 
 
 if __name__ == "__main__":
