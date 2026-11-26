@@ -19,8 +19,8 @@ esac
 """
 
 
-def needs(plan="success", own="true", full="true", sha=SHA, others=("success",)):
-    n = {"plan": {"result": plan, "outputs": {"sha": sha, "own": own, "full": full}}}
+def needs(plan="success", own="true", full="true", sha=SHA, others=("success",), checkout=None):
+    n = {"plan": {"result": plan, "outputs": {"sha": sha, "own": own, "full": full, "checkout": sha if checkout is None else checkout}}}
     for i, r in enumerate(others):
         n[f"job{i}"] = {"result": r}
     return json.dumps(n)
@@ -87,6 +87,15 @@ class TestStatus(unittest.TestCase):
             r, calls = self.go(n)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(self.posts(calls), [], n)
+            if os.path.exists(self.calls):
+                os.remove(self.calls)
+
+    def test_no_status_when_the_tests_ran_from_another_tree(self):
+        for checkout in ("b" * 40, ""):
+            r, calls = self.go(needs(checkout=checkout))
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(self.posts(calls), [], checkout)
+            self.assertFalse([c for c in calls if "pulls" in c or "rerun" in c])
             if os.path.exists(self.calls):
                 os.remove(self.calls)
 

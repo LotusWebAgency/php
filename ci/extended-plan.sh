@@ -43,8 +43,9 @@
 #   own       true when the images are the commit's own dev:<tag>-<sha12> (not
 #             the floating fallback)
 #   full      true when the selection is everything (no only, no flavor, apps
-#             on and planned). own and full are what ci/extended-status.sh needs
-#             before it posts the `release/extended` commit status.
+#             on and planned). own, full and checkout == sha are what
+#             ci/extended-status.sh needs before it posts the `release/extended`
+#             commit status (a pointer: release_source.py trusts the run).
 #
 # fpm and apps are also what ci/extended-summary.sh reads (from the needs
 # context) to decide which jobs had to succeed.
@@ -200,7 +201,7 @@ full=false
   echo "### extended tests: $mode"
   echo
   echo "versions: $(jq -r '.versions | join(", ")' <<<"$sel"); only '$only_csv', flavor '$flavor_csv', apps ${apps}${apps_note}, bench $bench"
-  echo "own images: $own, full selection: $full ($( [ "$full" = true ] && echo "posts release/extended" || echo "no release/extended status" ))"
+  echo "own images: $own, full selection: $full, tests from the commit's own tree: $( [ "$checkout" = "$sha" ] && echo true || echo false ) ($( [ "$full" = true ] && [ "$checkout" = "$sha" ] && echo "posts release/extended" || echo "no release/extended status" ))"
   if [ -n "$shard_table" ]; then
     echo
     echo "$(jq length <<<"$versions_json") shards per arch, longest first (estimated minutes):"

@@ -891,14 +891,19 @@ nothing the images are built from (`scripts/inputs-hash.sh`, which covers the bu
 tests, CI scripts or docs) and the previous green `develop` run's images are at most five days old,
 nothing is rebuilt: that run's images are tested again with the day's Trivy database and tagged for the
 new commit, and the run says so in its summary. Dispatching `ci.yml` with `rebuild` forces a build. A
-pull request from `develop` to `main` is the release. Its `pr-gate` is `promote-check`: the `develop`
-`ci` run for the head commit and the `extended` suite status (`release/extended`, set by the
-`extended` workflow) must have passed, the images must be at most seven days old and match the tree's
-inputs hash and `ci.yml`, the merge result must have the same tree as the head, and the repository
-variable `RELEASE_HOLD` must be empty. Merging it (a merge commit) takes the copy path when the same
-checks pass on `main`: the tested `develop` images are copied by digest to the GHCR staging
-repository, scanned again with the day's Trivy database, signed, attested and put in a manifest list
-there; nothing is rebuilt. Otherwise (any check fails, the GitHub API errors, the weekly schedule, a
+pull request from `develop` to `main` is the release. Its `pr-gate` is `promote-check`, which
+fails unless `main` could copy the head's images: the `develop` `ci` run of the head commit (its latest
+attempt) must have succeeded as a whole and built every image itself, the `extended` run that the
+completion of that run and attempt started (the `workflow_run` trigger, titled with the commit and the
+attempt; a manual dispatch of `extended` does not count) must have passed on the head's own tree, the
+images must be at most seven days old and match the tree's inputs hash and `ci.yml`, and the merge
+result must have the same tree as the head. A non-empty repository variable `RELEASE_HOLD` also fails
+`promote-check` and turns a copy on `main` into a build; it does not stop a push to `main` from
+building and publishing. Merging it (a merge commit) takes the copy path when the same checks pass on
+`main`, and the age limit is checked again in every copying job: the tested `develop` images are
+copied by digest to the GHCR staging repository, scanned again with the day's Trivy database, signed,
+attested and put in a manifest list there; nothing is rebuilt. Otherwise (any check fails, the GitHub
+API errors, the weekly schedule, a
 manual dispatch) the release builds, tests, signs and attests every image in the staging repository
 itself, and the run's summary says why. Either way each signed manifest list is then copied to Docker
 Hub with its signatures and attestations, and only then are the tags moved. A weekly rebuild (Mondays

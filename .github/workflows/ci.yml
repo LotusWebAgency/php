@@ -35,13 +35,16 @@
 #     head and fails the `pr-gate` unless main could publish develop's images by
 #     copy, and unless the merge ref's tree is the head's, so what the PR gate
 #     passes is exactly what the push to main will copy. The repository variable
-#     RELEASE_HOLD, when set, fails it.
+#     RELEASE_HOLD, when set, fails it (this check and the copy path only: a
+#     hold does not stop a push to main from building and publishing).
 #   push on main, when a merge commit of develop carries develop's tree unchanged
 #     (ci/release_source.py, run by `release-source`; the checks are in its
-#     header: the develop run of the second parent succeeded as a whole, its
-#     `release/extended` status is green, and its release candidate is complete,
-#     for this inputs hash and this ci.yml, at most seven days old)  copies instead
-#     of building: `images`, `corpus`, `corpus-merge` and `sources` are skipped,
+#     header: the develop run of the second parent succeeded as a whole and built
+#     every image itself, the extended.yml run that completion started (event
+#     workflow_run, titled with that commit and that run attempt) succeeded, and
+#     the run's release candidate is complete, for this inputs hash and this
+#     ci.yml, at most seven days old, re-checked in every `merge` leg)  copies
+#     instead of building: `images`, `corpus`, `corpus-merge` and `sources` are skipped,
 #     and each `merge` leg takes the develop run's digests and test results by
 #     run id, checks them against the candidate, copies the two per-arch indexes
 #     from php/dev to the staging repository by digest (regctl; same digests, same
@@ -430,6 +433,12 @@ jobs:
   # is a build. Never fails the run on an unreadable GitHub: that is a rebuild,
   # with the reason in the summary. The verified candidate goes to the `merge`
   # legs as an artifact, so every leg reads the one file the decision was made on.
+  #
+  # The job's outputs are written by its last step, which runs only when every
+  # step before it succeeded: a job that fails anywhere (the decision script, the
+  # candidate upload) has no mode, which every consumer reads as a build, and the
+  # consumers that would otherwise be skipped with it (`sources`, `corpus`) run on
+  # `!cancelled()` instead of the implicit success of their needs.
   release-source:
     needs: plan
     runs-on: ubuntu-26.04
@@ -439,9 +448,9 @@ jobs:
       actions: read # develop's ci runs, the extended run and the release-candidate artifact
       statuses: read # the release/extended commit status
     outputs:
-      mode: ${{ steps.decide.outputs.mode }}
-      run-id: ${{ steps.decide.outputs.run-id }}
-      sha: ${{ steps.decide.outputs.sha }}
+      mode: ${{ steps.publish.outputs.mode }}
+      run-id: ${{ steps.publish.outputs.run-id }}
+      sha: ${{ steps.publish.outputs.sha }}
     steps:
       # Two commits deep: the merge commit and both its parents, which is all
       # the tree comparison reads.
@@ -499,6 +508,20 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           overwrite: true
+
+      - name: Publish the decision
+        id: publish
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          MODE: ${{ steps.decide.outputs.mode }}
+          RUN_ID: ${{ steps.decide.outputs.run-id }}
+          SHA: ${{ steps.decide.outputs.sha }}
+        run: |
+          {
+            echo "mode=$MODE"
+            echo "run-id=$RUN_ID"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------- trivy-db
   # One vulnerability DB refresh per run, parallel with plan, instead of
@@ -579,7 +602,7 @@ jobs:
   # skips it.
   sources:
     needs: [plan, release-source]
-    if: ${{ needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && needs.plan.outputs.promote != 'true' }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && needs.plan.outputs.promote != 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -1231,12 +1254,15 @@ jobs:
   # push to main that merging it makes would copy develop's images
   # (ci/release_source.py, the same checks `release-source` runs on that push): the
   # merge ref has two parents, its second is the PR head and its tree is the head's,
-  # the head's develop ci run succeeded as a whole, its `release/extended` status is
-  # green and from github-actions[bot], its release candidate is complete, for this
+  # the head's develop ci run succeeded as a whole and built every image itself, the
+  # extended.yml run that its completion started (event workflow_run, titled with the
+  # head and that run attempt) succeeded, its release candidate is complete, for this
   # inputs hash and this ci.yml and at most seven days old, and the repository
   # variable RELEASE_HOLD is empty. Anything else fails here, with the reason, not on
-  # main: either wait for develop (or run extended.yml on the head: `gh workflow run
-  # extended.yml --ref develop -f sha=<head>`), or push a change to develop. Unlike
+  # main: wait for develop, or push a change to develop. No dispatch of extended.yml
+  # can stand in for that run, and the first promotion after this lands has none
+  # (main's extended.yml still titles its runs the old way, so no run qualifies
+  # until the new one is on main): it can only be a rebuild, and fails here. Unlike
   # `release-source`, a failed decision or an unreadable GitHub fails the check.
   promote-check:
     needs: plan
@@ -1316,7 +1342,7 @@ jobs:
   # single runner, past any sensible timeout whenever a shared input changes.
   corpus:
     needs: [plan, corpus-matrix, release-source]
-    if: needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.corpus-matrix.result == 'success' && needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
     name: corpus ${{ matrix.tier.floor }} ${{ matrix.arch.name }}
     strategy:
       fail-fast: false
@@ -1648,7 +1674,9 @@ jobs:
       # digest -- the same bytes, with the SBOM and provenance develop's build made --
       # and both platform manifests are scanned again with today's DB, because
       # develop passed them with the DB of its day. A finding fails this leg before
-      # anything is attested, listed or tagged.
+      # anything is attested, listed or tagged. The age limit is checked again here:
+      # a failed leg re-run days later reuses the decision, and an image over seven
+      # days old is rebuilt (re-run the whole workflow), never copied.
       - name: Copy the tested images from php/dev and scan them again
         if: ${{ needs.release-source.outputs.mode == 'copy' }}
         run: |

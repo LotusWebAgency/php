@@ -12,11 +12,16 @@
 #     own dev:<tag>-<sha12>, not the floating fallback of another commit;
 #   - plan.outputs.full is true: no `only`, no `flavor`, apps on. A subset run
 #     proves less than the gate asks for and posts nothing;
+#   - plan.outputs.checkout equals plan.outputs.sha: the tests and scripts that
+#     ran are the commit's own tree. A dispatch that tests the commit's images
+#     with another ref's tests/ and ci/ says nothing about the commit's release;
 #   - no job was cancelled, and EXT_VERDICT (the verdict step's outcome) is
 #     `success` or `failure`: success posts state success, failure posts failure.
 #     A cancelled run posts nothing, so it neither passes nor fails the commit.
 #
-# Context `release/extended`, target the run. The latest status of a context
+# Context `release/extended`, target the run. The status is only a pointer to
+# the run: ci/release_source.py trusts the run (its event, path and title), not
+# the status or its creator. The latest status of a context
 # wins, so a green re-run after a red one replaces it. After a success, an open
 # pull request develop -> main of this repository whose head is that commit has
 # its failed ci run re-run (failed jobs only): its pr-gate looked for this
@@ -44,6 +49,10 @@ fi
 sha="$(plan sha)"
 if [ "$(plan own)" != true ] || [ "$(plan full)" != true ]; then
   say "$context: no status (own images: '$(plan own)', full selection: '$(plan full)'): only a full run on a commit's own images speaks for its release"
+  exit 0
+fi
+if [ "$(plan checkout)" != "$sha" ]; then
+  say "$context: no status, the tests ran from '$(plan checkout)', not from the tree of ${sha:0:12}"
   exit 0
 fi
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "FAIL: plan.outputs.sha '$sha' is not a full commit sha" >&2; exit 1; }

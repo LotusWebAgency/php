@@ -40,7 +40,7 @@ class FakeGit:
 
 def ci_run(**kw):
     run = {
-        "id": CI_RUN, "head_sha": D, "head_branch": "develop", "event": "push", "path": ".github/workflows/ci.yml",
+        "id": CI_RUN, "run_attempt": 1, "head_sha": D, "head_branch": "develop", "event": "push", "path": ".github/workflows/ci.yml",
         "status": "completed", "conclusion": "success", "created_at": "2026-11-26T08:00:00Z",
         "head_repository": {"full_name": SLUG},
     }
@@ -51,25 +51,27 @@ def ci_run(**kw):
 def status(**kw):
     s = {
         "id": 1, "context": "release/extended", "state": "success", "created_at": "2026-11-26T10:00:00Z",
-        "creator": {"login": "github-actions[bot]"}, "target_url": f"https://github.com/{SLUG}/actions/runs/{EXT_RUN}",
+        "creator": {"login": "github-actions[bot]"}, "description": "extended tests passed",
+        "target_url": f"https://github.com/{SLUG}/actions/runs/{EXT_RUN}",
     }
     s.update(kw)
     return s
 
 
 def ext_run(**kw):
-    run = {"id": EXT_RUN, "path": ".github/workflows/extended.yml", "status": "completed", "conclusion": "success",
+    run = {"id": EXT_RUN, "path": ".github/workflows/extended.yml", "event": "workflow_run",
+           "display_title": f"extended {D} ci {CI_RUN}.1", "status": "completed", "conclusion": "success",
            "repository": {"full_name": SLUG}}
     run.update(kw)
     return run
 
 
-def make_candidate(created=None, **kw):
+def make_candidate(created=None, built_run=CI_RUN, **kw):
     created = created or stamp(timedelta(hours=3))
     records = [
         {
             "name": f"8.5-{arch}", "php": "8.5", "uarch": "baseline", "arch": arch, "created": created,
-            "built_run": str(CI_RUN), "repository": REPO,
+            "built_run": str(built_run), "repository": REPO,
             "targets": {n: {"tag": f"8.5-{n.split('-', 2)[2]}", "index": sha("1" if arch == "amd64" else "2"), "platform": sha("3")} for n in NAMES},
         }
         for arch in reuse_plan.ARCHES
@@ -177,7 +179,7 @@ class TestRebuild(unittest.TestCase):
 
     def test_no_extended_status(self):
         self.rebuild("no release/extended status", api=FakeApi(statuses=[status(context="other")]))
-        self.rebuild("gh workflow run extended.yml", api=FakeApi(statuses=[]))
+        self.rebuild("no extended.yml run of ci run 700.1", api=FakeApi(statuses=[]))
 
     def test_a_failed_extended_status(self):
         self.rebuild("is failure", api=FakeApi(statuses=[status(state="failure")]))
@@ -188,9 +190,12 @@ class TestRebuild(unittest.TestCase):
         self.rebuild("is failure", api=FakeApi(statuses=[old_ok, new_bad]))
         self.assertEqual(decide(api=FakeApi(statuses=[status(id=2, state="failure", created_at="2026-11-26T08:00:00Z"), old_ok]))["mode"], "copy")
 
-    def test_a_status_from_a_person(self):
-        self.rebuild("created by mallory", api=FakeApi(statuses=[status(creator={"login": "mallory"})]))
-        self.rebuild("created by None", api=FakeApi(statuses=[status(creator=None)]))
+    def test_the_status_creator_and_text_prove_nothing(self):
+        self.assertEqual(decide(api=FakeApi(statuses=[status(creator={"login": "mallory"}, description="whatever")]))["mode"], "copy")
+
+    def test_a_forged_status_pointing_at_an_old_green_run(self):
+        old = ext_run(id=5, display_title=f"extended {'e' * 40} ci 500.1")
+        self.rebuild("is titled", api=FakeApi(ext=old, statuses=[status(target_url=f"https://github.com/{SLUG}/actions/runs/5")]))
 
     def test_a_status_pointing_outside_this_repository(self):
         self.rebuild("not a run of", api=FakeApi(statuses=[status(target_url=f"https://github.com/evil/php/actions/runs/{EXT_RUN}")]))
@@ -198,6 +203,44 @@ class TestRebuild(unittest.TestCase):
 
     def test_a_status_whose_run_is_not_extended(self):
         self.rebuild("not an extended.yml run", api=FakeApi(ext=ext_run(path=".github/workflows/ci.yml")))
+        self.rebuild("not an extended.yml run", api=FakeApi(ext=ext_run(path=".github/workflows/extended.yml@refs/heads/x")))
+
+    def test_a_status_whose_run_is_another_run_than_it_names(self):
+        self.rebuild("not a run of", api=FakeApi(ext=ext_run(id=1)))
+        self.rebuild("not a run of", api=FakeApi(ext=ext_run(repository={"full_name": "evil/php"})))
+
+    def test_an_extended_run_not_started_by_the_ci_completing(self):
+        for event in ("workflow_dispatch", "push", "pull_request", "schedule", None):
+            self.rebuild("not by the completion of the ci run", api=FakeApi(ext=ext_run(event=event)))
+
+    def test_a_dispatch_from_a_branch_with_a_forged_title(self):
+        # a dispatch input is free text, so its run-name can read exactly like the real one
+        self.rebuild("not by the completion", api=FakeApi(ext=ext_run(event="workflow_dispatch", display_title=f"extended {D} ci {CI_RUN}.1")))
+
+    def test_an_extended_run_of_another_commit_or_ci_run_or_attempt(self):
+        for title in (f"extended {'e' * 40} ci {CI_RUN}.1", f"extended {D} ci 701.1", f"extended {D} ci {CI_RUN}.2",
+                      f"extended {D}", f"extended {D} ci {CI_RUN}.1 ", None, ""):
+            self.rebuild("is titled", api=FakeApi(ext=ext_run(display_title=title)))
+
+    def test_a_ci_run_rerun_since_the_extended_run_started(self):
+        self.rebuild("not 'extended %s ci %s.2'" % (D, CI_RUN), api=FakeApi(runs=[ci_run(run_attempt=2)]))
+        self.assertEqual(decide(api=FakeApi(runs=[ci_run(run_attempt=2)], ext=ext_run(display_title=f"extended {D} ci {CI_RUN}.2")))["mode"], "copy")
+
+    def test_a_ci_run_without_an_attempt(self):
+        run = ci_run()
+        del run["run_attempt"]
+        self.rebuild("no run attempt", api=FakeApi(runs=[run]))
+
+    def test_images_a_ci_run_reused_are_not_copied(self):
+        self.rebuild("built by run(s) 600", api=FakeApi(cand=make_candidate(built_run=600)))
+
+    def test_one_reused_architecture_is_enough_to_rebuild(self):
+        cand = make_candidate()
+        cand["targets"]["php-8_5-cli"]["archs"]["arm64"]["built_run"] = "600"
+        self.rebuild("600", api=FakeApi(cand=cand))
+        cand = make_candidate()
+        cand["built_run"] = "600"
+        self.rebuild("600", api=FakeApi(cand=cand))
 
     def test_an_extended_run_that_did_not_succeed(self):
         self.rebuild("completed/failure", api=FakeApi(ext=ext_run(conclusion="failure")))
@@ -309,6 +352,22 @@ class TestVerifyTarget(unittest.TestCase):
     def test_a_missing_arch(self):
         self.assertIn("holds", self.check(lambda t: (t / "arm64").unlink())[0])
 
+    def test_the_age_is_rechecked_when_now_is_given(self):
+        cand = make_candidate(created=stamp(timedelta(days=6, hours=23)))
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write(Path(tmp), cand)
+            self.assertEqual(release_source.verify_target(cand, "php-8_5-fpm", tmp, NOW), [])
+            got = release_source.verify_target(cand, "php-8_5-fpm", tmp, NOW + timedelta(hours=2))
+            self.assertIn("rebuild instead of copying", got[0])
+            self.assertEqual(release_source.verify_target(cand, "php-8_5-fpm", tmp), [])
+
+    def test_an_unreadable_creation_time_fails_closed(self):
+        cand = make_candidate()
+        cand["targets"]["php-8_5-cli"]["archs"]["amd64"]["created"] = "yesterday"
+        self.assertIn("is not a UTC timestamp", release_source.verify_target(cand, "php-8_5-fpm", "/nonexistent", NOW)[0])
+        del cand["targets"]
+        self.assertIn("cannot read the creation times", release_source.verify_target(cand, "php-8_5-fpm", "/nonexistent", NOW)[0])
+
     def test_an_unknown_target(self):
         self.assertIn("no target", release_source.verify_target(make_candidate(), "php-9-fpm", "/nonexistent")[0])
 
@@ -321,8 +380,9 @@ class TestCli(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
     def test_target_ok_and_failing(self):
+        from unittest import mock
         cand = make_candidate()
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(release_source, "_now", lambda: NOW):
             tmp = Path(tmp)
             (tmp / "c.json").write_text(json.dumps(cand))
             d = tmp / "d"
@@ -334,6 +394,21 @@ class TestCli(unittest.TestCase):
             rc, _, err = self.run_cli("target", "--candidate", str(tmp / "c.json"), "--target", "php-8_5-fpm", "--digests", str(d))
             self.assertEqual(rc, 1)
             self.assertIn("FAIL", err)
+
+    def test_target_refuses_a_candidate_that_aged_past_a_week(self):
+        from unittest import mock
+        cand = make_candidate()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "c.json").write_text(json.dumps(cand))
+            d = tmp / "d"
+            d.mkdir()
+            TestVerifyTarget().write(d, cand)
+            argv = ("target", "--candidate", str(tmp / "c.json"), "--target", "php-8_5-fpm", "--digests", str(d))
+            with mock.patch.object(release_source, "_now", lambda: NOW + timedelta(days=7)):
+                rc, _, err = self.run_cli(*argv)
+            self.assertEqual(rc, 1)
+            self.assertIn("rebuild instead of copying", err)
 
     def test_decide_gate_fails_on_rebuild_and_saves_nothing(self):
         from unittest import mock

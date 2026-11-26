@@ -18,8 +18,17 @@ parent, the develop commit that was tested. `copy` needs all of these:
   - the repository variable RELEASE_HOLD is empty;
   - the newest ci.yml run for D is a push to develop in this repository, completed with the
     conclusion `success` for the run as a whole (not only `images`);
-  - the newest `release/extended` commit status on D is `success`, created by github-actions[bot],
-    and its target is an extended.yml run of this repository that succeeded;
+  - D has an extended.yml run that is the one the `ci` run above started: event `workflow_run`
+    (GitHub runs a workflow_run workflow from the default branch's copy, which only a merge to
+    main can change), path `.github/workflows/extended.yml`, concluded `success`, and a title
+    that is exactly `extended <D> ci <ci run id>.<ci run attempt>` (the workflow's `run-name`),
+    with that attempt the latest of the ci run. It tested D's images with D's own tree. A
+    dispatch from any branch, a push to extended-run or a re-run of the ci run since all have
+    another event or another title. The newest `release/extended` commit status of D, which
+    must be `success`, is only the pointer to that run; its creator and text prove nothing;
+  - that ci run built every image itself: the candidate's `built_run` (top level and every
+    architecture of every target) is the ci run's own id. A run that reused older images
+    skipped the PGO check on them, and main does not copy such images;
   - that ci run left an unexpired `release-candidate` artifact (ci/candidate.py) for D: this tree,
     this inputs hash, the sha256 of this tree's ci.yml (how the images are built is not part of the
     inputs hash), the dev repository, every target on both architectures and nothing else, written
@@ -28,7 +37,8 @@ Anything else, including any failure to read GitHub, is not `copy`, with the rea
 
 `target` runs in each `merge` leg of a copy: the digest-<target>-<arch> artifacts downloaded from
 the develop run must hold exactly the digests the candidate records, so a leg can never publish
-anything the decision was not made on.
+anything the decision was not made on, and the oldest image must still be at most seven days old
+now (a re-run of a failed leg days later reuses the old decision, not its age check).
 """
 import argparse
 import json
@@ -43,7 +53,7 @@ from reuse_plan import NoReuse
 
 MAX_AGE = timedelta(days=7)
 STATUS_CONTEXT = "release/extended"
-STATUS_CREATOR = "github-actions[bot]"
+EXTENDED_PATH = ".github/workflows/extended.yml"
 SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -120,36 +130,75 @@ def ci_run(api, sha, repo):
     return run
 
 
-def extended_status(api, sha, repo):
-    """The run id behind the newest `release/extended` status of `sha`, which must be a good one."""
+def extended_title(sha, ci):
+    """The run-name extended.yml gives a workflow_run run that tested `sha` for this attempt of this ci run."""
+    return f"extended {sha} ci {ci['id']}.{ci['run_attempt']}"
+
+
+def extended_run(api, sha, repo, ci):
+    """The id of the extended.yml run that tested `sha` for this very ci run and attempt, which must have passed.
+
+    The newest `release/extended` status of `sha` only points at a run; nothing it says is trusted.
+    """
+    if not re.fullmatch(r"\d+", str(ci.get("run_attempt"))):
+        raise NotCopy(f"the ci run {ci['id']} has no run attempt")
     found = [s for s in api.statuses(sha) if s.get("context") == STATUS_CONTEXT]
     if not found:
-        raise NotCopy(f"{sha[:12]} has no {STATUS_CONTEXT} status (run `gh workflow run extended.yml --ref develop -f sha={sha}`)")
+        raise NotCopy(f"{sha[:12]} has no {STATUS_CONTEXT} status: no extended.yml run of ci run {ci['id']}.{ci['run_attempt']} has finished (it starts when that ci run completes)")
     status = max(found, key=lambda s: (s["created_at"], s["id"]))
     if status.get("state") != "success":
         raise NotCopy(f"the {STATUS_CONTEXT} status of {sha[:12]} is {status.get('state')}")
-    creator = (status.get("creator") or {}).get("login")
-    if creator != STATUS_CREATOR:
-        raise NotCopy(f"the {STATUS_CONTEXT} status of {sha[:12]} was created by {creator}, not {STATUS_CREATOR}")
     target = re.fullmatch(rf"https://github\.com/{re.escape(repo)}/actions/runs/(\d+)", status.get("target_url") or "")
     if not target:
         raise NotCopy(f"the {STATUS_CONTEXT} status of {sha[:12]} targets '{status.get('target_url')}', not a run of {repo}")
     run = api.run(target.group(1))
-    if not str(run.get("path", "")).endswith("/extended.yml") or (run.get("repository") or {}).get("full_name") != repo:
-        raise NotCopy(f"the {STATUS_CONTEXT} status of {sha[:12]} targets run {target.group(1)}, which is not an extended.yml run of {repo}")
+    where = f"the {STATUS_CONTEXT} status of {sha[:12]} targets run {target.group(1)}, which"
+    if str(run.get("id")) != target.group(1) or (run.get("repository") or {}).get("full_name") != repo:
+        raise NotCopy(f"{where} is not a run of {repo}")
+    if run.get("path") != EXTENDED_PATH:
+        raise NotCopy(f"{where} is not an extended.yml run ({run.get('path')})")
+    if run.get("event") != "workflow_run":
+        raise NotCopy(f"{where} was started by {run.get('event')}, not by the completion of the ci run")
+    want = extended_title(sha, ci)
+    if run.get("display_title") != want:
+        raise NotCopy(f"{where} is titled '{run.get('display_title')}', not '{want}': it tested another commit or another attempt of the ci run")
     if run.get("status") != "completed" or run.get("conclusion") != "success":
         raise NotCopy(f"extended run {run.get('id')} is {run.get('status')}/{run.get('conclusion')}, not a success")
     return run["id"]
 
 
+def built_by(cand, ci):
+    """NotCopy unless every image of the candidate was built, and so tested in full, by `ci` itself."""
+    want = str(ci["id"])
+    seen = {str(cand.get("built_run") or cand["run_id"])}
+    for target in (cand.get("targets") or {}).values():
+        for slot in (target.get("archs") or {}).values():
+            seen.add(str(slot.get("built_run", cand["run_id"])))
+    if seen != {want}:
+        raise NotCopy(f"the images were built by run(s) {', '.join(sorted(seen))}, not by ci run {want}: a run that reused images skipped checks on them, so main rebuilds")
+
+
+def oldest_created(cand):
+    """The oldest `created` of the candidate's images, or NotCopy."""
+    try:
+        return min(
+            reuse_plan.parse_time(slot.get("created"), f"{name} {arch} created")
+            for name, target in cand["targets"].items() for arch, slot in target["archs"].items()
+        )
+    except NoReuse as exc:
+        raise NotCopy(str(exc)) from None
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise NotCopy(f"cannot read the creation times of the candidate ({type(exc).__name__}: {exc})") from None
+
+
 def decide(api, git, *, mode, repo, inputs_hash, ci_hash, targets, dev_repo, hold, head_sha="", now, max_age=MAX_AGE):
-    """{"mode": "copy"|"rebuild", "reason", and for a copy "sha", "run_id", "extended_run", "built_run", "candidate"}."""
+    """{"mode": "copy"|"rebuild", "reason", and for a copy "sha", "run_id", "extended_run", "built_run", "candidate"}; built_run is run_id."""
     try:
         if str(hold).strip():
             raise NotCopy(f"RELEASE_HOLD is set ({str(hold).strip()[:200]})")
         d, tree = develop_commit(git, mode, head_sha)
         run = ci_run(api, d, repo)
-        extended = extended_status(api, d, repo)
+        extended = extended_run(api, d, repo, run)
         artifact = reuse_plan.candidate_artifact(api.artifacts(run["id"]), run["id"])
         cand = api.candidate(artifact["id"])
         oldest = reuse_plan.check_candidate(cand, run, inputs_hash, targets, dev_repo, now, max_age, ci_hash=ci_hash)
@@ -157,6 +206,7 @@ def decide(api, git, *, mode, repo, inputs_hash, ci_hash, targets, dev_repo, hol
             raise NotCopy(f"the candidate was written for tree {str(cand.get('tree'))[:12]}, this is {tree[:12]}")
         if str(cand.get("run_id")) != str(run["id"]):
             raise NotCopy(f"the candidate says run {cand.get('run_id')} made it, it is an artifact of run {run['id']}")
+        built_by(cand, run)
     except NoReuse as exc:
         return {"mode": "rebuild", "reason": str(exc)}
     except (KeyError, TypeError, AttributeError, ValueError) as exc:
@@ -172,9 +222,20 @@ def decide(api, git, *, mode, repo, inputs_hash, ci_hash, targets, dev_repo, hol
     }
 
 
-def verify_target(cand, name, digests_dir):
-    """Problems (a list of strings) between one target's downloaded digest files and the candidate."""
+def verify_target(cand, name, digests_dir, now=None):
+    """Problems (a list of strings) between one target's downloaded digest files and the candidate.
+
+    With `now`, the candidate's oldest image must also still be within MAX_AGE: the decision it was
+    made under may be days old when a failed leg is re-run.
+    """
     digests_dir = Path(digests_dir)
+    if now is not None:
+        try:
+            oldest = oldest_created(cand)
+        except NotCopy as exc:
+            return [str(exc)]
+        if now - oldest > MAX_AGE:
+            return [f"the oldest image was built {oldest.strftime(reuse_plan.TIME_FORMAT)}, over {MAX_AGE.days} days before {now.strftime(reuse_plan.TIME_FORMAT)}: rebuild instead of copying"]
     found = (cand.get("targets") or {}).get(name)
     if not found:
         return [f"the candidate has no target {name}"]
@@ -197,6 +258,10 @@ def verify_target(cand, name, digests_dir):
         if platform != slot.get("platform"):
             problems.append(f"{name} {arch}: the predicate is for platform {platform}, the candidate says {slot.get('platform')}")
     return problems
+
+
+def _now():
+    return datetime.now(timezone.utc)
 
 
 def main(argv=None):
@@ -224,7 +289,7 @@ def main(argv=None):
             decision = decide(
                 ReleaseApi(args.repo), Git(), mode=args.mode, repo=args.repo, inputs_hash=args.inputs_hash,
                 ci_hash=args.ci_hash, targets=targets, dev_repo=args.dev_repo, hold=args.hold,
-                head_sha=args.head_sha, now=datetime.now(timezone.utc),
+                head_sha=args.head_sha, now=_now(),
             )
             cand = decision.pop("candidate", None)
             if cand is not None:
@@ -235,7 +300,7 @@ def main(argv=None):
                 print(f"FAIL: {decision['reason']}", file=sys.stderr)
                 return 1
         else:
-            problems = verify_target(json.loads(Path(args.candidate).read_text()), args.target, args.digests)
+            problems = verify_target(json.loads(Path(args.candidate).read_text()), args.target, args.digests, _now())
             if problems:
                 print("FAIL: " + "\n  ".join(problems), file=sys.stderr)
                 return 1

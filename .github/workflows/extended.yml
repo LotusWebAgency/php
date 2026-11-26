@@ -71,8 +71,9 @@
 #   summary       every job's result and every results.tsv in one table; fails
 #                 when a required job did. For a full run on the commit's own
 #                 images (plan.outputs.own and .full) it then posts the
-#                 `release/extended` commit status on that commit and re-runs
-#                 the failed ci run of its open promote PR (ci/extended-status.sh).
+#                 `release/extended` commit status on that commit (only when the
+#                 tests ran from the commit's own tree) and re-runs the failed ci
+#                 run of its open promote PR (ci/extended-status.sh).
 #
 # No job here holds Docker Hub credentials. The Docker Hub images it needs --
 # the stock dementev/php-fpm-with-ext builder of the fixture builds and of the
@@ -94,9 +95,14 @@
 # Upload steps run always (a timed-out job keeps its logs) and overwrite, so a
 # re-run of a failed job replaces its artifact instead of conflicting with it.
 name: extended
-# The commit under test in the run list: a workflow_run run is otherwise only
-# "extended" on a title of the ci run.
-run-name: extended ${{ github.event.workflow_run.head_sha || inputs.sha || github.sha }}
+# The commit under test in the run list. A workflow_run run also names the ci
+# run and attempt it tested: `extended <sha> ci <run id>.<attempt>`.
+# ci/release_source.py requires exactly that title, on an event of workflow_run
+# (GitHub runs a workflow_run workflow from the default branch's copy, so only
+# a merge to main can change this line), before main copies a commit's images
+# instead of rebuilding them. Dispatch and push runs get a title without the
+# ci part and can never qualify, whatever they are given as input.
+run-name: ${{ github.event_name == 'workflow_run' && format('extended {0} ci {1}.{2}', github.event.workflow_run.head_sha, github.event.workflow_run.id, github.event.workflow_run.run_attempt) || format('extended {0}', inputs.sha || github.sha) }}
 
 on:
   workflow_dispatch:
