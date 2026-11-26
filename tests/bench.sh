@@ -282,6 +282,7 @@ CANONICAL_INI=(
   "opcache.enable_file_override=0"
   "opcache.huge_code_pages=0"
   "opcache.jit_buffer_size=64M"
+  "opcache.lockfile_path=/dev/shm"
   "realpath_cache_size=4096K"
   "realpath_cache_ttl=600"
   "zend.assertions=-1"
