@@ -17,7 +17,8 @@
 #     leg succeeded, moves the floating dev:<tag>. These are unpublished test
 #     builds, pruned by dev-prune.yml. Nothing reaches Docker Hub: no job here
 #     logs in to it, holds the `release` environment or sets a push output on a
-#     bake build. The PGO corpus is built and published to GHCR. No job uses a
+#     bake build. The PGO corpus is built and published to GHCR, and `fixtures`
+#     builds the application fixtures `extended` needs there. No job uses a
 #     registry build cache (see the CACHE_REGISTRY note in `verify`).
 #   push or dispatch on main, and the weekly cron (default branch only)  `build`
 #     pushes every image by digest, with SBOM + max-mode provenance, to the GHCR
@@ -82,11 +83,11 @@
 #     source can change what is pulled.
 #   - The run's only Docker Hub reads are hub-verify's few anonymous ones.
 #   - The base image is not on Docker Hub: cgr.dev/chainguard/wolfi-base, pinned
-#     by digest in matrix.json and the Dockerfiles. Preflight verifies that
+#     by digest in matrix.json and the Dockerfiles. `plan` verifies that
 #     digest's Chainguard cosign signature before any job builds on it.
 # Registry calls that can still meet a 429/5xx run under ci/retry.sh; builds also
 # retry transient HTTP and apk failures, never deterministic build errors.
-# Trivy's vulnerability DB is refreshed once per run in parallel with preflight,
+# Trivy's vulnerability DB is refreshed once per run in parallel with plan,
 # then shared as an artifact so matrix scans use the same DB without updating it.
 # The CISA KEV catalog is fetched in the same job and shared the same way.
 name: ci
@@ -141,16 +142,15 @@ jobs:
   # Everything tests/preflight.sh already checks without building an image:
   # matrix.gen.hcl drift, PGO tier coverage, bake --print + COMPILER
   # cross-check, shellcheck, the python unit suite, build-all.sh/bake target
-  # list drift. Runs on every push and PR -- cheap, and it is what catches a
-  # stale generated file or a shellcheck regression in seconds rather than
-  # forty minutes into a from-source PGO build.
+  # list drift. Runs on every push and PR, beside `plan` rather than in front of
+  # the build jobs: it catches a stale generated file or a shellcheck regression
+  # in minutes, and what it gates is whatever publishes or moves a floating tag
+  # (dev-manifest, promote) and the PR gate, not the builds themselves.
   preflight:
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
-    outputs:
-      wolfi-index-state: ${{ steps.wolfi.outputs.index-state }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -193,6 +193,60 @@ jobs:
       - name: Install regctl
         run: ./ci/install-regctl.sh
 
+      - name: tests/test-attest.sh
+        run: ./tests/test-attest.sh
+
+  # -------------------------------------------------------------------- plan
+  # Everything the build jobs take as a given, computed once per run, so no leg
+  # does it again and no two legs can disagree:
+  #   - the base image's signature (below), before any job builds on it;
+  #   - the Wolfi index state, the inputs hash and the toolchain epoch;
+  #   - the matrices (scripts/gen_matrix.py, the source tests/preflight.sh's
+  #     bake --print cross-check trusts).
+  # Runs on every event; the jobs that consume a matrix gate on the ref.
+  #
+  # `matrix` is one entry per (PHP version, uarch, arch) with every target of
+  # that version in it (`--github version`, longest first, so the slowest
+  # compiles start first and the short ones fill in behind them); a pull request
+  # gets the bake `pr` subset (php-7_0-fpm, php-8_2-fpm, php-8_5-fpm,
+  # php-8_5-cli-builder and php-8_5-cli, which carries ext-builder, plus the slim
+  # riders php-8_5-fpm-slim, php-8_5-cli-slim and php-7_0-fpm-slim -- oldest and
+  # newest ends, one mid-range version, the heaviest flavor, the extension
+  # build stage and both slim flavors) on amd64 only (`--github pr`, the same
+  # entry shape). The runner follows from an entry's `arch`.
+  # `targets` is the full 78-target list for merge, promote and hub-verify.
+  # `legs` and `arches` are the per-leg matrices `verify` and `build` still read.
+  #
+  # Preflight runs beside this job and gates nothing that builds: only what
+  # publishes or moves a floating tag (dev-manifest, promote) and the PR gate
+  # wait for it.
+  plan:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # Repository variable: a forced toolchain refresh before the week ends,
+      # for example 2026-W48.1 (see ci/toolchain-epoch.sh). Empty: the epoch.
+      TOOLCHAIN_EPOCH_OVERRIDE: ${{ vars.TOOLCHAIN_EPOCH_OVERRIDE }}
+    outputs:
+      wolfi-index-state: ${{ steps.wolfi.outputs.index-state }}
+      inputs-hash: ${{ steps.hash.outputs.inputs-hash }}
+      toolchain-epoch: ${{ steps.epoch.outputs.toolchain-epoch }}
+      cache-week: ${{ steps.epoch.outputs.cache-week }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      targets: ${{ steps.matrix.outputs.targets }}
+      legs: ${{ steps.matrix.outputs.legs }}
+      arches: ${{ steps.matrix.outputs.arches }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@881c63bd87e38389154debd8331404ce7ca8a3ab # v4.1.4
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
       # Every digest the tree pins for the base (matrix.json, the Dockerfile's
       # and the bootstrap Dockerfile's ARG default) must carry Chainguard's
       # keyless signature before any job builds on it. Identity and issuer are
@@ -213,15 +267,11 @@ jobs:
               --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
           done <<<"$refs"
 
-      - name: tests/test-attest.sh
-        run: ./tests/test-attest.sh
-
       # Wolfi's index changes many times a day. Computed here once and handed to
-      # every verify and build leg on both architectures through needs.preflight,
+      # every verify and build leg on both architectures through needs.plan,
       # so the image that was verified is built from the same index as the one
       # that is published. The runtime apk-upgrade layer rebuilds whenever this
-      # value moved. That is not cheap: toolchain-base takes it too, so every
-      # compile stage rebuilds with it.
+      # value moved; the compile stages key on the toolchain epoch instead.
       - name: Pin the Wolfi index state for every build leg
         id: wolfi
         run: |
@@ -230,8 +280,62 @@ jobs:
           [ -n "$WOLFI_INDEX_STATE" ] || { echo "::error::ci/wolfi-index-state.sh printed no index state"; exit 1; }
           echo "index-state=$WOLFI_INDEX_STATE" >> "$GITHUB_OUTPUT"
 
+      - name: Compute the inputs hash
+        id: hash
+        run: |
+          set -euo pipefail
+          hash="$(./scripts/inputs-hash.sh)"
+          [ -n "$hash" ] || { echo "::error::scripts/inputs-hash.sh printed no hash"; exit 1; }
+          echo "inputs-hash=$hash" >> "$GITHUB_OUTPUT"
+
+      # The toolchain layers (and with them the registry cache scope) turn over
+      # weekly; CACHE_WEEK is the epoch without a forced-refresh `.N` suffix.
+      - name: Compute the toolchain epoch
+        id: epoch
+        run: |
+          set -euo pipefail
+          EP="$(./ci/toolchain-epoch.sh)"
+          {
+            echo "toolchain-epoch=$EP"
+            echo "cache-week=${EP%%.*}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Emit the matrices
+        id: matrix
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            matrix="$(python3 scripts/gen_matrix.py --github pr | jq -ce '.include | select(length > 0)')"
+          else
+            matrix="$(python3 scripts/gen_matrix.py --github version | jq -ce '.include | select(length > 0)')"
+          fi
+          targets="$(python3 scripts/gen_matrix.py --github targets | jq -ce '.include | select(length > 0)')"
+          # Transitional, with the jobs that read them: the per-leg shape (a
+          # rider per host) and the arch list. A pull request's legs are the
+          # `pr` subset's targets grouped into legs, as `--github pr` was before
+          # it took the per-version shape.
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            legs="$(python3 -c '
+          import json, sys
+          sys.path.insert(0, "scripts")
+          import gen_matrix as g
+          legs = g.build_legs([t for t in g.build_targets(g.load()) if t["name"] in g.PR_SUBSET])
+          print(json.dumps(legs, separators=(",", ":")))' | jq -ce 'select(length > 0)')"
+          else
+            legs="$(python3 scripts/gen_matrix.py --github build | jq -ce '.include | select(length > 0)')"
+          fi
+          amd64='{"name":"amd64","runner":"ubuntu-26.04","platform":"linux/amd64"}'
+          arm64='{"name":"arm64","runner":"ubuntu-26.04-arm","platform":"linux/arm64"}'
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then arches="[$amd64]"; else arches="[$amd64,$arm64]"; fi
+          {
+            echo "matrix=$matrix"
+            echo "targets=$targets"
+            echo "legs=$legs"
+            echo "arches=$arches"
+          } >> "$GITHUB_OUTPUT"
+
   # ---------------------------------------------------------------- trivy-db
-  # One vulnerability DB refresh per run, parallel with preflight, instead of
+  # One vulnerability DB refresh per run, parallel with plan, instead of
   # every verify/build leg racing the registry and the same dated cache key.
   # The artifact gives every architecture the same DB for its scan and recorded
   # test-result predicate; a failed refresh stops those legs before they build.
@@ -338,43 +442,6 @@ jobs:
           path: ${{ runner.temp }}/php-src-cache
           key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock', 'ci/sources.sh') }}
 
-  # ----------------------------------------------------------- verify-matrix
-  # What the verify job below builds, and on which architectures. A pull
-  # request gets the bake `pr` subset (php-7_0-fpm, php-8_2-fpm, php-8_5-fpm,
-  # php-8_5-cli-builder and php-8_5-cli, which carries ext-builder, plus the slim
-  # riders php-8_5-fpm-slim, php-8_5-cli-slim and php-7_0-fpm-slim -- oldest and
-  # newest ends, one mid-range version, the heaviest flavor, the extension
-  # build stage and both slim flavors) on amd64 only; develop gets every build leg on amd64 and arm64.
-  # Both lists come from scripts/gen_matrix.py, the source tests/preflight.sh's
-  # bake --print cross-check trusts.
-  verify-matrix:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/develop'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    outputs:
-      legs: ${{ steps.matrix.outputs.legs }}
-      arches: ${{ steps.matrix.outputs.arches }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - id: matrix
-        run: |
-          set -euo pipefail
-          amd64='{"name":"amd64","runner":"ubuntu-26.04","platform":"linux/amd64"}'
-          arm64='{"name":"arm64","runner":"ubuntu-26.04-arm","platform":"linux/arm64"}'
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            legs="$(python3 scripts/gen_matrix.py --github pr | jq -ce '.include | select(length > 0)')"
-            echo "legs=$legs" >> "$GITHUB_OUTPUT"
-            echo "arches=[$amd64]" >> "$GITHUB_OUTPUT"
-          else
-            legs="$(python3 scripts/gen_matrix.py --github build | jq -ce '.include | select(length > 0)')"
-            echo "legs=$legs" >> "$GITHUB_OUTPUT"
-            echo "arches=[$amd64,$arm64]" >> "$GITHUB_OUTPUT"
-          fi
-
   # ------------------------------------------------------------------ verify
   # Build the leg's bake targets for this architecture with --load, smoke.sh
   # each image, the ext-builder end-to-end test where the leg carries it, and
@@ -399,14 +466,14 @@ jobs:
   # on develop must only fail the legs that mount it, not skip every other leg
   # (same reasoning as `build`'s condition).
   verify:
-    needs: [preflight, verify-matrix, corpus-merge, trivy-db, sources]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.verify-matrix.result == 'success' && needs.trivy-db.result == 'success' }}
+    needs: [plan, corpus-merge, trivy-db, sources]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.trivy-db.result == 'success' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/develop') }}
     name: verify ${{ matrix.target.name }} ${{ matrix.arch.name }}
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJson(needs.verify-matrix.outputs.legs) }}
-        arch: ${{ fromJson(needs.verify-matrix.outputs.arches) }}
+        target: ${{ fromJson(needs.plan.outputs.legs) }}
+        arch: ${{ fromJson(needs.plan.outputs.arches) }}
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: 180
     permissions:
@@ -416,8 +483,8 @@ jobs:
       # step (and a fork's token is read-only whatever is asked for here).
       packages: write
     env:
-      # The same value in every leg of both jobs, computed once in preflight.
-      WOLFI_INDEX_STATE: ${{ needs.preflight.outputs.wolfi-index-state }}
+      # The same value in every leg of both jobs, computed once in plan.
+      WOLFI_INDEX_STATE: ${{ needs.plan.outputs.wolfi-index-state }}
       TARGET_NAME: ${{ matrix.target.name }}
       TARGET_BAKE: ${{ matrix.target.bake }}
       TARGET_TAG: ${{ matrix.target.tags[0] }}
@@ -767,8 +834,8 @@ jobs:
   # and fails the job; after a failed verify leg the missing ones are only
   # reported. The logic is in ci/dev-manifest.sh.
   dev-manifest:
-    needs: [verify]
-    if: ${{ !cancelled() && needs.verify.result != 'skipped' && github.ref == 'refs/heads/develop' && github.event_name != 'pull_request' }}
+    needs: [verify, preflight]
+    if: ${{ !cancelled() && needs.verify.result != 'skipped' && needs.preflight.result == 'success' && github.ref == 'refs/heads/develop' && github.event_name != 'pull_request' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -792,6 +859,68 @@ jobs:
           VERIFY_RESULT: ${{ needs.verify.result }}
         run: ./ci/dev-manifest.sh
 
+  # ---------------------------------------------------------------- fixtures
+  # develop only. The application fixtures the `extended` suites run against
+  # (tests/apps), built per architecture on a native runner and pushed to
+  # ghcr.io/lotuswebagency/php/apptest, so extended's own fixtures job finds
+  # them current instead of building them after this run. Same script and
+  # registry as extended.yml's fixtures job (ci/extended-fixtures.sh leaves a
+  # fixture whose recipe hash is current alone); no PHP image of this run is
+  # needed, so it starts beside the builds once preflight is green.
+  fixtures:
+    needs: preflight
+    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' }}
+    name: fixtures ${{ matrix.arch.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - { name: amd64, runner: ubuntu-26.04 }
+          - { name: arm64, runner: ubuntu-26.04-arm }
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: write # GHCR: the app fixtures
+    env:
+      APPTEST_FIXTURE_REPO: ghcr.io/lotuswebagency/php/apptest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk
+        run: ci/free-disk.sh
+
+      - name: Route Docker Hub pulls through mirror.gcr.io
+        run: ./ci/hub-mirror.sh
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the missing or stale fixtures
+        run: ci/extended-fixtures.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fixtures-logs-${{ matrix.arch.name }}
+          path: ${{ runner.temp }}/extended-logs
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 5
+
+      # Last, whatever happened above.
+      - name: Disk usage
+        if: always()
+        run: ci/free-disk.sh report
+
   # ----------------------------------------------------------------- pr-gate
   # One aggregate required check instead of branch protection naming every verify
   # matrix leg by hand: GitHub's per-leg check names include the matrix values
@@ -800,49 +929,20 @@ jobs:
   # require (together with preflight, which it also depends on) and it fails
   # unless every leg that ran actually succeeded.
   pr-gate:
-    needs: [preflight, verify]
+    needs: [preflight, plan, verify]
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
-      - name: Require preflight and every verify leg to have succeeded
+      - name: Require preflight, plan and every verify leg to have succeeded
         run: |
           echo "preflight: ${{ needs.preflight.result }}"
+          echo "plan:      ${{ needs.plan.result }}"
           echo "verify:    ${{ needs.verify.result }}"
           [ "${{ needs.preflight.result }}" = "success" ] || { echo "FAIL: preflight did not succeed" >&2; exit 1; }
+          [ "${{ needs.plan.result }}" = "success" ] || { echo "FAIL: plan did not succeed" >&2; exit 1; }
           [ "${{ needs.verify.result }}" = "success" ] || { echo "FAIL: at least one verify leg did not succeed" >&2; exit 1; }
-          echo "ok: preflight and every verify leg succeeded"
-
-  # -------------------------------------------------------- release-matrix
-  # The full 78-target matrix (scripts/gen_matrix.py --github targets) for the
-  # merge job and the promote job, and the 39 build legs of it (--github build:
-  # ext-builder, fpm-slim and cli-slim ride with a host leg) for the build job. main only: develop's
-  # counterpart is verify-matrix.
-  release-matrix:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    outputs:
-      targets: ${{ steps.matrix.outputs.targets }}
-      legs: ${{ steps.matrix.outputs.legs }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # Not a gate (see preflight): a warning on every push to main and cron run
-      # within 14 days of a VEX review-by date.
-      - name: VEX review deadlines
-        run: python3 ci/vex.py check --warn-within 14
-
-      - id: matrix
-        run: |
-          set -euo pipefail
-          targets="$(python3 scripts/gen_matrix.py --github targets | jq -ce '.include | select(length > 0)')"
-          legs="$(python3 scripts/gen_matrix.py --github build | jq -ce '.include | select(length > 0)')"
-          echo "targets=$targets" >> "$GITHUB_OUTPUT"
-          echo "legs=$legs" >> "$GITHUB_OUTPUT"
+          echo "ok: preflight, plan and every verify leg succeeded"
 
   # ------------------------------------------------------------ corpus-matrix
   # The 7 corpus tiers (scripts/pgo_tiers.py list) as a matrix for the corpus and
@@ -881,7 +981,7 @@ jobs:
   # that would be 7 bootstrap PHP compiles plus 7 application corpus builds on a
   # single runner, past any sensible timeout whenever a shared input changes.
   corpus:
-    needs: [preflight, corpus-matrix]
+    needs: [plan, corpus-matrix]
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     name: corpus ${{ matrix.tier.floor }} ${{ matrix.arch.name }}
     strategy:
@@ -1074,12 +1174,12 @@ jobs:
   # Hub credentials here (no `release` environment, no login): every Docker Hub
   # base image is read anonymously, through the mirrors.
   build:
-    needs: [preflight, corpus-merge, release-matrix, trivy-db, sources]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.trivy-db.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    needs: [plan, corpus-merge, trivy-db, sources]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.trivy-db.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJson(needs.release-matrix.outputs.legs) }}
+        target: ${{ fromJson(needs.plan.outputs.legs) }}
         arch:
           - name: amd64
             runner: ubuntu-26.04
@@ -1094,8 +1194,8 @@ jobs:
       contents: read
       packages: write # GHCR: corpus pull, the staged image push
     env:
-      # The same value in every leg of both jobs, computed once in preflight.
-      WOLFI_INDEX_STATE: ${{ needs.preflight.outputs.wolfi-index-state }}
+      # The same value in every leg of both jobs, computed once in plan.
+      WOLFI_INDEX_STATE: ${{ needs.plan.outputs.wolfi-index-state }}
       TARGET_NAME: ${{ matrix.target.name }}
       TARGET_BAKE: ${{ matrix.target.bake }}
       TARGET_TAG: ${{ matrix.target.tags[0] }}
@@ -1511,13 +1611,13 @@ jobs:
   # refresh along with it. Each target's own two-digest check below still fails
   # that target's merge leg; fail-fast: false leaves the others unaffected.
   merge:
-    needs: [build, release-matrix]
+    needs: [build, plan]
     if: ${{ !cancelled() && needs.build.result != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     name: merge ${{ matrix.target.name }}
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJson(needs.release-matrix.outputs.targets) }}
+        target: ${{ fromJson(needs.plan.outputs.targets) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     permissions:
@@ -1730,19 +1830,19 @@ jobs:
   # there; promote-image.sh then checks it like any other (signed, staging
   # tags still on its list), so it publishes nothing unverified.
   #
-  # max-parallel: Docker Hub's write limits are not the pull limit, but fifty
-  # legs uploading at once is a burst for no gain -- four at a time is gentle and
-  # still well inside the run's time.
+  # max-parallel: Docker Hub's write limits are not the pull limit, but 78
+  # legs uploading at once is a burst for no gain -- sixteen at a time stays
+  # under the org's 20 concurrent jobs and well inside the run's time.
   promote:
-    needs: [merge, release-matrix]
-    if: ${{ !cancelled() && needs.merge.result != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    needs: [merge, plan, preflight]
+    if: ${{ !cancelled() && needs.merge.result != 'skipped' && needs.preflight.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     name: promote ${{ matrix.target.name }}
     environment: release
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 16
       matrix:
-        target: ${{ fromJson(needs.release-matrix.outputs.targets) }}
+        target: ${{ fromJson(needs.plan.outputs.targets) }}
     runs-on: ubuntu-26.04
     # ci/retry.sh waits 30+60+120+300+600+900 = 2010 s, plus up to 50% jitter,
     # before it gives up on one call: ~34-50 min for a single throttled registry
@@ -1811,14 +1911,14 @@ jobs:
   # signatures and attestations are there; this proves cosign finds and accepts
   # them there, for a handful of anonymous reads instead of hundreds.
   hub-verify:
-    needs: [promote, release-matrix]
+    needs: [promote, plan]
     if: ${{ !cancelled() && needs.promote.result != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
     env:
-      TARGETS: ${{ needs.release-matrix.outputs.targets }}
+      TARGETS: ${{ needs.plan.outputs.targets }}
       # Exactly the identity the merge job verifies against and SECURITY.md documents.
       COSIGN_VERIFY_FLAGS: >-
         --certificate-oidc-issuer https://token.actions.githubusercontent.com
