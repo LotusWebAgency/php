@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Join the per-arch develop images into manifest lists and move the floating tags.
 #
-#   VERIFY_RESULT=<needs.verify.result> ci/dev-manifest.sh
+#   IMAGES_RESULT=<needs.images.result> ci/dev-manifest.sh
 #
 # For every target of `scripts/gen_matrix.py --github targets`, <tag> being what
 # follows the colon of its tags[0] and <sha> the first 12 chars of GITHUB_SHA:
 #
-#   dev:<tag>-<sha>-amd64, dev:<tag>-<sha>-arm64   pushed by the verify legs: a plain
-#                                                   image, or a per-arch index (platform
-#                                                   manifest plus attestations)
+#   dev:<tag>-<sha>-amd64, dev:<tag>-<sha>-arm64   tagged by the images entries (ci/dev-tag.sh):
+#                                                   a per-arch index (platform manifest
+#                                                   plus attestations), or a plain image
 #   dev:<tag>-<sha>                                 created here, when both exist
 #   dev:<tag>                                       moved onto the list here, only
-#                                                   when every verify leg succeeded
+#                                                   when every images entry succeeded
 #
 # Both passes run DEV_MANIFEST_JOBS (default 8) targets at a time: every call is a
 # few registry round trips, and 78 targets one after another took 11 minutes.
@@ -24,9 +24,8 @@
 # split, which is why the prune keeps every sha a floating tag points at.
 # The floating tags are only moved when GITHUB_SHA is still the head of develop,
 # so a re-run of an older run cannot move them backwards.
-# A missing arch fails the job when verify says it succeeded (a bug: the push is
-# the last step of every leg); otherwise it is only reported, verify already
-# failed the run.
+# A missing arch fails the job when images says it succeeded (a bug: every passed
+# target is tagged); otherwise it is only reported, images already failed the run.
 # Only a "not found" answer from the registry counts as a missing image; any
 # other error is retried and then fails the job.
 set -euo pipefail
@@ -34,7 +33,7 @@ set -euo pipefail
 repo="${DEV_REPO:-ghcr.io/lotuswebagency/php/dev}"
 sha="${GITHUB_SHA:?GITHUB_SHA is not set}"
 sha="${sha:0:12}"
-verify_result="${VERIFY_RESULT:?VERIFY_RESULT is not set}"
+images_result="${IMAGES_RESULT:?IMAGES_RESULT is not set}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 # Rows of $GITHUB_STEP_SUMMARY come from the EXIT trap, so a failure half way
@@ -152,10 +151,10 @@ if [ "$pass1" -ne 0 ]; then
   exit 1
 fi
 
-if [ "$verify_result" != success ]; then
-  echo "verify result is '$verify_result': floating tags not moved ($missing of ${#tags[@]} targets lack an arch, the rest got their ${sha} list)"
+if [ "$images_result" != success ]; then
+  echo "images result is '$images_result': floating tags not moved ($missing of ${#tags[@]} targets lack an arch, the rest got their ${sha} list)"
 elif [ "$missing" -gt 0 ]; then
-  echo "verify succeeded but $missing target(s) lack an arch: floating tags not moved"
+  echo "images succeeded but $missing target(s) lack an arch: floating tags not moved"
 else
   head_sha="$(develop_head)"
   if [ "$head_sha" != "$GITHUB_SHA" ]; then
@@ -176,7 +175,7 @@ else
   fi
 fi
 
-if [ "$verify_result" = success ] && [ "$missing" -gt 0 ]; then
-  echo "FAIL: verify reported success but $missing target(s) are missing an arch" >&2
+if [ "$images_result" = success ] && [ "$missing" -gt 0 ]; then
+  echo "FAIL: images reported success but $missing target(s) are missing an arch" >&2
   exit 1
 fi
