@@ -40,7 +40,9 @@
 # this tree's inputs-hash or EXTENDED_CANDIDATE_RUN (a ci run id) fails that
 # image's row, never falls back to a tag. The revision label such an image must
 # carry is the candidate's built_sha, not --sha: a reuse run's images were built
-# by an earlier commit. dev:<tag>-<sha12> is mutable (a
+# by an earlier commit. A tag pull has no candidate to say so, and accepts a label
+# that differs from --sha only when it is an ancestor with identical build inputs
+# (ci/verify-revision.sh). dev:<tag>-<sha12> is mutable (a
 # develop rebuild of the same commit re-points it), so without a candidate (a
 # dispatch, an extended-run push) the tag pull stands, and what it tests is not
 # what main copies: ci/release_source.py only copies an image set that an
@@ -432,8 +434,11 @@ pull_one() {
     printf 'INPUTS-MISMATCH\t%s\t%s\t\n' "label '${hash:-none}', this tree $TREE_HASH" "$rev" >"$out"
   elif [ "$kind" = image ] && [ -z "$rev" ]; then
     printf 'NO-REVISION\t%s\t\t\n' "no org.opencontainers.image.revision label" >"$out"
-  elif [ "$kind" = image ] && [ "$LATEST" -eq 0 ] && [ "$rev" != "${PIN_REVISION[$1]:-$SHA_FULL}" ]; then
-    printf 'REVISION-MISMATCH\t%s\t%s\t\n' "label ${rev:0:12}, expected ${PIN_REVISION[$1]:-$SHA_FULL}" "$rev" >"$out"
+  elif [ "$kind" = image ] && [ "$LATEST" -eq 0 ] && [ -n "${PIN_REVISION[$1]:-}" ] && [ "$rev" != "${PIN_REVISION[$1]}" ]; then
+    printf 'REVISION-MISMATCH\t%s\t%s\t\n' "label ${rev:0:12}, expected ${PIN_REVISION[$1]}" "$rev" >"$out"
+  elif [ "$kind" = image ] && [ "$LATEST" -eq 0 ] && [ -z "${PIN_REVISION[$1]:-}" ] \
+      && ! "$ROOT/ci/verify-revision.sh" "$rev" "$SHA_FULL" >"$log" 2>&1; then
+    printf 'REVISION-MISMATCH\t%s\t%s\t\n' "label ${rev:0:12}, expected ${SHA_FULL}: $(tail -1 "$log" | cut -c1-160)" "$rev" >"$out"
   else
     printf 'ok\t%s\t%s\t%s\n' "" "$rev" "$id" >"$out"
   fi
