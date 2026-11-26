@@ -30,8 +30,30 @@
 #     Trivy DB, tags them for this commit and records them in this run's
 #     candidate with their original build run and time. The dispatch input
 #     `rebuild` forces a build.
-#   push or dispatch on main, and the weekly cron (default branch only)
-#     `images` pushes every image by digest, with SBOM + max-mode provenance, to the
+#   pull request from develop to main (the promote PR)  builds nothing: the
+#     `promote-check` job applies the checks a copy release makes (below) to the PR
+#     head and fails the `pr-gate` unless main could publish develop's images by
+#     copy, and unless the merge ref's tree is the head's, so what the PR gate
+#     passes is exactly what the push to main will copy. The repository variable
+#     RELEASE_HOLD, when set, fails it.
+#   push on main, when a merge commit of develop carries develop's tree unchanged
+#     (ci/release_source.py, run by `release-source`; the checks are in its
+#     header: the develop run of the second parent succeeded as a whole, its
+#     `release/extended` status is green, and its release candidate is complete,
+#     for this inputs hash and this ci.yml, at most seven days old)  copies instead
+#     of building: `images`, `corpus`, `corpus-merge` and `sources` are skipped,
+#     and each `merge` leg takes the develop run's digests and test results by
+#     run id, checks them against the candidate, copies the two per-arch indexes
+#     from php/dev to the staging repository by digest (regctl; same digests, same
+#     SBOM and provenance, which name develop's run), rescans both platform
+#     manifests with today's Trivy DB (vulnerability, KEV, package floor), and goes
+#     on as below: list, signatures, attestations, tags. The test-result
+#     predicates keep develop's commit and run (git_sha, git_ref,
+#     workflow_run_url); the list, its signatures and its attestations are main's.
+#     The image's own revision label is develop's commit, the merge commit's
+#     second parent, whose tree is the merge commit's.
+#   push or dispatch on main with any other history, a dispatch, and the weekly cron
+#     (default branch only) always build: `images` pushes every image by digest, with SBOM + max-mode provenance, to the
 #     GHCR staging repository ghcr.io/lotuswebagency/php/release and tests that
 #     digest. `merge` assembles the multi-arch lists, signs every manifest keylessly
 #     with cosign and attaches keyless attestations: the test results `images` recorded
@@ -258,6 +280,8 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       targets: ${{ steps.matrix.outputs.targets }}
       mode: ${{ steps.reuse.outputs.mode }}
+      ci-hash: ${{ steps.hash.outputs.ci-hash }}
+      promote: ${{ steps.promote.outputs.promote }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -307,6 +331,29 @@ jobs:
           hash="$(./scripts/inputs-hash.sh)"
           [ -n "$hash" ] || { echo "::error::scripts/inputs-hash.sh printed no hash"; exit 1; }
           echo "inputs-hash=$hash" >> "$GITHUB_OUTPUT"
+          # How the images are built (bake flags, SBOM, provenance, tests) is not
+          # in the inputs hash; a reuse or a copy only trusts images built under
+          # this very file.
+          ci_hash="$(sha256sum .github/workflows/ci.yml | cut -d' ' -f1)"
+          [[ "$ci_hash" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no sha256 of ci.yml"; exit 1; }
+          echo "ci-hash=$ci_hash" >> "$GITHUB_OUTPUT"
+
+      # The pull request that promotes develop: same repository, head develop,
+      # base main. It builds nothing; `promote-check` stands in for `images`.
+      - name: Recognize the promote pull request
+        id: promote
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          promote=false
+          if [ "$EVENT_NAME" = pull_request ] && [ "$HEAD_REF" = develop ] && [ "$BASE_REF" = main ] && [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ]; then
+            promote=true
+          fi
+          echo "promote=$promote" >> "$GITHUB_OUTPUT"
 
       # The toolchain layers (and with them the registry cache scope) turn over
       # weekly; CACHE_WEEK is the epoch without a forced-refresh `.N` suffix.
@@ -346,13 +393,14 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           REBUILD: ${{ inputs.rebuild }}
           INPUTS_HASH: ${{ steps.hash.outputs.inputs-hash }}
+          CI_HASH: ${{ steps.hash.outputs.ci-hash }}
           TARGETS: ${{ steps.matrix.outputs.targets }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/reuse"
           printf '%s\n' "$TARGETS" > "$RUNNER_TEMP/targets.json"
           decision="$(python3 ci/reuse_plan.py plan --repo "$GITHUB_REPOSITORY" --event "$EVENT_NAME" --ref "$GITHUB_REF" \
-            --rebuild "$REBUILD" --inputs-hash "$INPUTS_HASH" --targets "$RUNNER_TEMP/targets.json" --dev-repo "$DEV_REPO" \
+            --rebuild "$REBUILD" --inputs-hash "$INPUTS_HASH" --ci-hash "$CI_HASH" --targets "$RUNNER_TEMP/targets.json" --dev-repo "$DEV_REPO" \
             --run-id "$GITHUB_RUN_ID" --save-candidate "$RUNNER_TEMP/reuse/release-candidate.json")" || {
             echo "::warning::ci/reuse_plan.py failed; building"
             decision='{"mode":"build","reason":"ci/reuse_plan.py failed"}'
@@ -369,6 +417,85 @@ jobs:
         with:
           name: reuse-candidate
           path: ${{ runner.temp }}/reuse/release-candidate.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  # ---------------------------------------------------------- release-source
+  # Decides, on a push to main, whether the release copies the images develop
+  # already built and tested (`copy`) or builds them (`rebuild`); see the header
+  # of ci/release_source.py for the rules. Runs on every event so that the jobs
+  # that read its output are never skipped by a skipped need; the decision is
+  # made only for a push to main, and anything else leaves the mode empty, which
+  # is a build. Never fails the run on an unreadable GitHub: that is a rebuild,
+  # with the reason in the summary. The verified candidate goes to the `merge`
+  # legs as an artifact, so every leg reads the one file the decision was made on.
+  release-source:
+    needs: plan
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read # develop's ci runs, the extended run and the release-candidate artifact
+      statuses: read # the release/extended commit status
+    outputs:
+      mode: ${{ steps.decide.outputs.mode }}
+      run-id: ${{ steps.decide.outputs.run-id }}
+      sha: ${{ steps.decide.outputs.sha }}
+    steps:
+      # Two commits deep: the merge commit and both its parents, which is all
+      # the tree comparison reads.
+      - name: Checkout
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Decide between copying develop's images and building
+        id: decide
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUTS_HASH: ${{ needs.plan.outputs.inputs-hash }}
+          CI_HASH: ${{ needs.plan.outputs.ci-hash }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          RELEASE_HOLD: ${{ vars.RELEASE_HOLD }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/copy"
+          printf '%s\n' "$TARGETS" > "$RUNNER_TEMP/targets.json"
+          decision="$(python3 ci/release_source.py decide --mode main --repo "$GITHUB_REPOSITORY" --inputs-hash "$INPUTS_HASH" \
+            --ci-hash "$CI_HASH" --targets "$RUNNER_TEMP/targets.json" --dev-repo "$DEV_REPO" --hold "$RELEASE_HOLD" \
+            --save-candidate "$RUNNER_TEMP/copy/release-candidate.json")" || {
+            echo "::warning::ci/release_source.py failed; building"
+            decision='{"mode":"rebuild","reason":"ci/release_source.py failed"}'
+          }
+          mode="$(jq -er .mode <<<"$decision")"
+          reason="$(jq -er .reason <<<"$decision")"
+          if [ "$mode" = copy ]; then
+            run_id="$(jq -er .run_id <<<"$decision")"
+            sha="$(jq -er .sha <<<"$decision")"
+            if [[ ! "$run_id" =~ ^[0-9]+$ ]] || [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              mode=rebuild
+              reason="ci/release_source.py named a run '$run_id' and a commit '$sha'"
+            fi
+          fi
+          echo "mode=$mode: $reason"
+          {
+            echo "mode=$mode"
+            if [ "$mode" = copy ]; then
+              echo "run-id=$run_id"
+              echo "sha=$sha"
+            fi
+          } >> "$GITHUB_OUTPUT"
+          printf '### Release: %s\n\n%s\n' "$mode" "$reason" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the verified candidate
+        if: ${{ steps.decide.outputs.mode == 'copy' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: copy-candidate
+          path: ${{ runner.temp }}/copy/release-candidate.json
           if-no-files-found: error
           retention-days: 1
           overwrite: true
@@ -451,8 +578,8 @@ jobs:
   # the cache can never change what is built. A reuse run builds nothing and
   # skips it.
   sources:
-    needs: plan
-    if: ${{ needs.plan.outputs.mode != 'reuse' }}
+    needs: [plan, release-source]
+    if: ${{ needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && needs.plan.outputs.promote != 'true' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -539,8 +666,8 @@ jobs:
   # A failed test leaves the targets that passed their tags and artifacts (the
   # steps after the test run unless the run was cancelled) and fails the job.
   images:
-    needs: [plan, corpus-merge, trivy-db, sources]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.trivy-db.result == 'success' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') }}
+    needs: [plan, release-source, corpus-merge, trivy-db, sources]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.trivy-db.result == 'success' && needs.release-source.outputs.mode != 'copy' && needs.plan.outputs.promote != 'true' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') }}
     name: images ${{ matrix.job.name }}
     strategy:
       fail-fast: false
@@ -923,7 +1050,8 @@ jobs:
   # inputs hash, and for every target and architecture the index digest, the
   # platform digest, and the build time and build run of the tested image on
   # php/dev (a reuse run keeps the original build's, so `created` is always when
-  # the image was built). Written only when every entry built or reused and
+  # the image was built), and the sha256 of this ci.yml, which a reuse or a copy
+  # only trusts when it is the same. Written only when every entry built or reused and
   # passed (ci/candidate.py refuses a missing target or architecture), so the
   # file existing means the commit's whole matrix is tested and pushed.
   candidate:
@@ -936,6 +1064,7 @@ jobs:
     env:
       TARGETS: ${{ needs.plan.outputs.targets }}
       INPUTS_HASH: ${{ needs.plan.outputs.inputs-hash }}
+      CI_HASH: ${{ needs.plan.outputs.ci-hash }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -952,7 +1081,7 @@ jobs:
           printf '%s\n' "$TARGETS" > "$RUNNER_TEMP/targets.json"
           python3 ci/candidate.py merge --targets "$RUNNER_TEMP/targets.json" --records "$RUNNER_TEMP/records" \
             --sha "$GITHUB_SHA" --tree "$(git rev-parse 'HEAD^{tree}')" --inputs-hash "$INPUTS_HASH" \
-            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --out release-candidate.json
+            --ci-hash "$CI_HASH" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --out release-candidate.json
           jq . release-candidate.json
 
       - name: Upload release-candidate.json
@@ -1070,20 +1199,85 @@ jobs:
   # require (together with preflight, which it also depends on) and it fails
   # unless every entry that ran actually succeeded.
   pr-gate:
-    needs: [preflight, plan, images]
+    needs: [preflight, plan, images, promote-check]
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    env:
+      PREFLIGHT: ${{ needs.preflight.result }}
+      PLAN: ${{ needs.plan.result }}
+      IMAGES: ${{ needs.images.result }}
+      PROMOTE_CHECK: ${{ needs.promote-check.result }}
+      PROMOTE: ${{ needs.plan.outputs.promote }}
     steps:
-      - name: Require preflight, plan and every images entry to have succeeded
+      - name: Require preflight, plan and the images (or, for the promote PR, the promote check)
         run: |
-          echo "preflight: ${{ needs.preflight.result }}"
-          echo "plan:      ${{ needs.plan.result }}"
-          echo "images:    ${{ needs.images.result }}"
-          [ "${{ needs.preflight.result }}" = "success" ] || { echo "FAIL: preflight did not succeed" >&2; exit 1; }
-          [ "${{ needs.plan.result }}" = "success" ] || { echo "FAIL: plan did not succeed" >&2; exit 1; }
-          [ "${{ needs.images.result }}" = "success" ] || { echo "FAIL: at least one images entry did not succeed" >&2; exit 1; }
-          echo "ok: preflight, plan and every images entry succeeded"
+          echo "preflight:      $PREFLIGHT"
+          echo "plan:           $PLAN"
+          echo "images:         $IMAGES"
+          echo "promote-check:  $PROMOTE_CHECK"
+          [ "$PREFLIGHT" = "success" ] || { echo "FAIL: preflight did not succeed" >&2; exit 1; }
+          [ "$PLAN" = "success" ] || { echo "FAIL: plan did not succeed" >&2; exit 1; }
+          if [ "$PROMOTE" = "true" ]; then
+            [ "$PROMOTE_CHECK" = "success" ] || { echo "FAIL: promote-check did not succeed" >&2; exit 1; }
+            echo "ok: preflight, plan and promote-check succeeded"
+          else
+            [ "$IMAGES" = "success" ] || { echo "FAIL: at least one images entry did not succeed" >&2; exit 1; }
+            echo "ok: preflight, plan and every images entry succeeded"
+          fi
+
+  # ----------------------------------------------------------- promote-check
+  # The pull request from develop to main builds nothing. It passes only when the
+  # push to main that merging it makes would copy develop's images
+  # (ci/release_source.py, the same checks `release-source` runs on that push): the
+  # merge ref has two parents, its second is the PR head and its tree is the head's,
+  # the head's develop ci run succeeded as a whole, its `release/extended` status is
+  # green and from github-actions[bot], its release candidate is complete, for this
+  # inputs hash and this ci.yml and at most seven days old, and the repository
+  # variable RELEASE_HOLD is empty. Anything else fails here, with the reason, not on
+  # main: either wait for develop (or run extended.yml on the head: `gh workflow run
+  # extended.yml --ref develop -f sha=<head>`), or push a change to develop. Unlike
+  # `release-source`, a failed decision or an unreadable GitHub fails the check.
+  promote-check:
+    needs: plan
+    if: ${{ needs.plan.outputs.promote == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
+    steps:
+      # The merge ref (the default for a pull request), two commits deep.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Check that main could copy develop's images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUTS_HASH: ${{ needs.plan.outputs.inputs-hash }}
+          CI_HASH: ${{ needs.plan.outputs.ci-hash }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          RELEASE_HOLD: ${{ vars.RELEASE_HOLD }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$TARGETS" > "$RUNNER_TEMP/targets.json"
+          rc=0
+          decision="$(python3 ci/release_source.py decide --mode promote --repo "$GITHUB_REPOSITORY" --inputs-hash "$INPUTS_HASH" \
+            --ci-hash "$CI_HASH" --targets "$RUNNER_TEMP/targets.json" --dev-repo "$DEV_REPO" --hold "$RELEASE_HOLD" \
+            --head-sha "$HEAD_SHA" --save-candidate "$RUNNER_TEMP/release-candidate.json" --gate)" || rc=$?
+          reason="$(jq -r '.reason // empty' <<<"$decision" 2>/dev/null || true)"
+          [ -n "$reason" ] || reason="ci/release_source.py made no decision (rc $rc)"
+          if [ "$rc" -ne 0 ]; then
+            printf '### Promote check: failed\n\n%s\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+            echo "FAIL: $reason" >&2
+            exit 1
+          fi
+          printf '### Promote check: main will copy\n\n%s\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+          echo "ok: $reason"
 
   # ------------------------------------------------------------ corpus-matrix
   # The 7 corpus tiers (scripts/pgo_tiers.py list) as a matrix for the corpus and
@@ -1121,8 +1315,8 @@ jobs:
   # that would be 7 bootstrap PHP compiles plus 7 application corpus builds on a
   # single runner, past any sensible timeout whenever a shared input changes.
   corpus:
-    needs: [plan, corpus-matrix]
-    if: needs.plan.outputs.mode != 'reuse' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    needs: [plan, corpus-matrix, release-source]
+    if: needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
     name: corpus ${{ matrix.tier.floor }} ${{ matrix.arch.name }}
     strategy:
       fail-fast: false
@@ -1251,8 +1445,8 @@ jobs:
   # `php<tier>` ref (what every target's `contexts.corpus` names) and
   # `php<tier>-<inputs-hash>` (what images actually mounts).
   corpus-merge:
-    needs: [plan, corpus, corpus-matrix]
-    if: ${{ !cancelled() && needs.plan.outputs.mode != 'reuse' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
+    needs: [plan, corpus, corpus-matrix, release-source]
+    if: ${{ !cancelled() && needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
     name: corpus-merge ${{ matrix.tier.floor }}
     strategy:
       fail-fast: false
@@ -1326,8 +1520,10 @@ jobs:
   # refresh along with it. Each target's own two-digest check below still fails
   # that target's merge leg; fail-fast: false leaves the others unaffected.
   merge:
-    needs: [images, plan]
-    if: ${{ !cancelled() && needs.images.result != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    needs: [images, plan, release-source, trivy-db]
+    # A build leaves `images` run; a copy leaves it skipped, and needs the Trivy DB
+    # for the rescan.
+    if: ${{ !cancelled() && ((needs.release-source.outputs.mode == 'copy' && needs.trivy-db.result == 'success') || needs.images.result != 'skipped') && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     name: merge ${{ matrix.target.name }}
     strategy:
       fail-fast: false
@@ -1339,7 +1535,9 @@ jobs:
       contents: read # checkout, to read matrix.json for the image name
       packages: write # GHCR: the staged list, its tags, signatures and attestations
       id-token: write # cosign keyless OIDC
+      actions: read # a copy: the digests and test results of the develop run
     env:
+      SOURCE_RUN: ${{ needs.release-source.outputs.run-id }}
       TARGET_NAME: ${{ matrix.target.name }}
       TARGET_PHP: ${{ matrix.target.php }}
       TARGET_RELEASE: ${{ matrix.target.release }}
@@ -1373,16 +1571,68 @@ jobs:
       # a hyphen ("X.Y-cli" matches "X.Y-cli-builder"). The files inside are named
       # exactly "amd64"/"arm64", so both calls can share `path: digests`.
       - name: Download amd64 digest
+        if: ${{ needs.release-source.outputs.mode != 'copy' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: digest-${{ matrix.target.name }}-amd64
           path: digests
 
       - name: Download arm64 digest
+        if: ${{ needs.release-source.outputs.mode != 'copy' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: digest-${{ matrix.target.name }}-arm64
           path: digests
+
+      # A copy: the same two artifacts, from the develop run whose images are being
+      # released (the run the candidate names; ten days of retention there).
+      - name: Download amd64 digest (develop run)
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: digest-${{ matrix.target.name }}-amd64
+          path: digests
+          run-id: ${{ needs.release-source.outputs.run-id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Download arm64 digest (develop run)
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: digest-${{ matrix.target.name }}-arm64
+          path: digests
+          run-id: ${{ needs.release-source.outputs.run-id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Download the verified candidate
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: copy-candidate
+          path: copy
+
+      - name: Install Trivy
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.SETUP_TRIVY_VERSION }}
+          cache: true
+
+      - name: Download this run's Trivy DB
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: trivy-db
+          path: ${{ github.workspace }}/.cache/trivy
+
+      - name: Download this run's KEV catalog
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: kev-catalog
+          path: ${{ github.workspace }}/.cache/kev
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@881c63bd87e38389154debd8331404ce7ca8a3ab # v4.1.4
@@ -1391,6 +1641,32 @@ jobs:
 
       - name: Install regctl
         run: ./ci/install-regctl.sh
+
+      # A copy: what was downloaded must be exactly what the candidate records for
+      # this target (index and platform digests, both architectures, nothing else),
+      # then the two per-arch indexes move from php/dev to the staging repository by
+      # digest -- the same bytes, with the SBOM and provenance develop's build made --
+      # and both platform manifests are scanned again with today's DB, because
+      # develop passed them with the DB of its day. A finding fails this leg before
+      # anything is attested, listed or tagged.
+      - name: Copy the tested images from php/dev and scan them again
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        run: |
+          set -euo pipefail
+          python3 ci/release_source.py target --candidate copy/release-candidate.json --target "$TARGET_NAME" --digests digests
+          refs=()
+          for arch in amd64 arm64; do
+            index="$(cat "digests/$arch")"
+            platform="$(jq -er '.platforms[0].image_digest' "digests/$arch.test-result.json")"
+            [[ "$index" =~ ^sha256:[0-9a-f]{64}$ && "$platform" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FAIL: $arch digests are malformed" >&2; exit 1; }
+            ./ci/retry.sh regctl image copy "${DEV_REPO}@${index}" "${STAGE_IMAGE}@${index}"
+            got="$(./ci/retry.sh regctl manifest head "${STAGE_IMAGE}@${index}")"
+            [ "$got" = "$index" ] || { echo "FAIL: ${STAGE_IMAGE}@${index} resolves to ${got:-nothing} after the copy" >&2; exit 1; }
+            echo "ok: $arch index $index copied from $DEV_REPO"
+            refs+=("${STAGE_IMAGE}@${platform}")
+          done
+          ./ci/rescan-image.sh "${refs[@]}"
+          printf '%s: copied from develop run %s, rescanned\n' "$TARGET_NAME" "$SOURCE_RUN" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Assemble multi-arch manifest and verify the full-version tag
         run: |

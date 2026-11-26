@@ -391,16 +391,15 @@ cosign verify \
 ```
 
 Use cosign 3. Signatures and attestations are created in the GHCR staging repository
-`ghcr.io/lotuswebagency/php/release` and copied to Docker Hub with the image, digest for digest,
-before any tag moves, so they verify on `lotuswebagency/php`. The test-result and OpenVEX attestation
-commands are in the
-[README](https://github.com/LotusWebAgency/php#verifying-images).
+`ghcr.io/lotuswebagency/php/release` and copied to Docker Hub digest for digest
+before any tag moves, so they verify there. A release matching `develop`'s inputs copies
+those tested images; their provenance names the `develop` commit. Verify commands: [README](https://github.com/LotusWebAgency/php#verifying-images).
 
 CI verifies the base image's Chainguard cosign signature before building on it, and every image
 carries `org.opencontainers.image.base.name` and `org.opencontainers.image.base.digest` labels.
 
 Pull requests and `develop` pushes build and test without publishing to Docker Hub. A Trivy gate
-fails the build on any fixable CRITICAL or HIGH finding and reports none for any flavor. Two
+fails the build on any fixable CRITICAL or HIGH finding. Two
 findings are accepted, both without an upstream fix: CVE-2026-93687 (braces 3.0.3 in `cli-builder`'s
 semantic-release, HIGH) and CVE-2026-15534 (perl 5.44.0 in `ext-builder`, MEDIUM); see
 [Accepted findings](https://github.com/LotusWebAgency/php/blob/main/SECURITY.md#accepted-findings).

@@ -3,7 +3,7 @@
 
     python3 ci/candidate.py entry --entry ENTRY.json --out TEST_OUT_DIR --created TS --built-run ID --repository REPO > record.json
     python3 ci/candidate.py merge --targets TARGETS.json --records DIR --sha SHA --tree TREE \
-        --inputs-hash HASH --run-id ID --run-attempt N --out release-candidate.json
+        --inputs-hash HASH --ci-hash HASH --run-id ID --run-attempt N --out release-candidate.json
 
 `entry` runs in each `images` job after ci/test-images.sh --mode digest: for every target
 in passed.txt it records the per-arch index digest the build pushed (the file the merge job
@@ -14,13 +14,17 @@ per-entry records and refuses anything but a complete set, every target of
 on disk always means "this commit's whole matrix was built and passed".
 
 release-candidate.json:
-    {"schema": 1, "sha", "tree", "inputs_hash", "run_id", "run_attempt", "built_run", "repository",
+    {"schema": 1, "sha", "tree", "inputs_hash", "ci_hash", "run_id", "run_attempt", "built_run", "repository",
      "targets": {"<name>": {"tag": "8.5-fpm", "archs": {"amd64": {"index", "platform", "created", "built_run"}, ...}}}}
 
 `sha`, `tree`, `run_id` and `run_attempt` name the run that tested and tagged these images (its
 digest-<target>-<arch> artifacts and test-result predicates). `created` and `built_run` name the
 build: they are this run's when it built the images, and the original build's when ci/reuse_plan.py
 found the same inputs hash and the images were only re-tested (`built_run` != `run_id`).
+`ci_hash` is the sha256 of .github/workflows/ci.yml the images were built under (a reuse run only
+reuses images whose `ci_hash` equals its own, so it is still the build's): how the images are built
+(bake flags, SBOM, provenance) is not part of the inputs hash, and ci/release_source.py copies a
+candidate to the release repository only when it equals main's.
 """
 import argparse
 import json
@@ -33,6 +37,7 @@ ARCHES = ("amd64", "arm64")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 RUN_ID = re.compile(r"^\d+$")
+SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class CandidateError(ValueError):
@@ -79,8 +84,10 @@ def entry_record(entry, out_dir, created, repository, built_run):
     }
 
 
-def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, arches=ARCHES):
+def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, arches=ARCHES, *, ci_hash):
     """release-candidate.json from the per-entry records, or CandidateError listing every gap."""
+    if not SHA256.match(str(ci_hash)):
+        raise CandidateError(f"ci hash '{ci_hash}' is not a sha256 hex digest")
     wanted_tags = {t["name"]: t["tags"][0].split(":", 1)[1] for t in wanted}
     problems = []
     repositories = {r["repository"] for r in records}
@@ -128,6 +135,7 @@ def merge_records(records, wanted, sha, tree, inputs_hash, run_id, run_attempt, 
         "sha": sha,
         "tree": tree,
         "inputs_hash": inputs_hash,
+        "ci_hash": ci_hash,
         "run_id": str(run_id),
         "run_attempt": str(run_attempt),
         "built_run": built_runs.pop(),
@@ -158,6 +166,7 @@ def main(argv=None):
     m.add_argument("--sha", required=True)
     m.add_argument("--tree", required=True)
     m.add_argument("--inputs-hash", required=True)
+    m.add_argument("--ci-hash", required=True, help="sha256 of .github/workflows/ci.yml")
     m.add_argument("--run-id", required=True)
     m.add_argument("--run-attempt", required=True)
     m.add_argument("--out", required=True)
@@ -170,7 +179,7 @@ def main(argv=None):
         else:
             wanted = json.loads(Path(args.targets).read_text())
             doc = merge_records(load_records(args.records), wanted, args.sha, args.tree, args.inputs_hash,
-                                args.run_id, args.run_attempt)
+                                args.run_id, args.run_attempt, ci_hash=args.ci_hash)
             Path(args.out).write_text(json.dumps(doc, indent=2) + "\n")
             print(f"ok: {len(doc['targets'])} targets x {len(ARCHES)} architectures in {args.out}")
     except (CandidateError, KeyError, OSError, json.JSONDecodeError) as exc:

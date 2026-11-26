@@ -29,6 +29,7 @@ FAILED = RUNS["workflow_runs"][1]
 
 REPO = "ghcr.io/lotuswebagency/php/dev"
 HASH = "a" * 64
+CI_HASH = "c" * 64
 NOW = datetime(2026, 11, 26, 12, 0, 0, tzinfo=timezone.utc)
 THIS_RUN = 45800000000
 NAMES = ("php-8_5-fpm", "php-8_5-cli")
@@ -46,7 +47,7 @@ def targets(names=NAMES):
     return [{"name": n, "tags": [f"lotuswebagency/php:8.5-{n.split('-', 2)[2]}"]} for n in names]
 
 
-def make_candidate(run=NEWEST_GREEN, inputs_hash=HASH, created=None, names=NAMES, repo=REPO, built_run=None):
+def make_candidate(run=NEWEST_GREEN, inputs_hash=HASH, created=None, names=NAMES, repo=REPO, built_run=None, ci_hash=CI_HASH):
     created = created or stamp(timedelta(hours=3))
     records = [
         {
@@ -56,7 +57,7 @@ def make_candidate(run=NEWEST_GREEN, inputs_hash=HASH, created=None, names=NAMES
         }
         for arch in reuse_plan.ARCHES
     ]
-    return candidate.merge_records(records, targets(names), run["head_sha"], "t" * 40, inputs_hash, run["id"], 1)
+    return candidate.merge_records(records, targets(names), run["head_sha"], "t" * 40, inputs_hash, run["id"], 1, ci_hash=ci_hash)
 
 
 def artifact_doc(run=NEWEST_GREEN, expired=False, name="release-candidate"):
@@ -89,7 +90,7 @@ class FakeApi:
 
 
 def decide(api, **kw):
-    args = dict(event="push", ref="refs/heads/develop", rebuild=False, inputs_hash=HASH, targets=targets(),
+    args = dict(event="push", ref="refs/heads/develop", rebuild=False, inputs_hash=HASH, ci_hash=CI_HASH, targets=targets(),
                 dev_repo=REPO, run_id=THIS_RUN, now=NOW)
     args.update(kw)
     return reuse_plan.decide(api, **args)
@@ -209,6 +210,21 @@ class TestBuild(unittest.TestCase):
         reason = self.build_reason(FakeApi(cand=make_candidate(inputs_hash="b" * 64)))
         self.assertIn("inputs hash changed", reason)
         self.assertIn("bbbbbbbbbbbb -> aaaaaaaaaaaa", reason)
+
+    def test_ci_workflow_changed_since_the_build(self):
+        reason = self.build_reason(FakeApi(cand=make_candidate(ci_hash="d" * 64)))
+        self.assertIn("ci.yml changed", reason)
+        self.assertIn("dddddddddddd -> cccccccccccc", reason)
+
+    def test_candidate_without_a_ci_hash(self):
+        cand = make_candidate()
+        del cand["ci_hash"]
+        self.assertIn("ci.yml changed", self.build_reason(FakeApi(cand=cand)))
+
+    def test_a_build_run_that_is_not_a_number(self):
+        cand = make_candidate()
+        cand["targets"]["php-8_5-fpm"]["archs"]["amd64"]["built_run"] = "1\nPATH=/x"
+        self.assertIn("build run", self.build_reason(FakeApi(cand=cand)))
 
     def test_missing_target(self):
         reason = self.build_reason(FakeApi(cand=make_candidate(names=("php-8_5-fpm",))))
@@ -348,6 +364,18 @@ class TestEntryDigests(unittest.TestCase):
         with self.assertRaisesRegex(reuse_plan.ReuseError, "no php-8_5-cli-builder arm64"):
             reuse_plan.entry_digests(make_candidate(), entry(names=NAMES + ("php-8_5-cli-builder",)))
 
+    def test_a_build_run_or_time_that_could_inject_into_the_environment(self):
+        cand = make_candidate(built_run="99")
+        for arch in reuse_plan.ARCHES:
+            for t in cand["targets"].values():
+                t["archs"][arch]["built_run"] = "99\nPATH=/x"
+        with self.assertRaisesRegex(reuse_plan.ReuseError, "not a run id"):
+            reuse_plan.entry_digests(cand, entry())
+        cand = make_candidate(built_run="99")
+        cand["targets"]["php-8_5-fpm"]["archs"]["arm64"]["created"] = "2026-11-23T08:00:00Z\nX=1"
+        with self.assertRaisesRegex(reuse_plan.ReuseError, "not a UTC timestamp"):
+            reuse_plan.entry_digests(cand, entry())
+
     def test_one_entry_never_spans_two_builds(self):
         cand = make_candidate(built_run="99")
         cand["targets"]["php-8_5-cli"]["archs"]["arm64"]["built_run"] = "98"
@@ -365,7 +393,7 @@ class TestCli(unittest.TestCase):
     def plan_args(self, tmp, **over):
         (tmp / "targets.json").write_text(json.dumps(targets()))
         args = {"--repo": "LotusWebAgency/php", "--event": "push", "--ref": "refs/heads/develop", "--rebuild": "",
-                "--inputs-hash": HASH, "--targets": str(tmp / "targets.json"), "--dev-repo": REPO,
+                "--inputs-hash": HASH, "--ci-hash": CI_HASH, "--targets": str(tmp / "targets.json"), "--dev-repo": REPO,
                 "--run-id": str(THIS_RUN), "--save-candidate": str(tmp / "candidate.json")}
         args.update(over)
         return [x for kv in args.items() for x in kv]

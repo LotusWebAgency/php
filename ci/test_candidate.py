@@ -15,6 +15,7 @@ import candidate  # noqa: E402
 REPO = "ghcr.io/lotuswebagency/php/dev"
 CREATED = "2026-11-26T10:00:00Z"
 BUILT = "123"
+CI_HASH = "e" * 64
 
 
 def sha(char):
@@ -52,7 +53,7 @@ def targets(names=("php-8_5-fpm", "php-8_5-cli")):
 
 def merge(records, wanted=None, **kw):
     return candidate.merge_records(
-        records, wanted if wanted is not None else targets(), "c" * 40, "d" * 40, "hash", 123, 2, **kw
+        records, wanted if wanted is not None else targets(), "c" * 40, "d" * 40, "hash", 123, 2, ci_hash=kw.pop("ci_hash", CI_HASH), **kw
     )
 
 
@@ -110,7 +111,7 @@ class TestMerge(unittest.TestCase):
     def test_complete_set(self):
         doc = merge([record("amd64"), record("arm64", created="2026-11-26T11:00:00Z")])
         self.assertEqual(doc["schema"], 1)
-        self.assertEqual((doc["sha"], doc["tree"], doc["inputs_hash"]), ("c" * 40, "d" * 40, "hash"))
+        self.assertEqual((doc["sha"], doc["tree"], doc["inputs_hash"], doc["ci_hash"]), ("c" * 40, "d" * 40, "hash", CI_HASH))
         self.assertEqual((doc["run_id"], doc["run_attempt"], doc["repository"]), ("123", "2", REPO))
         self.assertEqual(doc["built_run"], BUILT)
         self.assertEqual(list(doc["targets"]), ["php-8_5-fpm", "php-8_5-cli"])
@@ -118,6 +119,11 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(fpm["tag"], "8.5-fpm")
         self.assertEqual(fpm["archs"]["amd64"], {"index": sha("1"), "platform": sha("2"), "created": CREATED, "built_run": BUILT})
         self.assertEqual(fpm["archs"]["arm64"]["created"], "2026-11-26T11:00:00Z")
+
+    def test_ci_hash_must_be_a_sha256(self):
+        for bad in ("", "abc", "E" * 64, None):
+            with self.assertRaises(candidate.CandidateError):
+                merge([record("amd64"), record("arm64")], ci_hash=bad)
 
     def test_missing_arch_target_lists_every_gap(self):
         with self.assertRaises(candidate.CandidateError) as cm:
@@ -201,10 +207,12 @@ class TestCli(unittest.TestCase):
             (tmp / "targets.json").write_text(json.dumps(targets()))
             dest = tmp / "release-candidate.json"
             rc, stdout, _ = self.run_cli("merge", "--targets", str(tmp / "targets.json"), "--records", str(records),
-                                         "--sha", "c" * 40, "--tree", "d" * 40, "--inputs-hash", "h",
+                                         "--sha", "c" * 40, "--tree", "d" * 40, "--inputs-hash", "h", "--ci-hash", CI_HASH,
                                          "--run-id", "9", "--run-attempt", "1", "--out", str(dest))
             self.assertEqual(rc, 0, stdout)
-            self.assertEqual(sorted(json.loads(dest.read_text())["targets"]["php-8_5-cli"]["archs"]), ["amd64", "arm64"])
+            doc = json.loads(dest.read_text())
+            self.assertEqual(sorted(doc["targets"]["php-8_5-cli"]["archs"]), ["amd64", "arm64"])
+            self.assertEqual(doc["ci_hash"], CI_HASH)
 
     def test_merge_of_an_incomplete_set_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,7 +221,7 @@ class TestCli(unittest.TestCase):
             (tmp / "records").mkdir()
             (tmp / "records" / "a.json").write_text(json.dumps(record("amd64")))
             rc, _, err = self.run_cli("merge", "--targets", str(tmp / "targets.json"), "--records", str(tmp / "records"),
-                                      "--sha", "c" * 40, "--tree", "d" * 40, "--inputs-hash", "h",
+                                      "--sha", "c" * 40, "--tree", "d" * 40, "--inputs-hash", "h", "--ci-hash", CI_HASH,
                                       "--run-id", "9", "--run-attempt", "1", "--out", str(tmp / "out.json"))
             self.assertEqual(rc, 1)
             self.assertIn("is missing", err)

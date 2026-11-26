@@ -63,7 +63,10 @@ only, and every image carries `org.opencontainers.image.base.name` and
 
 Only `main` publishes. A release is built, tested, signed and attested in a GHCR staging repository,
 then each multi-arch list is copied to Docker Hub with its signatures and attestations and tagged
-there. `develop` builds push only unsigned test images, tested by digest, to a GHCR package (`php/dev`). Two jobs use the
+there. A release whose build inputs and `ci.yml` match a `develop` run that passed the full and the
+extended suites at most seven days earlier copies that run's images into the staging repository by
+digest and scans them again, instead of rebuilding; the signatures and the signing identity are the
+release's own, the provenance and test results name the `develop` commit. `develop` builds push only unsigned test images, tested by digest, to a GHCR package (`php/dev`). Two jobs use the
 Docker Hub credentials, the promotion and the description sync. Both run on `main` only, in the
 `release` deployment environment, which holds the Docker Hub secrets and only `main` may deploy to.
 

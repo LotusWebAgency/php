@@ -28,6 +28,11 @@
 #     verify-signed.sh fails an unsigned list or one signed by another key;
 #   - re-running adds duplicates that `| head -n1` reads past;
 #   - a flavor with no applicable VEX statement gets only the test result;
+#   - a release of images the develop repository built (the merge job's copy path):
+#     the downloaded digest files must be the candidate's, the per-arch indexes
+#     copy to the staging repository under the same digests with the platform
+#     manifests in them, and the list made from them is signed, verified,
+#     attested and tagged like any other, its predicates naming develop's commit;
 #   - promotion needs the destination credentials from its own DOCKER_CONFIG,
 #     copies the list, its manifests and every signature and attestation under
 #     the same digests, tags only after that, issues no GET to the destination
@@ -68,6 +73,7 @@ BUILDKIT_IMAGE="${BUILDKIT_IMAGE:-docker.io/moby/buildkit:v0.35.1@sha256:baf6138
 
 PORT="${ATTEST_TEST_PORT:-5077}"
 REPO="localhost:${PORT}/lotuswebagency/php/release"
+DEV_REPO="localhost:${PORT}/lotuswebagency/php/dev"
 RESULT_TYPE="https://github.com/LotusWebAgency/php/attestation/test-result/v1"
 GIT_SHA=0123456789abcdef0123456789abcdef01234567
 SUFFIX="$$"
@@ -123,7 +129,7 @@ docker buildx create --name "$BUILDER" --driver docker-container --driver-opt ne
 
 build_arch() {  # build_arch <content> <arch> -> the pushed index digest
   docker buildx build --builder "$BUILDER" --platform "linux/$2" --provenance=mode=max \
-    --output "type=image,name=$REPO,push=true,push-by-digest=true,name-canonical=true" \
+    --output "type=image,name=${BUILD_REPO:-$REPO},push=true,push-by-digest=true,name-canonical=true" \
     --metadata-file "$WORK/meta-$1-$2.json" "$WORK/ctx-$1" >/dev/null 2>&1 || return 1
   jq -r '."containerimage.digest"' "$WORK/meta-$1-$2.json"
 }
@@ -138,8 +144,8 @@ push_arches() {
   printf 'FROM scratch\nCOPY f /f\n' > "$WORK/ctx-$content/Dockerfile"
   IDX_amd64="$(build_arch "$content" amd64)" || die "building $content for amd64"
   IDX_arm64="$(build_arch "$content" arm64)" || die "building $content for arm64"
-  PLAT_amd64="$("$ROOT/ci/platform-digest.sh" "$REPO@$IDX_amd64" amd64)"
-  PLAT_arm64="$("$ROOT/ci/platform-digest.sh" "$REPO@$IDX_arm64" arm64)"
+  PLAT_amd64="$("$ROOT/ci/platform-digest.sh" "${BUILD_REPO:-$REPO}@$IDX_amd64" amd64)"
+  PLAT_arm64="$("$ROOT/ci/platform-digest.sh" "${BUILD_REPO:-$REPO}@$IDX_arm64" arm64)"
 }
 
 # create_list <run-id> -> sets LIST; merges the per-arch pushes into one list,
@@ -177,7 +183,7 @@ predicate() {  # predicate <arch> <image-digest> <smoke-log> <out>
   python3 ci/result_predicate.py platform \
     --repository docker.io/lotuswebagency/php --php 8.2 --flavor "$FLAVOR" --uarch baseline \
     --arch "$1" --image-digest "$2" --inputs-hash "$(./scripts/inputs-hash.sh)" \
-    --git-sha "$GIT_SHA" --git-ref refs/heads/main \
+    --git-sha "${PREDICATE_SHA:-$GIT_SHA}" --git-ref "${PREDICATE_REF:-refs/heads/main}" \
     --run-url https://github.com/LotusWebAgency/php/actions/runs/1/attempts/1 \
     --smoke-log "$3" --trivy-outcome "${TRIVY_OUTCOME:-success}" --trivy-severity CRITICAL,HIGH \
     --trivy-info "$WORK/trivy-info.json" --out "$4"
@@ -378,6 +384,70 @@ attested "$REPO:fpm" "$RESULT_TYPE" >/dev/null || die "fpm has no test-result at
 ! attested "$REPO:fpm" openvex >/dev/null || die "fpm got an openvex attestation although no statement applies"
 grep -q '^skip: no VEX statement applies to fpm' "$WORK/attest-fpm.log" || die "no skip line for fpm"
 pass "fpm: test-result attested, no openvex attestation (no applicable statement)"
+
+# ------------------------------------------------ 5b. a release that copies develop's images
+# The develop repository is another repository of the same registry (GHCR holds php/dev and
+# php/release side by side). The merge job's copy path moves the two per-arch indexes there ->
+# staging by digest and then does what it always does; the predicates are develop's.
+DEV_SHA=fedcba9876543210fedcba9876543210fedcba98
+FLAVOR=cli
+BUILD_REPO="$DEV_REPO" push_arches copied
+DEV_IDX_amd64="$IDX_amd64" DEV_IDX_arm64="$IDX_arm64" DEV_PLAT_amd64="$PLAT_amd64" DEV_PLAT_arm64="$PLAT_arm64"
+for idx in "$DEV_IDX_amd64" "$DEV_IDX_arm64"; do
+  [ -z "$("$REGCTL" manifest head "$REPO@$idx" 2>/dev/null)" ] || die "the develop index $idx is already in the staging repository"
+done
+mkdir -p "$WORK/results-copied"
+PREDICATE_SHA="$DEV_SHA" PREDICATE_REF=refs/heads/develop predicate amd64 "$DEV_PLAT_amd64" "$WORK/smoke-pass.log" "$WORK/results-copied/amd64.test-result.json"
+PREDICATE_SHA="$DEV_SHA" PREDICATE_REF=refs/heads/develop predicate arm64 "$DEV_PLAT_arm64" "$WORK/smoke-pass.log" "$WORK/results-copied/arm64.test-result.json"
+IDX_amd64="$DEV_IDX_amd64" IDX_arm64="$DEV_IDX_arm64"
+index_files "$WORK/results-copied"
+
+# What `release_source.py target` holds the downloaded digest files to: the candidate's.
+jq -n --arg ia "$DEV_IDX_amd64" --arg ib "$DEV_IDX_arm64" --arg pa "$DEV_PLAT_amd64" --arg pb "$DEV_PLAT_arm64" \
+  '{targets: {"copied-cli": {archs: {amd64: {index: $ia, platform: $pa}, arm64: {index: $ib, platform: $pb}}}}}' >"$WORK/copy-candidate.json"
+python3 ci/release_source.py target --candidate "$WORK/copy-candidate.json" --target copied-cli --digests "$WORK/results-copied" >/dev/null \
+  || die "release_source.py target refused the digests the candidate records"
+mkdir -p "$WORK/results-wrong"
+cp "$WORK/results-copied/"* "$WORK/results-wrong/"
+printf '%s' "$DEV_IDX_arm64" > "$WORK/results-wrong/amd64"
+if python3 ci/release_source.py target --candidate "$WORK/copy-candidate.json" --target copied-cli --digests "$WORK/results-wrong" >/dev/null 2>&1; then
+  die "release_source.py target accepted an index the candidate does not record"
+fi
+pass "release_source.py target accepts the candidate's digests and refuses another index"
+
+# Nothing is attested or listed for an index that was not copied yet.
+if ci/attest-image.sh platforms "$REPO" cli "$WORK/results-copied" >/dev/null 2>&1; then die "attested platforms that are not in the staging repository"; fi
+
+for arch in amd64 arm64; do
+  idx="$(cat "$WORK/results-copied/$arch")"
+  "$REGCTL" image copy "$DEV_REPO@$idx" "$REPO@$idx" >/dev/null || die "copying the $arch index from the develop repository"
+  [ "$("$REGCTL" manifest head "$REPO@$idx")" = "$idx" ] || die "the copied $arch index has another digest in the staging repository"
+done
+[ "$("$ROOT/ci/platform-digest.sh" "$REPO@$DEV_IDX_amd64" amd64)" = "$DEV_PLAT_amd64" ] || die "the copied amd64 index holds another platform manifest"
+[ "$("$ROOT/ci/platform-digest.sh" "$REPO@$DEV_IDX_arm64" arm64)" = "$DEV_PLAT_arm64" ] || die "the copied arm64 index holds another platform manifest"
+! signed "$REPO@$DEV_PLAT_amd64" || die "the develop image was signed before main made its list"
+pass "the per-arch indexes copy from the develop repository to staging by digest, platform manifests included, unsigned"
+
+ci/attest-image.sh platforms "$REPO" cli "$WORK/results-copied" >"$WORK/attest-copied.log" 2>&1 || { cat "$WORK/attest-copied.log"; die "attest-image.sh platforms failed on copied images"; }
+create_list 400
+LIST_COPIED="$LIST"
+"$COSIGN" sign --yes "${sign_flags[@]}" --recursive "$REPO@$LIST_COPIED" >/dev/null 2>&1 || die "cosign sign --recursive on the copied list"
+ci/verify-signed.sh "$REPO" "$LIST_COPIED" >"$WORK/verify-copied.log" 2>&1 || { cat "$WORK/verify-copied.log"; die "verify-signed.sh failed on the list of copied images"; }
+ci/attest-image.sh list "$REPO" "$LIST_COPIED" cli "$WORK/results-copied" >>"$WORK/attest-copied.log" 2>&1 || { cat "$WORK/attest-copied.log"; die "attest-image.sh list failed on copied images"; }
+stage_tags "$LIST_COPIED" copied
+COPIED_LIST_DIGESTS="$(docker buildx imagetools inspect "$REPO@$LIST_COPIED" --raw | jq -r '.manifests[].digest')"
+for d in "$DEV_PLAT_amd64" "$DEV_PLAT_arm64"; do
+  grep -qx "$d" <<<"$COPIED_LIST_DIGESTS" || die "the list of copied images does not hold develop's platform manifest $d"
+done
+copied_result="$(attested "$REPO:copied" "$RESULT_TYPE")"
+jq -e --arg dev "$DEV_SHA" '.predicate.git_sha == $dev and .predicate.git_ref == "refs/heads/develop"
+  and (.predicate.platforms | map(.arch) == ["amd64","arm64"])' <<<"$copied_result" >/dev/null \
+  || { jq . <<<"$copied_result"; die "the copied images' predicate does not name develop's commit and ref"; }
+[ "$("$REGCTL" manifest get "$REPO@$LIST_COPIED" --format raw-body | jq -r '.annotations["com.lotuswebagency.ci.run-id"]')" = 400 ] \
+  || die "the list of copied images does not carry main's run annotation"
+pass "a list of copied images is signed, attested and tagged as any other; its predicates keep develop's commit and ref"
+BUILD_REPO=
+FLAVOR=fpm
 
 # ------------------------------------------------ 6. promotion: staging registry -> "Docker Hub"
 # The cli-builder list was signed in section 3, the merge job's way; promote it
