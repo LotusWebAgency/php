@@ -43,10 +43,12 @@ class TestTargets(unittest.TestCase):
     def test_pr_subset_names_exist(self):
         out = subprocess.run([sys.executable, str(GEN), "--github", "pr"],
                              capture_output=True, text=True, check=True).stdout
-        names = {t["name"] for t in json.loads(out)["include"]}
-        self.assertEqual(names, {"php-7_0-fpm", "php-8_2-fpm", "php-8_5-fpm",
-                                 "php-8_5-cli-builder", "php-8_5-cli"})
-        self.assertEqual(len(names), 5, "ext-builder and the slim flavors ride with a host, so they add no leg")
+        jobs = json.loads(out)["include"]
+        self.assertEqual({j["php"] for j in jobs}, {"7.0", "8.2", "8.5"})
+        self.assertEqual({j["arch"] for j in jobs}, {"amd64"})
+        names = {t["name"] for j in jobs for t in j["targets"]}
+        self.assertEqual(names, gen_matrix.PR_SUBSET)
+        self.assertEqual(len(names), 9)
 
     def run_github(self, which):
         out = subprocess.run([sys.executable, str(GEN), "--github", which],
@@ -143,8 +145,8 @@ class TestTargets(unittest.TestCase):
             gen_matrix.build_legs(only_ext)
 
     def test_pr_subset_covers_every_flavor_incl_the_riders(self):
-        legs = self.run_github("pr")
-        baked = {n for leg in legs for n in leg["bake"].split()}
+        jobs = self.run_github("pr")
+        baked = {n for job in jobs for n in job["bake"].split()}
         self.assertIn("php-8_5-ext-builder", baked)
         self.assertEqual(baked, gen_matrix.PR_SUBSET)
         self.assertEqual({t["flavor"] for t in self.targets if t["name"] in baked},
@@ -152,6 +154,54 @@ class TestTargets(unittest.TestCase):
         self.assertEqual(
             {"php-8_5-fpm-slim", "php-8_5-cli-slim", "php-7_0-fpm-slim"},
             {n for n in baked if n.endswith("-slim")})
+
+    def test_version_jobs_one_per_php_uarch_arch(self):
+        jobs = self.run_github("version")
+        self.assertEqual(len(jobs), 26)
+        self.assertEqual(len(jobs), len(gen_matrix.build_compile_jobs(self.matrix)))
+        self.assertEqual({(j["php"], j["uarch"], j["arch"]) for j in jobs},
+                         {(c["php"], c["uarch"], c["platform"].split("/")[1])
+                          for c in gen_matrix.build_compile_jobs(self.matrix)})
+        self.assertEqual(len({j["name"] for j in jobs}), 26)
+        for job in jobs:
+            self.assertEqual(job["platform"], f"linux/{job['arch']}")
+
+    def test_version_jobs_cover_every_target_once_per_arch(self):
+        jobs = self.run_github("version")
+        for arch in ("amd64", "arm64"):
+            covered = [n for j in jobs if j["arch"] == arch for n in j["bake"].split()]
+            self.assertEqual(sorted(covered), sorted(t["name"] for t in self.targets))
+
+    def test_version_job_shape(self):
+        by_name = {j["name"]: j for j in self.run_github("version")}
+        job = by_name["8.5-v3-arm64"]
+        self.assertEqual(set(job), {"name", "php", "uarch", "era", "arch", "platform",
+                                    "corpus", "bake", "targets", "weight"})
+        self.assertEqual(job["bake"].split(), [t["name"] for t in job["targets"]])
+        self.assertEqual([t["flavor"] for t in job["targets"]], self.matrix["flavors"])
+        fpm = next(t for t in by_name["8.5-amd64"]["targets"] if t["flavor"] == "fpm")
+        self.assertEqual(fpm["tag"], "lotuswebagency/php:8.5-fpm")
+        self.assertIn("lotuswebagency/php:latest", fpm["tags"])
+        self.assertEqual(fpm["tags"][0], fpm["tag"])
+        self.assertEqual(set(fpm), {"name", "flavor", "tag", "tags"})
+        corpus = gen_matrix.corpus_tags(self.matrix)
+        for j in by_name.values():
+            self.assertEqual(j["corpus"], corpus[j["php"]], j["name"])
+
+    def test_version_jobs_sorted_longest_first(self):
+        jobs = self.run_github("version")
+        weights = [j["weight"] for j in jobs]
+        self.assertEqual(weights, sorted(weights, reverse=True))
+        self.assertEqual({j["php"] for j in jobs if j["weight"] == weights[0]}, {"8.4"})
+        by_name = {j["name"]: j for j in jobs}
+        self.assertGreater(by_name["8.5-amd64"]["weight"], by_name["8.5-arm64"]["weight"])
+        self.assertGreater(by_name["7.0-amd64"]["weight"], by_name["8.2-amd64"]["weight"])
+
+    def test_pr_jobs_group_by_version(self):
+        by_name = {j["name"]: j for j in self.run_github("pr")}
+        self.assertEqual(set(by_name), {"7.0-amd64", "8.2-amd64", "8.5-amd64"})
+        self.assertEqual(by_name["7.0-amd64"]["bake"], "php-7_0-fpm php-7_0-fpm-slim")
+        self.assertEqual(len(by_name["8.5-amd64"]["targets"]), 6)
 
     def test_every_version_has_every_flavor_per_uarch(self):
         for ver, spec in self.matrix["versions"].items():
