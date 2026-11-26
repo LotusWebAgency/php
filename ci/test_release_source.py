@@ -73,7 +73,7 @@ def make_candidate(created=None, built_run=CI_RUN, **kw):
     records = [
         {
             "name": f"8.5-{arch}", "php": "8.5", "uarch": "baseline", "arch": arch, "created": created,
-            "built_run": str(built_run), "repository": REPO,
+            "built_run": str(built_run), "built_sha": D, "repository": REPO,
             "targets": {n: {"tag": f"8.5-{n.split('-', 2)[2]}", "index": sha("1" if arch == "amd64" else "2"), "platform": sha("3")} for n in NAMES},
         }
         for arch in reuse_plan.ARCHES

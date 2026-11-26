@@ -15,6 +15,7 @@ import candidate  # noqa: E402
 REPO = "ghcr.io/lotuswebagency/php/dev"
 CREATED = "2026-11-26T10:00:00Z"
 BUILT = "123"
+BUILT_SHA = "b" * 40
 CI_HASH = "e" * 64
 
 
@@ -62,16 +63,16 @@ class TestEntryRecord(unittest.TestCase):
         e = entry()
         with tempfile.TemporaryDirectory() as tmp:
             write_out(tmp, e, ["php-8_5-cli"], {"php-8_5-cli": sha("b")})
-            rec = candidate.entry_record(e, tmp, CREATED, REPO, BUILT)
+            rec = candidate.entry_record(e, tmp, CREATED, REPO, BUILT, BUILT_SHA)
         self.assertEqual(list(rec["targets"]), ["php-8_5-cli"])
         self.assertEqual(rec["targets"]["php-8_5-cli"], {"tag": "8.5-cli", "index": sha("1"), "platform": sha("b")})
         self.assertEqual((rec["arch"], rec["created"], rec["repository"]), ("amd64", CREATED, REPO))
-        self.assertEqual(rec["built_run"], BUILT)
+        self.assertEqual((rec["built_run"], rec["built_sha"]), (BUILT, BUILT_SHA))
 
     def test_no_passed_txt_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(candidate.CandidateError, "did not finish"):
-                candidate.entry_record(entry(), tmp, CREATED, REPO, BUILT)
+                candidate.entry_record(entry(), tmp, CREATED, REPO, BUILT, BUILT_SHA)
 
     def test_unknown_passed_target(self):
         e = entry()
@@ -79,7 +80,7 @@ class TestEntryRecord(unittest.TestCase):
             write_out(tmp, e, ["php-8_5-fpm"])
             (Path(tmp) / "passed.txt").write_text("php-9_9-fpm\n")
             with self.assertRaisesRegex(candidate.CandidateError, "not in entry"):
-                candidate.entry_record(e, tmp, CREATED, REPO, BUILT)
+                candidate.entry_record(e, tmp, CREATED, REPO, BUILT, BUILT_SHA)
 
     def test_malformed_digest(self):
         e = entry()
@@ -87,22 +88,29 @@ class TestEntryRecord(unittest.TestCase):
             write_out(tmp, e, ["php-8_5-fpm"])
             (Path(tmp) / "php-8_5-fpm" / "artifact" / "amd64").write_text("sha256:short")
             with self.assertRaisesRegex(candidate.CandidateError, "not a sha256 digest"):
-                candidate.entry_record(e, tmp, CREATED, REPO, BUILT)
+                candidate.entry_record(e, tmp, CREATED, REPO, BUILT, BUILT_SHA)
 
     def test_bad_timestamp(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(candidate.CandidateError, "not a UTC timestamp"):
-                candidate.entry_record(entry(), tmp, "yesterday", REPO, BUILT)
+                candidate.entry_record(entry(), tmp, "yesterday", REPO, BUILT, BUILT_SHA)
+
+    def test_bad_built_sha(self):
+        for bad in ("", "abc", "B" * 40, None):
+            with self.subTest(bad), tempfile.TemporaryDirectory() as tmp:
+                write_out(tmp, entry(), ["php-8_5-fpm", "php-8_5-cli"])
+                with self.assertRaisesRegex(candidate.CandidateError, "built sha"):
+                    candidate.entry_record(entry(), tmp, CREATED, REPO, BUILT, bad)
 
     def test_bad_built_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(candidate.CandidateError, "not a run id"):
-                candidate.entry_record(entry(), tmp, CREATED, REPO, "latest")
+                candidate.entry_record(entry(), tmp, CREATED, REPO, "latest", BUILT_SHA)
 
 
-def record(arch, created=CREATED, names=("php-8_5-fpm", "php-8_5-cli"), repo=REPO, built_run=BUILT):
+def record(arch, created=CREATED, names=("php-8_5-fpm", "php-8_5-cli"), repo=REPO, built_run=BUILT, built_sha=BUILT_SHA):
     return {
-        "name": f"8.5-{arch}", "php": "8.5", "uarch": "baseline", "arch": arch, "created": created, "built_run": built_run, "repository": repo,
+        "name": f"8.5-{arch}", "php": "8.5", "uarch": "baseline", "arch": arch, "created": created, "built_run": built_run, "built_sha": built_sha, "repository": repo,
         "targets": {n: {"tag": f"8.5-{n.split('-', 2)[2]}", "index": sha("1"), "platform": sha("2")} for n in names},
     }
 
@@ -113,11 +121,11 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(doc["schema"], 1)
         self.assertEqual((doc["sha"], doc["tree"], doc["inputs_hash"], doc["ci_hash"]), ("c" * 40, "d" * 40, "hash", CI_HASH))
         self.assertEqual((doc["run_id"], doc["run_attempt"], doc["repository"]), ("123", "2", REPO))
-        self.assertEqual(doc["built_run"], BUILT)
+        self.assertEqual((doc["built_run"], doc["built_sha"]), (BUILT, BUILT_SHA))
         self.assertEqual(list(doc["targets"]), ["php-8_5-fpm", "php-8_5-cli"])
         fpm = doc["targets"]["php-8_5-fpm"]
         self.assertEqual(fpm["tag"], "8.5-fpm")
-        self.assertEqual(fpm["archs"]["amd64"], {"index": sha("1"), "platform": sha("2"), "created": CREATED, "built_run": BUILT})
+        self.assertEqual(fpm["archs"]["amd64"], {"index": sha("1"), "platform": sha("2"), "created": CREATED, "built_run": BUILT, "built_sha": BUILT_SHA})
         self.assertEqual(fpm["archs"]["arm64"]["created"], "2026-11-26T11:00:00Z")
 
     def test_ci_hash_must_be_a_sha256(self):
@@ -162,13 +170,24 @@ class TestMerge(unittest.TestCase):
 
     def test_reused_images_keep_their_build_run_and_time(self):
         old = "2026-11-23T08:00:00Z"
-        doc = merge([record("amd64", created=old, built_run="77"), record("arm64", created=old, built_run="77")])
-        self.assertEqual((doc["run_id"], doc["built_run"]), ("123", "77"))
+        older = "a" * 40
+        doc = merge([record("amd64", created=old, built_run="77", built_sha=older), record("arm64", created=old, built_run="77", built_sha=older)])
+        self.assertEqual((doc["run_id"], doc["sha"], doc["built_run"], doc["built_sha"]), ("123", "c" * 40, "77", older))
         self.assertEqual(doc["targets"]["php-8_5-cli"]["archs"]["arm64"]["created"], old)
 
     def test_two_build_runs_are_refused(self):
         with self.assertRaisesRegex(candidate.CandidateError, "more than one build run"):
             merge([record("amd64"), record("arm64", built_run="77")])
+
+    def test_two_build_commits_are_refused(self):
+        with self.assertRaisesRegex(candidate.CandidateError, "more than one build commit"):
+            merge([record("amd64"), record("arm64", built_sha="a" * 40)])
+
+    def test_record_without_built_sha(self):
+        rec = record("amd64")
+        del rec["built_sha"]
+        with self.assertRaisesRegex(candidate.CandidateError, "built_sha"):
+            merge([rec, record("arm64")])
 
     def test_record_without_built_run(self):
         rec = record("amd64")
@@ -200,7 +219,7 @@ class TestCli(unittest.TestCase):
                 write_out(out, e, ["php-8_5-fpm", "php-8_5-cli"])
                 (tmp / f"entry-{arch}.json").write_text(json.dumps(e))
                 rc, stdout, _ = self.run_cli("entry", "--entry", str(tmp / f"entry-{arch}.json"), "--out", str(out),
-                                             "--created", CREATED, "--built-run", BUILT, "--repository", REPO)
+                                             "--created", CREATED, "--built-run", BUILT, "--built-sha", BUILT_SHA, "--repository", REPO)
                 self.assertEqual(rc, 0)
                 (records / arch).mkdir()
                 (records / arch / "record.json").write_text(stdout)
@@ -231,7 +250,7 @@ class TestCli(unittest.TestCase):
 class TestPin(unittest.TestCase):
     def cand(self):
         records = [
-            {"name": f"8.5-{a}", "php": "8.5", "uarch": "baseline", "arch": a, "created": CREATED, "built_run": BUILT, "repository": REPO,
+            {"name": f"8.5-{a}", "php": "8.5", "uarch": "baseline", "arch": a, "created": CREATED, "built_run": BUILT, "built_sha": BUILT_SHA, "repository": REPO,
              "targets": {n: {"tag": f"8.5-{n.split('-', 2)[2]}", "index": sha("1" if a == "amd64" else "2"), "platform": sha("3" if a == "amd64" else "4")}
                          for n in ("php-8_5-fpm", "php-8_5-cli")}}
             for a in ("amd64", "arm64")
@@ -244,8 +263,8 @@ class TestPin(unittest.TestCase):
         return candidate.pin(cand or self.cand(), name, arch, args["sha"], args["inputs_hash"], args["run_id"])
 
     def test_the_index_ref_and_platform_of_one_arch(self):
-        self.assertEqual(self.pin(), (f"{REPO}@{sha('1')}", sha("3")))
-        self.assertEqual(self.pin(arch="arm64"), (f"{REPO}@{sha('2')}", sha("4")))
+        self.assertEqual(self.pin(), (f"{REPO}@{sha('1')}", sha("3"), BUILT_SHA))
+        self.assertEqual(self.pin(arch="arm64"), (f"{REPO}@{sha('2')}", sha("4"), BUILT_SHA))
 
     def test_a_candidate_of_another_commit_hash_or_run_is_refused(self):
         for kw, text in (({"sha": "e" * 40}, "commit"), ({"inputs_hash": "other"}, "inputs hash"), ({"run_id": "999"}, "ci run 123")):
@@ -263,6 +282,17 @@ class TestPin(unittest.TestCase):
         with self.assertRaisesRegex(candidate.CandidateError, "no php-8_5-fpm arm64"):
             self.pin(cand, arch="arm64")
 
+    def test_the_build_commit_of_a_candidate_without_one_is_its_own_when_it_built_the_images(self):
+        cand = self.cand()
+        for found in cand["targets"].values():
+            for slot in found["archs"].values():
+                del slot["built_sha"]
+        del cand["built_sha"]
+        self.assertEqual(self.pin(cand)[2], "c" * 40)
+        cand["targets"]["php-8_5-fpm"]["archs"]["amd64"]["built_run"] = "77"
+        with self.assertRaisesRegex(candidate.CandidateError, "no build commit"):
+            self.pin(cand)
+
     def test_a_malformed_digest_is_refused(self):
         cand = self.cand()
         cand["targets"]["php-8_5-fpm"]["archs"]["amd64"]["index"] = "sha256:short"
@@ -278,7 +308,7 @@ class TestPin(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 self.assertEqual(candidate.main(["pin", *base, "--target", "php-8_5-cli", "--arch", "amd64"]), 0)
                 self.assertEqual(candidate.main(["check", *base]), 0)
-            self.assertIn(f"{REPO}@{sha('1')}\t{sha('3')}", out.getvalue())
+            self.assertIn(f"{REPO}@{sha('1')}\t{sha('3')}\t{BUILT_SHA}", out.getvalue())
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 self.assertEqual(candidate.main(["pin", *base[:-1], "999", "--target", "php-8_5-cli", "--arch", "amd64"]), 1)

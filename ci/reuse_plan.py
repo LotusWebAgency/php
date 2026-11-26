@@ -27,7 +27,7 @@ timeout) is first retried twice, 5 and 15 seconds later, and only a call that st
 
 `entry` runs in each `images` job of a reuse run: the {"<target>": "<repo>@sha256:<index>"} map
 ci/test-images.sh --mode digest takes, for this entry's targets and architecture, from the
-candidate `plan` verified, and the `created` and `built_run` the new candidate record keeps.
+candidate `plan` verified, and the `created`, `built_run` and `built_sha` the new candidate record keeps.
 """
 import argparse
 import io
@@ -39,6 +39,8 @@ import time
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import candidate
 
 ARCHES = ("amd64", "arm64")
 ARTIFACT = "release-candidate"
@@ -138,6 +140,9 @@ def check_candidate(cand, run, inputs_hash, targets, dev_repo, now, max_age, *, 
             if not RUN_ID.match(str(slot.get("built_run", cand["run_id"]))):
                 problems.append(f"{name} {arch} has build run '{slot.get('built_run')}'")
                 continue
+            if not candidate.slot_built_sha(cand, slot):
+                problems.append(f"{name} {arch} records no build commit")
+                continue
             created.append(parse_time(slot.get("created"), f"{name} {arch} created"))
     if problems:
         raise NoReuse("candidate does not cover this matrix: " + "; ".join(problems[:6]) + ("; ..." if len(problems) > 6 else ""))
@@ -233,9 +238,9 @@ class GhApi:
 
 
 def entry_digests(cand, entry):
-    """For one images entry of a reuse run: the digest map, the oldest created and the build run."""
+    """For one images entry of a reuse run: the digest map, the oldest created, the build run and the build commit."""
     arch = entry["arch"]
-    digests, created, built = {}, [], set()
+    digests, created, built, built_shas = {}, [], set(), set()
     for target in entry["targets"]:
         name = target["name"]
         slot = ((cand.get("targets") or {}).get(name) or {}).get("archs", {}).get(arch)
@@ -244,15 +249,18 @@ def entry_digests(cand, entry):
         digests[name] = f"{cand['repository']}@{slot['index']}"
         created.append(slot["created"])
         built.add(str(slot.get("built_run") or cand.get("built_run") or cand["run_id"]))
-    if len(built) != 1:
-        raise ReuseError(f"entry {entry['name']} spans more than one build run: {sorted(built)}")
-    built_run = built.pop()
-    # Both go to $GITHUB_ENV: nothing but a run id and a UTC timestamp may reach it.
+        built_shas.add(candidate.slot_built_sha(cand, slot))
+    if len(built) != 1 or len(built_shas) != 1:
+        raise ReuseError(f"entry {entry['name']} spans more than one build run or commit: runs {sorted(built)}, commits {sorted(map(str, built_shas))}")
+    built_run, built_sha = built.pop(), built_shas.pop()
+    # All of these go to $GITHUB_ENV: nothing but a run id, a commit sha and a UTC timestamp may reach it.
     if not RUN_ID.match(built_run):
         raise ReuseError(f"build run '{built_run}' is not a run id")
+    if not built_sha:
+        raise ReuseError(f"entry {entry['name']} records no build commit")
     for stamp in created:
         parse_time_strict(stamp)
-    return {"digests": digests, "created": min(created), "built_run": built_run}
+    return {"digests": digests, "created": min(created), "built_run": built_run, "built_sha": built_sha}
 
 
 def main(argv=None):

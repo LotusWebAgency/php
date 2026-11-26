@@ -47,12 +47,12 @@ def targets(names=NAMES):
     return [{"name": n, "tags": [f"lotuswebagency/php:8.5-{n.split('-', 2)[2]}"]} for n in names]
 
 
-def make_candidate(run=NEWEST_GREEN, inputs_hash=HASH, created=None, names=NAMES, repo=REPO, built_run=None, ci_hash=CI_HASH):
+def make_candidate(run=NEWEST_GREEN, inputs_hash=HASH, created=None, names=NAMES, repo=REPO, built_run=None, ci_hash=CI_HASH, built_sha="9" * 40):
     created = created or stamp(timedelta(hours=3))
     records = [
         {
             "name": f"8.5-{arch}", "php": "8.5", "uarch": "baseline", "arch": arch, "created": created,
-            "built_run": built_run or str(run["id"]), "repository": repo,
+            "built_run": built_run or str(run["id"]), "built_sha": run["head_sha"] if not built_run else built_sha, "repository": repo,
             "targets": {n: {"tag": f"8.5-{n.split('-', 2)[2]}", "index": sha("1" if arch == "amd64" else "2"), "platform": sha("3")} for n in names},
         }
         for arch in reuse_plan.ARCHES
@@ -220,6 +220,14 @@ class TestBuild(unittest.TestCase):
         cand = make_candidate()
         del cand["ci_hash"]
         self.assertIn("ci.yml changed", self.build_reason(FakeApi(cand=cand)))
+
+    def test_images_of_another_run_without_a_build_commit_are_built_again(self):
+        cand = make_candidate(built_run="99")
+        for t in cand["targets"].values():
+            for slot in t["archs"].values():
+                del slot["built_sha"]
+        del cand["built_sha"]
+        self.assertIn("records no build commit", self.build_reason(FakeApi(cand=cand)))
 
     def test_a_build_run_that_is_not_a_number(self):
         cand = make_candidate()
@@ -406,7 +414,7 @@ class TestEntryDigests(unittest.TestCase):
         cand = make_candidate(created="2026-11-23T08:00:00Z", built_run="99")
         got = reuse_plan.entry_digests(cand, entry("arm64"))
         self.assertEqual(got["digests"], {n: f"{REPO}@{sha('2')}" for n in NAMES})
-        self.assertEqual((got["created"], got["built_run"]), ("2026-11-23T08:00:00Z", "99"))
+        self.assertEqual((got["created"], got["built_run"], got["built_sha"]), ("2026-11-23T08:00:00Z", "99", "9" * 40))
         self.assertEqual(reuse_plan.entry_digests(cand, entry("amd64"))["digests"]["php-8_5-fpm"], f"{REPO}@{sha('1')}")
 
     def test_a_candidate_from_before_built_run_falls_back_to_its_run(self):
@@ -416,6 +424,19 @@ class TestEntryDigests(unittest.TestCase):
                 del slot["built_run"]
         del cand["built_run"]
         self.assertEqual(reuse_plan.entry_digests(cand, entry())["built_run"], str(NEWEST_GREEN["id"]))
+
+    def test_a_candidate_that_built_its_own_images_names_its_commit_as_the_build(self):
+        cand = make_candidate()
+        self.assertEqual(reuse_plan.entry_digests(cand, entry())["built_sha"], NEWEST_GREEN["head_sha"])
+
+    def test_a_build_commit_that_could_inject_into_the_environment(self):
+        cand = make_candidate(built_run="99")
+        for arch in reuse_plan.ARCHES:
+            for t in cand["targets"].values():
+                t["archs"][arch]["built_sha"] = "9" * 40 + "\nPATH=/x"
+        cand["built_sha"] = "9" * 40 + "\nPATH=/x"
+        with self.assertRaisesRegex(reuse_plan.ReuseError, "no build commit"):
+            reuse_plan.entry_digests(cand, entry())
 
     def test_a_missing_target_is_an_error(self):
         with self.assertRaisesRegex(reuse_plan.ReuseError, "no php-8_5-cli-builder arm64"):

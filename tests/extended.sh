@@ -38,7 +38,9 @@
 # platform manifest the candidate recorded. A target the candidate lacks, a
 # digest or platform that differs, or a candidate that is not for this commit,
 # this tree's inputs-hash or EXTENDED_CANDIDATE_RUN (a ci run id) fails that
-# image's row, never falls back to a tag. dev:<tag>-<sha12> is mutable (a
+# image's row, never falls back to a tag. The revision label such an image must
+# carry is the candidate's built_sha, not --sha: a reuse run's images were built
+# by an earlier commit. dev:<tag>-<sha12> is mutable (a
 # develop rebuild of the same commit re-points it), so without a candidate (a
 # dispatch, an extended-run push) the tag pull stands, and what it tests is not
 # what main copies: ci/release_source.py only copies an image set that an
@@ -381,6 +383,7 @@ corpus_floating() { matrix_target_corpus "$1"; }
 PULL_DIR=""
 declare -A PIN_PLATFORM=()  # candidate pull: target name -> the platform digest the candidate recorded
 declare -A PIN_ERROR=()     # candidate pull: target name -> why the candidate cannot supply it
+declare -A PIN_REVISION=()  # candidate pull: target name -> the commit its image was built from (its revision label)
 
 # pull_one <key> <ref> <kind: image|corpus> -> writes $PULL_DIR/<key>.status:
 # status<TAB>detail<TAB>revision<TAB>image id. A status other than ok is a
@@ -429,8 +432,8 @@ pull_one() {
     printf 'INPUTS-MISMATCH\t%s\t%s\t\n' "label '${hash:-none}', this tree $TREE_HASH" "$rev" >"$out"
   elif [ "$kind" = image ] && [ -z "$rev" ]; then
     printf 'NO-REVISION\t%s\t\t\n' "no org.opencontainers.image.revision label" >"$out"
-  elif [ "$kind" = image ] && [ "$LATEST" -eq 0 ] && [ "$rev" != "$SHA_FULL" ]; then
-    printf 'REVISION-MISMATCH\t%s\t%s\t\n' "label ${rev:0:12}, asked for ${SHA_FULL:0:12}" "$rev" >"$out"
+  elif [ "$kind" = image ] && [ "$LATEST" -eq 0 ] && [ "$rev" != "${PIN_REVISION[$1]:-$SHA_FULL}" ]; then
+    printf 'REVISION-MISMATCH\t%s\t%s\t\n' "label ${rev:0:12}, expected ${PIN_REVISION[$1]:-$SHA_FULL}" "$rev" >"$out"
   else
     printf 'ok\t%s\t%s\t%s\n' "" "$rev" "$id" >"$out"
   fi
@@ -509,16 +512,16 @@ cmd_pull() {
   fi
 
   local -a keys=() refs=() canon=() kinds=()
-  local ref pin pin_ref pin_platform
+  local ref pin pin_ref pin_platform pin_revision
   for row in "${SELECTED[@]}"; do
     IFS=$'\t' read -r name flavor php tag <<<"$row"
     ref="$DEV_REPO:${tag#*:}$suffix"
     if [ -n "$CANDIDATE" ]; then
       if pin="$(python3 "$ROOT/ci/candidate.py" pin --candidate "$CANDIDATE" --target "$name" --arch "${PLATFORM#linux/}" \
           --sha "$SHA_FULL" --inputs-hash "$TREE_HASH" ${CANDIDATE_RUN:+--run-id "$CANDIDATE_RUN"} 2>&1)"; then
-        IFS=$'\t' read -r pin_ref pin_platform <<<"$pin"
+        IFS=$'\t' read -r pin_ref pin_platform pin_revision <<<"$pin"
         if [ "${pin_ref%@*}" = "$DEV_REPO" ]; then
-          ref="$pin_ref"; PIN_PLATFORM[$name]="$pin_platform"
+          ref="$pin_ref"; PIN_PLATFORM[$name]="$pin_platform"; PIN_REVISION[$name]="$pin_revision"
         else
           PIN_ERROR[$name]="the candidate's repository ${pin_ref%@*} is not $DEV_REPO"
         fi

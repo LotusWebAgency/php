@@ -813,8 +813,9 @@ jobs:
       # PUSH_REPO empty: a pull request, built with --load. Otherwise where the
       # images are pushed by digest. CREATED is the one build timestamp of the
       # entry's images (the OCI created label) and of its candidate record, and
-      # BUILT_RUN the run that built them; a reuse run takes both from the
-      # candidate it reuses (below).
+      # BUILT_RUN the run, and BUILT_SHA the commit (their revision label), that
+      # built them; a reuse run takes all three from the candidate it reuses
+      # (below).
       - name: Resolve the mode and the build settings
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -831,6 +832,7 @@ jobs:
           {
             echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "BUILT_RUN=$GITHUB_RUN_ID"
+            echo "BUILT_SHA=$GITHUB_SHA"
             if [ "$EVENT_NAME" = pull_request ]; then
               echo "PUSH_REPO="
               echo "CACHE_PUSH=false"
@@ -863,6 +865,7 @@ jobs:
           {
             echo "CREATED=$(jq -er .created <<<"$meta")"
             echo "BUILT_RUN=$(jq -er .built_run <<<"$meta")"
+            echo "BUILT_SHA=$(jq -er .built_sha <<<"$meta")"
           } >> "$GITHUB_ENV"
           cat "$RUNNER_TEMP/digests.json"
           echo "reusing the images run $(jq -er .built_run <<<"$meta") built at $(jq -er .created <<<"$meta")"
@@ -1064,7 +1067,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/candidate"
           python3 ci/candidate.py entry --entry "$RUNNER_TEMP/entry.json" --out "$RUNNER_TEMP/test-out" \
-            --created "$CREATED" --built-run "$BUILT_RUN" --repository "$DEV_REPO" > "$RUNNER_TEMP/candidate/$ENTRY_NAME.json"
+            --created "$CREATED" --built-run "$BUILT_RUN" --built-sha "$BUILT_SHA" --repository "$DEV_REPO" > "$RUNNER_TEMP/candidate/$ENTRY_NAME.json"
 
       - name: Upload the candidate record (develop)
         if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' }}
@@ -1084,11 +1087,12 @@ jobs:
   # --------------------------------------------------------------- candidate
   # develop only. The release candidate of this run: the commit, its tree, the
   # inputs hash, and for every target and architecture the index digest, the
-  # platform digest, and the build time and build run of the tested image on
-  # php/dev (a reuse run keeps the original build's, so `created` is always when
-  # the image was built), and the sha256 of this ci.yml, which a reuse or a copy
-  # only trusts when it is the same. Written only when every entry built or reused and
-  # passed (ci/candidate.py refuses a missing target or architecture), so the
+  # platform digest, and the build time, build run and build commit of the tested
+  # image on php/dev (a reuse run keeps the original build's, so `created` is
+  # always when the image was built and `built_sha` is its revision label), and
+  # the sha256 of this ci.yml, which a reuse or a copy only trusts when it is the
+  # same. Written only when every entry built or reused and passed
+  # (ci/candidate.py refuses a missing target or architecture), so the
   # file existing means the commit's whole matrix is tested and pushed.
   candidate:
     needs: [images, plan]
