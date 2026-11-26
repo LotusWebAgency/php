@@ -73,6 +73,12 @@ exists() {
   exit 255
 }
 
+# imagetools_create <args>: `imagetools create`, retried 3 times (5 s, then 15 s) on a
+# transient registry error. Safe to repeat: the same sources land on the same tag.
+imagetools_create() {
+  RETRY_ATTEMPTS=3 RETRY_DELAYS="5 15" ci/retry.sh docker buildx imagetools create "$@"
+}
+
 # develop_head: the current head of develop on the remote, retried like exists().
 develop_head() {
   local out attempt
@@ -104,7 +110,7 @@ list_target() {
     exists "${base}-amd64" && a=yes
     exists "${base}-arm64" && b=yes
     if [ "$a" = yes ] && [ "$b" = yes ]; then
-      docker buildx imagetools create -t "$base" "${base}-amd64" "${base}-arm64" || exit 255
+      imagetools_create -t "$base" "${base}-amd64" "${base}-arm64" || exit 255
       l=yes
     else
       echo "missing: ${tag} amd64=${a} arm64=${b}"
@@ -116,10 +122,10 @@ list_target() {
 # Pass 2 worker: move one floating tag onto its list.
 float_target() {
   local tag="$1"
-  docker buildx imagetools create -t "${repo}:${tag}" "${repo}:${tag}-${sha}" >"$work/$tag.fl.log" 2>&1 || exit 255
+  imagetools_create -t "${repo}:${tag}" "${repo}:${tag}-${sha}" >"$work/$tag.fl.log" 2>&1 || exit 255
   echo yes >"$work/$tag.fl"
 }
-export -f exists list_target float_target
+export -f exists imagetools_create list_target float_target
 export repo sha work
 
 # run_pool <function> -> 0 when every target succeeded
