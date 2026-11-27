@@ -46,13 +46,60 @@ def have(tool):
     return shutil.which(tool) is not None
 
 
-# clang builds the 8.5 line and gcc the rest; either proves the checker, so a
-# host with only one of them still runs the suite.
-CC = "clang" if have("clang") else "gcc"
+# The checker is proved with the project's real flags, which include GCC 15+
+# options (-fzero-init-padding-bits=all) that an older host gcc rejects. So the
+# host compiler is used only when it accepts those flags; otherwise the files
+# are compiled in the repo's own ext-builder image (the compiler the images are
+# built with), which must already be local: the suite never pulls. readelf and
+# objdump, which only read the result, always run on the host.
+BUILDER_IMAGES = [i for i in [os.environ.get("ELF_HARDENING_IMAGE"),
+                              "lwa-php-local:8.5-ext-builder",
+                              "lotuswebagency/php:8.5-ext-builder"] if i]
 
 
-@unittest.skipUnless(have(CC) and all(have(t) for t in ("readelf", "objdump")),
-                     "needs a C compiler (clang or gcc), readelf and objdump")
+def compiler_cmd(compiler, workdir):
+    """The command prefix that runs `compiler` on files under `workdir`."""
+    host, image = compiler
+    if image is None:
+        return [host]
+    # Runs as the invoking user, so the test's own cleanup can remove its output.
+    # /usr/bin/gcc, not /usr/local/bin/gcc: that one is Wolfi's openssf wrapper,
+    # which re-adds its hardening after the flags given here and so defeats the
+    # one-property-off controls; the images' own builds use the plain compiler.
+    return ["docker", "run", "--rm", "--pull", "never", "--network", "none",
+            "--user", f"{os.getuid()}:{os.getgid()}", "-v", f"{workdir}:{workdir}",
+            "-w", str(workdir), "--entrypoint", f"/usr/bin/{host}", image]
+
+
+def accepts_project_flags(compiler):
+    with tempfile.TemporaryDirectory() as t:
+        t = Path(t)
+        t.chmod(0o777)
+        (t / "p.c").write_text("int p(void) { return 0; }\n")
+        flags = sh("bash", str(CFLAGS), "baseline", env={**os.environ, "COMPILER": compiler[0]}).stdout.split()
+        return sh(*compiler_cmd(compiler, t), "-shared", *flags,
+                  "-o", str(t / "p.so"), str(t / "p.c")).returncode == 0
+
+
+def pick_compiler():
+    # clang builds the 8.5 line and gcc the rest; either proves the checker.
+    for host in ("clang", "gcc"):
+        if have(host) and accepts_project_flags((host, None)):
+            return (host, None), ""
+    if have("docker"):
+        for image in BUILDER_IMAGES:
+            if sh("docker", "image", "inspect", image).returncode == 0 \
+                    and accepts_project_flags(("gcc", image)):
+                return ("gcc", image), ""
+    return None, ("no host C compiler accepts the project's flags (GCC 15+ options) and no "
+                  "usable ext-builder image is local; build or pull one, or set ELF_HARDENING_IMAGE")
+
+
+COMPILER, COMPILER_SKIP = pick_compiler()
+
+
+@unittest.skipUnless(all(have(t) for t in ("readelf", "objdump")), "needs readelf and objdump")
+@unittest.skipIf(COMPILER is None, COMPILER_SKIP)
 class TestElfHardening(unittest.TestCase):
     """The negative control for tests/assert-elf-hardening.sh.
 
@@ -68,12 +115,14 @@ class TestElfHardening(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.d = Path(self.tmp.name)
+        self.d.chmod(0o777)
+        self.cc = compiler_cmd(COMPILER, self.d)
         (self.d / "probe.c").write_text(SRC)
         (self.d / "exe.c").write_text(SRC_EXE)
         (self.d / "sink.c").write_text(SINK)
         (self.d / "tiny.c").write_text(SRC_TINY)
         # cflags.sh guards its gcc-only flags on $COMPILER, so name the one in use.
-        env = {**os.environ, "COMPILER": CC}
+        env = {**os.environ, "COMPILER": COMPILER[0]}
         self.cflags = sh("bash", str(CFLAGS), "baseline", env=env).stdout.split()
         self.ldflags = sh("bash", str(LDFLAGS)).stdout.split()
 
@@ -81,14 +130,14 @@ class TestElfHardening(unittest.TestCase):
         self.tmp.cleanup()
 
     def build(self, out, cflags, ldflags, src="probe.c"):
-        r = sh(CC, "-shared", *cflags, *ldflags, "-o", str(self.d / out), str(self.d / src))
+        r = sh(*self.cc, "-shared", *cflags, *ldflags, "-o", str(self.d / out), str(self.d / src))
         self.assertEqual(r.returncode, 0, r.stderr)
         return self.d / out
 
     def build_exe(self, out, cflags, ldflags):
         # -rdynamic: php exports the Zend API to its extensions, and the --main
         # landing-pad check reads those exports.
-        r = sh(CC, *cflags, *ldflags, "-rdynamic", "-o", str(self.d / out),
+        r = sh(*self.cc, *cflags, *ldflags, "-rdynamic", "-o", str(self.d / out),
                str(self.d / "exe.c"), str(self.d / "sink.c"))
         self.assertEqual(r.returncode, 0, r.stderr)
         return self.d / out
@@ -111,8 +160,9 @@ class TestElfHardening(unittest.TestCase):
 
     def test_rejects_partial_relro(self):
         # -z relro without -z now: GNU_RELRO is present but BIND_NOW is not, so
-        # the GOT stays writable. Looks hardened at a glance.
-        so = self.build("partial.so", self.cflags, ["-Wl,-z,relro"])
+        # the GOT stays writable. Looks hardened at a glance. -z lazy because
+        # the ext-builder toolchain defaults to -z now.
+        so = self.build("partial.so", self.cflags, ["-Wl,-z,relro", "-Wl,-z,lazy"])
         self.rejects(self.check(so), "partial RELRO", "BIND_NOW")
 
     def test_rejects_an_executable_stack(self):

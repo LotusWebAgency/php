@@ -1,3 +1,7 @@
+Fixes: php_openssl_setup_crypto() keeps the SSL_CTX options in an int, sign-extending SSL_OP_ALL; with OpenSSL 4 every TLS client stream sends an ECH GREASE extension and the handshake aborts under the FIPS provider.
+Origin: php-src pull 24304 commit d27328ca66
+Upstream: open: php-src PR #24304 (base PHP-8.4) is not merged; Wolfi carries the same change
+Drop-when: a release of this version carries the fix, or the version stops building against OpenSSL 4
 Source: wolfi-dev/os php-8.2/openssl-ssl-ctx-options-uint64.patch (php-8.5/ for the 8.5 backport), regenerated against php-8.2 with exact offsets.
 
 From d27328ca666e4577a5c00298eb822381b4b6d038 Mon Sep 17 00:00:00 2001

@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 # Join the per-arch develop images into manifest lists and move the floating tags.
 #
-#   VERIFY_RESULT=<needs.verify.result> ci/dev-manifest.sh
+#   IMAGES_RESULT=<needs.images.result> ci/dev-manifest.sh
 #
 # For every target of `scripts/gen_matrix.py --github targets`, <tag> being what
 # follows the colon of its tags[0] and <sha> the first 12 chars of GITHUB_SHA:
 #
-#   dev:<tag>-<sha>-amd64, dev:<tag>-<sha>-arm64   pushed by the verify legs
+#   dev:<tag>-<sha>-amd64, dev:<tag>-<sha>-arm64   tagged by the images entries (ci/dev-tag.sh):
+#                                                   a per-arch index (platform manifest
+#                                                   plus attestations), or a plain image
 #   dev:<tag>-<sha>                                 created here, when both exist
 #   dev:<tag>                                       moved onto the list here, only
-#                                                   when every verify leg succeeded
+#                                                   when every images entry succeeded
 #
+# Both passes run DEV_MANIFEST_JOBS (default 8) targets at a time: every call is a
+# few registry round trips, and 78 targets one after another took 11 minutes.
+# Each target logs to its own file, printed in target order afterwards. A worker
+# that cannot go on exits 255, which makes xargs start no further target.
 # Two passes: all lists first, floating tags only once every list is known to
 # exist, so a failure while the lists are built never touches a floating tag. The
 # window in which the floating set can span two commits is narrowed to pass 2
@@ -18,9 +24,8 @@
 # split, which is why the prune keeps every sha a floating tag points at.
 # The floating tags are only moved when GITHUB_SHA is still the head of develop,
 # so a re-run of an older run cannot move them backwards.
-# A missing arch fails the job when verify says it succeeded (a bug: the push is
-# the last step of every leg); otherwise it is only reported, verify already
-# failed the run.
+# A missing arch fails the job when images says it succeeded (a bug: every passed
+# target is tagged); otherwise it is only reported, images already failed the run.
 # Only a "not found" answer from the registry counts as a missing image; any
 # other error is retried and then fails the job.
 set -euo pipefail
@@ -28,7 +33,7 @@ set -euo pipefail
 repo="${DEV_REPO:-ghcr.io/lotuswebagency/php/dev}"
 sha="${GITHUB_SHA:?GITHUB_SHA is not set}"
 sha="${sha:0:12}"
-verify_result="${VERIFY_RESULT:?VERIFY_RESULT is not set}"
+images_result="${IMAGES_RESULT:?IMAGES_RESULT is not set}"
 summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
 # Rows of $GITHUB_STEP_SUMMARY come from the EXIT trap, so a failure half way
@@ -65,7 +70,13 @@ exists() {
     [ "$attempt" -eq 3 ] || sleep $((attempt * 5))
   done
   echo "FAIL: cannot tell whether $1 exists" >&2
-  exit 1
+  exit 255
+}
+
+# imagetools_create <args>: `imagetools create`, retried 3 times (5 s, then 15 s) on a
+# transient registry error. Safe to repeat: the same sources land on the same tag.
+imagetools_create() {
+  RETRY_ATTEMPTS=3 RETRY_DELAYS="5 15" ci/retry.sh docker buildx imagetools create "$@"
 }
 
 # develop_head: the current head of develop on the remote, retried like exists().
@@ -86,48 +97,91 @@ develop_head() {
 mapfile -t tags < <(python3 scripts/gen_matrix.py --github targets | jq -r '.include[].tags[0] | split(":")[1]')
 [ "${#tags[@]}" -gt 0 ] || { echo "FAIL: no targets from gen_matrix.py" >&2; exit 1; }
 
+jobs="${DEV_MANIFEST_JOBS:-8}"
+work="$(mktemp -d)"
+trap 'write_summary; rm -rf "$work"' EXIT
+
+# Pass 1 worker: probe both arches of one target and build its list.
+# Result in $work/<tag>.res: "<amd64> <arm64> <list>"; the log is $work/<tag>.log.
+list_target() {
+  local tag="$1" base a=no b=no l=no
+  base="${repo}:${tag}-${sha}"
+  {
+    exists "${base}-amd64" && a=yes
+    exists "${base}-arm64" && b=yes
+    if [ "$a" = yes ] && [ "$b" = yes ]; then
+      imagetools_create -t "$base" "${base}-amd64" "${base}-arm64" || exit 255
+      l=yes
+    else
+      echo "missing: ${tag} amd64=${a} arm64=${b}"
+    fi
+  } >"$work/$tag.log" 2>&1
+  echo "$a $b $l" >"$work/$tag.res"
+}
+
+# Pass 2 worker: move one floating tag onto its list.
+float_target() {
+  local tag="$1"
+  imagetools_create -t "${repo}:${tag}" "${repo}:${tag}-${sha}" >"$work/$tag.fl.log" 2>&1 || exit 255
+  echo yes >"$work/$tag.fl"
+}
+export -f exists imagetools_create list_target float_target
+export repo sha work
+
+# run_pool <function> -> 0 when every target succeeded
+run_pool() {
+  printf '%s\0' "${tags[@]}" | xargs -0 -n1 -P"$jobs" bash -c "$1 \"\$0\""
+}
+
 for tag in "${tags[@]}"; do
   has_amd64[$tag]='?'
   has_arm64[$tag]='?'
   list[$tag]='?'
   floating[$tag]='?'
 done
+
+pass1=0
+run_pool list_target || pass1=1
 missing=0
 for tag in "${tags[@]}"; do
-  base="${repo}:${tag}-${sha}"
-  if exists "${base}-amd64"; then has_amd64[$tag]=yes; else has_amd64[$tag]=no; fi
-  if exists "${base}-arm64"; then has_arm64[$tag]=yes; else has_arm64[$tag]=no; fi
-  list[$tag]=no
-  floating[$tag]=no
-  if [ "${has_amd64[$tag]}" = yes ] && [ "${has_arm64[$tag]}" = yes ]; then
-    docker buildx imagetools create -t "$base" "${base}-amd64" "${base}-arm64"
-    list[$tag]=yes
-  else
-    missing=$((missing + 1))
-    echo "missing: ${tag} amd64=${has_amd64[$tag]} arm64=${has_arm64[$tag]}"
+  if [ -f "$work/$tag.res" ]; then
+    read -r a b l <"$work/$tag.res"
+    has_amd64[$tag]="$a"; has_arm64[$tag]="$b"; list[$tag]="$l"
+    floating[$tag]=no
+    [ "${list[$tag]}" = yes ] || missing=$((missing + 1))
   fi
+  [ ! -f "$work/$tag.log" ] || cat "$work/$tag.log"
 done
+if [ "$pass1" -ne 0 ]; then
+  echo "FAIL: a registry call failed while the lists were built (see above): floating tags not moved" >&2
+  exit 1
+fi
 
-if [ "$verify_result" != success ]; then
-  echo "verify result is '$verify_result': floating tags not moved ($missing of ${#tags[@]} targets lack an arch, the rest got their ${sha} list)"
+if [ "$images_result" != success ]; then
+  echo "images result is '$images_result': floating tags not moved ($missing of ${#tags[@]} targets lack an arch, the rest got their ${sha} list)"
 elif [ "$missing" -gt 0 ]; then
-  echo "verify succeeded but $missing target(s) lack an arch: floating tags not moved"
+  echo "images succeeded but $missing target(s) lack an arch: floating tags not moved"
 else
   head_sha="$(develop_head)"
   if [ "$head_sha" != "$GITHUB_SHA" ]; then
     echo "develop is at ${head_sha:0:12}, this run is ${sha}: a re-run of an older run, floating tags not moved"
     note="Floating tags not moved: develop has moved on to \`${head_sha:0:12}\`, this is a run of \`${sha}\`."
-    for tag in "${tags[@]}"; do floating[$tag]=no; done
   else
+    pass2=0
+    run_pool float_target || pass2=1
     for tag in "${tags[@]}"; do
-      docker buildx imagetools create -t "${repo}:${tag}" "${repo}:${tag}-${sha}"
-      floating[$tag]=yes
+      if [ -f "$work/$tag.fl" ]; then floating[$tag]=yes; fi
+      if [ -f "$work/$tag.fl.log" ] && [ -s "$work/$tag.fl.log" ]; then cat "$work/$tag.fl.log"; fi
     done
+    if [ "$pass2" -ne 0 ]; then
+      echo "FAIL: moving the floating tags failed for some targets (see above); the floating set may span two commits" >&2
+      exit 1
+    fi
     echo "floating tags moved to ${sha} for ${#tags[@]} targets"
   fi
 fi
 
-if [ "$verify_result" = success ] && [ "$missing" -gt 0 ]; then
-  echo "FAIL: verify reported success but $missing target(s) are missing an arch" >&2
+if [ "$images_result" = success ] && [ "$missing" -gt 0 ]; then
+  echo "FAIL: images reported success but $missing target(s) are missing an arch" >&2
   exit 1
 fi

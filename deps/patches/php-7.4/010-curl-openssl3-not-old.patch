@@ -1,3 +1,8 @@
+Fixes: ext/curl's old-OpenSSL probe takes the old branch on OpenSSL 4 and links the vendored 1.1.1w beside the system libssl, so HTTPS curl_exec() segfaults.
+Origin: own
+Upstream: never: both branches are EOL; php-src removed the probe in 8.4
+Drop-when: the version leaves the matrix
+
 Fix a version-string bug in ext/curl's "old openssl" probe that makes the
 legacy era link two different OpenSSLs into one process.
 

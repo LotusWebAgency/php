@@ -109,10 +109,15 @@ These caveats apply to the end-of-life tags. PHP 8.2 and later have none of them
   The MariaDB command-line tools are the same in every tag and have none of these limits.
 - **Extensions.** `pcov` needs 7.1+, `sodium` and `snuffleupagus` 7.2+, `ffi` 7.4+, `mongodb`
   8.1+, `protobuf` and `swoole` 8.2+. `mcrypt` and `xmlrpc` ship on 7.x only.
-- **JIT.** PHP 8.1+ has it on both architectures, 8.0 on amd64 only. On 8.0 it is off by default:
-  its tracing JIT crashes workers under real applications and gets no upstream fixes;
+- **JIT.** PHP 8.1+ has it on both architectures, 8.0 on amd64 only. On 8.0 and 8.1 it is off by
+  default: their tracing JIT crashes workers under real applications and gets no upstream fixes;
   `PHP_OPCACHE_JIT=tracing` turns it on. Below 8.0 there is no JIT, so
-  `PHP_OPCACHE_JIT` and `PHP_OPCACHE_JIT_BUFFER` have no effect.
+  `PHP_OPCACHE_JIT` and `PHP_OPCACHE_JIT_BUFFER` have no effect. The JIT's risky paths are
+  `opcache_reset()` under load (PrestaShop's cache clear calls it) and a full opcache, where
+  workers have crashed in generated code on arm64. Size `PHP_OPCACHE_MEMORY` with headroom, watch
+  `opcache_get_status()` (`cache_full`, `oom_restarts`) and run `opcache_reset()` off peak. If a
+  worker does crash, php-fpm reloads itself after repeated crashes (`PHP_FPM_EMERGENCY_RESTART_*`
+  below), so a bad moment costs a reload instead of a pool of dying workers.
 - **Locale.** Under a non-UTF-8 `LC_CTYPE`, PHP 7.x's `basename()` and `pathinfo()` drop multibyte
   characters, and `ZipArchive::extractTo()` mangles such names. The images set `LANG=C.UTF-8`; do
   not override `LANG` or `LC_ALL` with `C` or `POSIX` on 7.x.
@@ -279,12 +284,12 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_DISPLAY_ERRORS` | `Off` | `display_errors`. Errors go to stderr regardless. |
 | `PHP_DISABLE_FUNCTIONS` | fpm: `passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec` (the variable's baked value). cli, ext-builder: the variable is unset; the same list is baked into `10-php.ini`. cli-builder: none | Names to disable in addition to the baked list and any `disable_functions` in a mounted ini. Never replaces either. |
 | `PHP_OPCACHE_ENABLE` | `1` | `opcache.enable` |
-| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 128-512 MB | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. |
+| `PHP_OPCACHE_MEMORY` | one eighth of the container memory limit, clamped to 256-512 MB and to at most half of the limit (at least 16 MB) | `opcache.memory_consumption`. A bare number is MB; `K`/`M`/`G` suffixes work. Below 512 MB of container memory the 256 MB floor gives way to half the limit, and the `PHP_OPCACHE_JIT_BUFFER` default shrinks to a quarter of the segment (8-64 MB). A small container is still a large share for a full cache plus JIT: set it explicitly. |
 | `PHP_OPCACHE_INTERNED_STRINGS` | one eighth of the opcache memory, clamped to 8-32 MB (at most half the opcache memory, also when set; on PHP 7.0-7.2 at most a fifth of it and 16 MB, which is what those versions can start with) | `opcache.interned_strings_buffer`, carved out of the opcache segment. A bare number, in MB. |
 | `PHP_OPCACHE_VALIDATE_TIMESTAMPS` | `1` | `opcache.validate_timestamps`. Set `0` when deploys replace the whole tree. |
 | `PHP_OPCACHE_REVALIDATE_FREQ` | `2` | `opcache.revalidate_freq` |
 | `PHP_OPCACHE_PRELOAD` | unset | `opcache.preload` |
-| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing` (8.0: `disable`), `64M` | `opcache.jit`, `opcache.jit_buffer_size`. PHP 8.1+, and 8.0 on amd64. 8.0 on arm64 has no JIT: its opcache builds one for x86 only. |
+| `PHP_OPCACHE_JIT`, `PHP_OPCACHE_JIT_BUFFER` | `tracing` (8.0, 8.1: `disable`), `64M` (a quarter of the opcache memory below 512 MB of container memory, at least 8M) | `opcache.jit`, `opcache.jit_buffer_size`. PHP 8.1+, and 8.0 on amd64. 8.0 on arm64 has no JIT: its opcache builds one for x86 only. |
 | `PHP_OPCACHE_HUGE_CODE_PAGES` | off | `1`, `true`, `yes` or `on` sets `opcache.huge_code_pages=1`. `0`, `false`, `no`, `off` leave it off. Anything else is refused. See the huge pages paragraph below. |
 | `PHP_ZEND_ALLOC_HUGE_PAGES` | off | Same spellings. On exports `USE_ZEND_ALLOC_HUGE_PAGES=1`, which php-fpm passes to its workers. |
 | `PHP_EXT_ENABLE` | unset | Comma-separated shared extensions to load. See [Extensions](#extensions). |
@@ -306,6 +311,7 @@ with a message naming it. Unset a variable to get the image default.
 | `PHP_FPM_ACCESS_LOG` | `/proc/self/fd/2` | `access.log` |
 | `PHP_FPM_SLOWLOG_TIMEOUT` | `10s` | `request_slowlog_timeout` |
 | `PHP_FPM_REQUEST_TERMINATE_TIMEOUT` | `600s` | `request_terminate_timeout`, a wall-clock cap per request. `max_execution_time` does not count time blocked on I/O, so only this stops a hung worker. |
+| `PHP_FPM_EMERGENCY_RESTART_THRESHOLD`, `PHP_FPM_EMERGENCY_RESTART_INTERVAL` | `10`, `1m` | `emergency_restart_threshold`, `emergency_restart_interval` in `php-fpm.conf`: when that many workers die on SIGSEGV or SIGBUS within the interval, the master reloads and starts a fresh pool. The interval takes `s`, `m`, `h` or `d` (a bare number is seconds); `0` for either disables the restart. |
 
 The ping endpoint is fixed at `/fpm-ping` (response `pong`) and is what the healthcheck uses.
 
@@ -709,8 +715,8 @@ directories. Other modes pass through. Enable it with `PHP_CHMOD_SHIM=true`.
   | 8.2 | 8.2, 8.3 | 8.2.9 | 12.12.2 | 7 | 7.1.5 | none |
   | 8.1 | 8.1 | 8.2.9 | 10.3.3 | 6.4 | 7.1.5 | none |
   | 7.2 | 7.2-8.0 | 8.2.9 | 6.20.1 | 5.4 | 6.9.12 | none |
-  | 7.1 | 7.1 | 1.7.8.11 | 5.8.35 | 4.4 | 6.5.14 | none |
-  | 7.0 | 7.0 | 1.6.1.24 | 5.5.28 | 3.4 | 6.5.14 | none |
+  | 7.1 | 7.1 | 1.7.8.11 | 5.8.35 | 4.4 | 6.5.15 | none |
+  | 7.0 | 7.0 | 1.6.1.24 | 5.5.28 | 3.4 | 6.5.15 | none |
 
 - **Pinned sources.** Every fetched tarball is verified by sha256 (`deps/fetch-verified.sh`). PHP
   releases are also GPG-verified against php.net's release keys (`php/release-keys.asc`); PECL
@@ -740,7 +746,11 @@ API. They are created in the GHCR staging repository `ghcr.io/lotuswebagency/php
 to Docker Hub with the image, digest for digest, before any tag moves. A signature binds the digest,
 so it verifies on `lotuswebagency/php`. The in-toto subjects of the SBOM, provenance and the two
 attestations below name the staging repository with the same digests; inside the predicates, the test
-result's `repository` field and the OpenVEX product identifiers name Docker Hub.
+result's `repository` field and the OpenVEX product identifiers name Docker Hub. When a release copies
+the `develop` images (see [Releases](#releases)), the subjects of the SBOM and provenance name
+`ghcr.io/lotuswebagency/php/dev` with the same digests, and the provenance and the test result's
+`git_sha` and `git_ref` name the `develop` commit and `refs/heads/develop`. The signatures, the list's
+annotations and the signing identity (`.../ci.yml@refs/heads/main`) are the release's own.
 
 ```sh
 docker buildx imagetools inspect lotuswebagency/php:8.5-fpm --format '{{ json .SBOM }}'
@@ -846,8 +856,13 @@ busybox links and the other executables equal their lists; `tests/test-slim-pari
 compares it with its full flavor (`--full-is-builder` when that is cli-builder, the host of `cli-slim`). Application suites (Laravel, WordPress, PrestaShop) are in
 [tests/apps/](tests/apps/README.md). Python unit tests live in `scripts/`, `ci/` and `tests/apps/`.
 
+Benchmarks: `tests/bench.sh <ours> auto <php-version>` compares a build with the official image on a
+CPU workload (`--quick` for a short run); `tests/bench-apps.sh` compares php configurations (JIT on and
+off, opcache sizes, any env-driven setting) on the Laravel, WordPress and PrestaShop stacks
+(`--quick` for a smoke run, `--help` for modes and options). Results land in `tests/bench/runs/`.
+
 `tests/extended.sh` runs the suites the main gate does not (`-v3` check, corpus-tier replay,
-application suites, and on request the benchmark) against images a `develop` run pushed to GHCR,
+JIT stress, application suites, and on request the benchmark) against images a `develop` run pushed to GHCR,
 instead of rebuilding all 78 targets. Log in to `ghcr.io` with a token that has `read:packages`, then:
 
 ```sh
@@ -858,7 +873,10 @@ tests/extended.sh pull --only 8.4,8.5 --flavor fpm,cli
 `pull` retags into the local namespace, refuses images whose inputs hash differs from your working
 tree and prints the `git worktree add` command that fixes it (`--best-effort` turns refusals into
 notes and exits 0; `build-all.sh` uses it). Only your daemon's architecture can be tested locally.
-`tests/extended.sh --help` lists the subcommands. The same suites run on native amd64 and arm64
+`tests/extended.sh --help` lists the subcommands. `tests/test-jit-stress.sh FPM_IMAGE` is the JIT
+stress test alone: concurrent load on JIT-heavy scripts with `opcache_reset()` in a loop and in an
+opcache too small for the scripts, failing on any abnormal worker exit or wrong answer (on 8.0 and
+8.1, where the JIT is off by default, `--informational` forces it on and only reports). The same suites run on native amd64 and arm64
 runners through `gh workflow run extended.yml --ref develop` (inputs `sha`, `only`, `flavor`, `apps`,
 `bench`).
 
@@ -866,11 +884,38 @@ runners through `gh workflow run extended.yml --ref develop` (inputs `sha`, `onl
 
 Work lands on `develop` through pull requests. A pull request builds, tests and Trivy-gates a subset
 on amd64 without publishing. A push to `develop` builds and tests every image on native amd64 and
-arm64 runners and pushes the ones that pass to `ghcr.io/lotuswebagency/php/dev` as unsigned test
-builds (pruned after 14 days by `dev-prune.yml`); it never touches Docker Hub. A pull request from
-`develop` to `main` is the release: merging it builds, tests, signs and attests every image in the
-GHCR staging repository, copies each signed manifest list to Docker Hub with its signatures and
-attestations, and only then moves the tags. A weekly rebuild (Mondays 04:10 UTC) runs on `main`.
+arm64 runners, pushes every image by digest (SBOM and provenance attached) to
+`ghcr.io/lotuswebagency/php/dev`, tests it from there and tags the ones that pass as unsigned test
+builds (pruned after 14 days by `dev-prune.yml`); it never touches Docker Hub. When the push changes
+nothing the images are built from (`scripts/inputs-hash.sh`, which covers the build context and not the
+tests, CI scripts or docs) and the previous green `develop` run's images are at most five days old,
+nothing is rebuilt: that run's images are tested again with the day's Trivy database and tagged for the
+new commit, and the run says so in its summary. Dispatching `ci.yml` with `rebuild` forces a build; any dispatch on `develop` that
+builds re-points the commit's dev tags (a push never does), so the release of that commit rebuilds instead of copying (a newer `develop`
+`ci` run of the commit, of any event, disqualifies the older one). A
+pull request from `develop` to `main` is the release. Its `promote-check` job decides whether `main`
+could copy the head's images: the `develop` `ci` run of the head commit (its latest
+attempt) must have succeeded as a whole and built every image itself, the `extended` run that the
+completion of that run and attempt started (the `workflow_run` trigger, titled with the commit and the
+attempt; a manual dispatch of `extended` does not count) must have passed on the head's own tree, having
+pulled every image by the digest in that `ci` run's release candidate, the
+images must be at most seven days old and match the tree's inputs hash and `ci.yml`, and the merge
+result must have the same tree as the head. When all of that holds nothing is built for the pull
+request and its `pr-gate` passes; when it does not (a stale or reused `develop` run, no `extended`
+run yet, the first promotion after `extended` changed how it titles its runs), `promote-check` still
+passes, the pull request runs the same amd64 subset build as any other, and `main` rebuilds on the
+merge. `promote-check` fails, and so blocks the merge, only when the merge result is not the
+head's tree or not a merge of the head, or when a non-empty repository variable `RELEASE_HOLD` is set;
+the hold also turns a copy on `main` into a build and does not stop a push to `main` from
+building and publishing. Merging it (a merge commit) takes the copy path when the same checks pass on
+`main`, and the age limit is checked again in every copying job: the tested `develop` images are
+copied by digest to the GHCR staging repository, scanned again with the day's Trivy database, signed,
+attested and put in a manifest list there; nothing is rebuilt. Otherwise (any check fails, the GitHub
+API errors, the weekly schedule, a
+manual dispatch) the release builds, tests, signs and attests every image in the staging repository
+itself, and the run's summary says why. Either way each signed manifest list is then copied to Docker
+Hub with its signatures and attestations, and only then are the tags moved. A weekly rebuild (Mondays
+19:10 UTC) runs on `main`.
 Only the promotion and the description-sync jobs use the Docker Hub credentials, both in the
 `release` deployment environment on `main`. Cadence is in [SUPPORT.md](SUPPORT.md), the controls in
 [SECURITY.md](SECURITY.md).
@@ -900,7 +945,7 @@ Only the promotion and the description-sync jobs use the Docker Hub credentials,
 - **`disable_functions`:** the predecessor's default also disabled `proc_open`, `proc_close`,
   `proc_get_status`, `proc_nice`, `proc_terminate` and `highlight_file`. Here they stay enabled.
   `PHP_DISABLE_FUNCTIONS` adds to the baked list instead of replacing it.
-- **JIT:** on by default here (`opcache.jit=tracing`) on 8.1+, off in the predecessor and on 8.0. Set
+- **JIT:** on by default here (`opcache.jit=tracing`) on 8.2+, off in the predecessor and on 8.0 and 8.1. Set
   `PHP_OPCACHE_JIT=off` if your application has not been checked against it.
 - **Healthcheck:** one pool only, via `PHP_FPM_LISTEN` and `/fpm-ping`. The predecessor's
   `FPM_HEALTH_PORTS` has no equivalent.

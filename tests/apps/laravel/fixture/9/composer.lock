@@ -1118,16 +1118,16 @@
         },
         {
             "name": "laravel/framework",
-            "version": "v9.52.23",
+            "version": "v9.52.24",
             "source": {
                 "type": "git",
                 "url": "https://github.com/laravel/framework.git",
-                "reference": "06605f514a3aba20bdab972cb49a2a3cf0f21532"
+                "reference": "435e5d27abe72fb365597ac8719bb40602eea478"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/laravel/framework/zipball/06605f514a3aba20bdab972cb49a2a3cf0f21532",
-                "reference": "06605f514a3aba20bdab972cb49a2a3cf0f21532",
+                "url": "https://api.github.com/repos/laravel/framework/zipball/435e5d27abe72fb365597ac8719bb40602eea478",
+                "reference": "435e5d27abe72fb365597ac8719bb40602eea478",
                 "shasum": ""
             },
             "require": {
@@ -1312,8 +1312,8 @@
                 "issues": "https://github.com/laravel/framework/issues",
                 "source": "https://github.com/laravel/framework"
             },
-            "time": "2026-10-30T14:12:09+00:00",
-            "published-time": "2026-10-30T14:13:00+00:00"
+            "time": "2026-11-24T16:21:48+00:00",
+            "published-time": "2026-11-24T16:24:41+00:00"
         },
         {
             "name": "laravel/sanctum",
@@ -1513,16 +1513,16 @@
         },
         {
             "name": "league/commonmark",
-            "version": "2.10.7",
+            "version": "2.10.8",
             "source": {
                 "type": "git",
                 "url": "https://github.com/thephpleague/commonmark.git",
-                "reference": "8eb53e906fd60c67038d22f1f1cab420ed58b8be"
+                "reference": "681e662a40c805c567f52d603b64d55282ea356c"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/thephpleague/commonmark/zipball/8eb53e906fd60c67038d22f1f1cab420ed58b8be",
-                "reference": "8eb53e906fd60c67038d22f1f1cab420ed58b8be",
+                "url": "https://api.github.com/repos/thephpleague/commonmark/zipball/681e662a40c805c567f52d603b64d55282ea356c",
+                "reference": "681e662a40c805c567f52d603b64d55282ea356c",
                 "shasum": ""
             },
             "require": {
@@ -1616,8 +1616,8 @@
                     "type": "tidelift"
                 }
             ],
-            "time": "2026-10-31T13:35:37+00:00",
-            "published-time": "2026-10-31T13:35:57+00:00"
+            "time": "2026-11-24T15:44:47+00:00",
+            "published-time": "2026-11-24T15:45:01+00:00"
         },
         {
             "name": "league/config",

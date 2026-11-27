@@ -1,6 +1,6 @@
 {
   "image": "lotuswebagency/php",
-  "base": "cgr.dev/chainguard/wolfi-base:latest@sha256:be019c1c74fe69204a42c4e10bc4d886a49bf5403ffa74374ef7baa408fc9a26",
+  "base": "cgr.dev/chainguard/wolfi-base:latest@sha256:28c39be5a5e1e9b85081c10740e8495f6518a865b23bc6a486637c4b21e74b43",
   "default_version": "8.5",
   "flavors": ["fpm", "cli", "cli-builder", "ext-builder", "fpm-slim", "cli-slim"],
   "platforms": ["linux/amd64", "linux/arm64"],

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
+# syntax=docker/dockerfile:1.29@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
 # PGO training corpus, built once per tier and cached; the php build only mounts
 # it and reads it. Build context is php/pgo.
 #
@@ -37,12 +37,12 @@ ARG TIER=8.2
 # 8.4, 8.2, 8.1 and 7.2 share one image on purpose: PrestaShop 8.2.9 trains all
 # four, and its release tree does not depend on the php of the image it ships in.
 # 8.5 is PrestaShop 9.2.1.
-FROM prestashop/prestashop@sha256:39135963babf5b529a3b8f1f79cd00fc5a05f5e2be470759d04356b0a57ec4b9 AS ps-8.5
-FROM prestashop/prestashop@sha256:5a70694c5d0eb194b1d7f6e48ac68f786e7c3e8d5b0f9ef67baa5cda3f1e90de AS ps-8.4
-FROM prestashop/prestashop@sha256:5a70694c5d0eb194b1d7f6e48ac68f786e7c3e8d5b0f9ef67baa5cda3f1e90de AS ps-8.2
-FROM prestashop/prestashop@sha256:5a70694c5d0eb194b1d7f6e48ac68f786e7c3e8d5b0f9ef67baa5cda3f1e90de AS ps-8.1
-FROM prestashop/prestashop@sha256:5a70694c5d0eb194b1d7f6e48ac68f786e7c3e8d5b0f9ef67baa5cda3f1e90de AS ps-7.2
-FROM prestashop/prestashop@sha256:35d83e335c408afe87e18f828477a72ff9fa12d220fcedb81815df5a001edbd8 AS ps-7.1
+FROM prestashop/prestashop@sha256:dcd61a4691eb6d18736dd9068d6a6f385b044b793eab55bbaec9b3a4c58d1b9d AS ps-8.5
+FROM prestashop/prestashop@sha256:cd68c2d36e26b26be014f94ba296cd42ed5a5965fce41d1e9b49eacc8ab42d17 AS ps-8.4
+FROM prestashop/prestashop@sha256:cd68c2d36e26b26be014f94ba296cd42ed5a5965fce41d1e9b49eacc8ab42d17 AS ps-8.2
+FROM prestashop/prestashop@sha256:cd68c2d36e26b26be014f94ba296cd42ed5a5965fce41d1e9b49eacc8ab42d17 AS ps-8.1
+FROM prestashop/prestashop@sha256:cd68c2d36e26b26be014f94ba296cd42ed5a5965fce41d1e9b49eacc8ab42d17 AS ps-7.2
+FROM prestashop/prestashop@sha256:6317c533a8921745a6fd68b092617d8cee201d1bce7632c6b6da81eea208b051 AS ps-7.1
 FROM prestashop/prestashop@sha256:fd757ab1a4847abc053f19dfbf0f4885ffbf4fc06b02bce04035f30c952e234f AS ps-7.0
 
 # Alias stage: `COPY --from` and `RUN --mount from=` do not expand ARGs when they

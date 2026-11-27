@@ -121,6 +121,21 @@ echo "ok: autotune large ($children_l children)"
 tt=$(drun --rm -m 4g -e PHP_FPM_MAX_CHILDREN=3 "$IMAGE" php-fpm -tt 2>&1)
 echo "$tt" | grep -q 'pm\.max_children = 3$' || fail "PHP_FPM_MAX_CHILDREN ignored: $tt"
 echo "ok: explicit override wins"
+
+# 5b. emergency restart: both directives are set in php-fpm.conf from the environment
+tt=$(drun --rm -m 512m "$IMAGE" php-fpm -tt 2>&1)
+thr=$(echo "$tt" | grep -oE 'emergency_restart_threshold = [0-9]+' | grep -oE '[0-9]+' | single_value)
+itv=$(echo "$tt" | grep -oE 'emergency_restart_interval = [0-9a-z]+' | grep -oE '[0-9]+[a-z]*$' | single_value)
+[ "$thr" = 10 ] || fail "default emergency_restart_threshold is '$thr', expected 10: $tt"
+[ "$itv" = 60s ] || fail "default emergency_restart_interval is '$itv', expected 60s (1m): $tt"
+tt=$(drun --rm -m 512m -e PHP_FPM_EMERGENCY_RESTART_THRESHOLD=3 -e PHP_FPM_EMERGENCY_RESTART_INTERVAL=2m "$IMAGE" php-fpm -tt 2>&1)
+echo "$tt" | grep -q 'emergency_restart_threshold = 3$' || fail "PHP_FPM_EMERGENCY_RESTART_THRESHOLD ignored: $tt"
+echo "$tt" | grep -q 'emergency_restart_interval = 2m$\|emergency_restart_interval = 120s$' || fail "PHP_FPM_EMERGENCY_RESTART_INTERVAL ignored: $tt"
+for bad in "THRESHOLD=ten" "THRESHOLD=-1" "INTERVAL=1w" "INTERVAL=m" "INTERVAL=1 m"; do
+  out=$(drun --rm -m 512m -e "PHP_FPM_EMERGENCY_RESTART_${bad}" "$IMAGE" php-fpm -tt 2>&1) && fail "PHP_FPM_EMERGENCY_RESTART_${bad} was accepted: $out"
+  echo "$out" | grep -qi "PHP_FPM_EMERGENCY_RESTART_${bad%%=*}" || fail "PHP_FPM_EMERGENCY_RESTART_${bad} rejected without naming the variable: $out"
+done
+echo "ok: emergency restart defaults to 10 failures per minute, is configurable, and rejects malformed values"
 fi
 
 # 6. read-only rootfs still starts
@@ -286,7 +301,9 @@ echo "ok: PHP_CHMOD_SHIM rejects ambiguous values instead of silently treating t
 
 # --- opcache segment sizing and huge pages -----------------------------------
 # The interned strings buffer is carved out of the opcache segment, so the segment
-# floor is 128MB and the buffer scales with it. PHP 7.0-7.2 cannot allocate more than
+# floor is 256MB (headroom for the JIT: a full cache is a risky path) unless the
+# container is under 512MB, where the segment is half of the limit, and the buffer
+# scales with it. PHP 7.0-7.2 cannot allocate more than
 # 16MB of it, and fails to start opcache with more than a fifth of a small segment.
 # ini_get() alone proves nothing here: opcache is not initialized in the CLI unless
 # enabled, and a bad pair kills it at startup, so every case also requires opcache to
@@ -298,11 +315,34 @@ opcache_sizes() {
   drun --rm "$@" "$IMAGE" php -d opcache.enable_cli=1 -r 'echo ini_get("opcache.memory_consumption"), " ", ini_get("opcache.interned_strings_buffer"), " ", (opcache_get_status(false)["opcache_enabled"] ?? false) === true ? "started" : "stopped";' 2>/dev/null || true
 }
 
+got=$(opcache_sizes -m 512m)
+[ "$got" = "256 $interned_cap started" ] || fail "512m: opcache memory/interned/state is '$got', expected '256 $interned_cap started' (the floor is 256MB, interned an eighth of it up to the cap)"
 got=$(opcache_sizes -m 256m)
-[ "$got" = "128 16 started" ] || fail "256m: opcache memory/interned/state is '$got', expected '128 16 started' (the floor is 128MB, interned an eighth of it)"
+[ "$got" = "128 16 started" ] || fail "256m: opcache memory/interned/state is '$got', expected '128 16 started' (the floor gives way to half of the limit)"
+# The JIT buffer exists wherever opcache has a JIT compiled in: PHP 8.0+, except 8.0 on
+# arm64 (8.0's opcache builds the JIT for x86 only; aarch64 arrived in 8.1), where the
+# opcache.jit* directives are not registered at all. The size is set whether or not
+# the JIT is on by default (8.0 and 8.1 ship it off), so it is checked on both.
+jit_size() { drun --rm "$@" "$IMAGE" php -r 'var_export(ini_get("opcache.jit_buffer_size"));' 2>/dev/null || true; }
+case "$PHP_MM" in
+  7.*) jit_built=0 ;;
+  8.0) if [ "$(docker image inspect --format '{{.Architecture}}' "$IMAGE")" = arm64 ]; then jit_built=0; else jit_built=1; fi ;;
+  *) jit_built=1 ;;
+esac
+if [ "$jit_built" = 1 ]; then
+  got=$(jit_size -m 256m)
+  [ "$got" = "'32M'" ] || fail "256m: opcache.jit_buffer_size is $got, expected '32M' (a quarter of the 128MB segment)"
+  got=$(jit_size -m 512m)
+  [ "$got" = "'64M'" ] || fail "512m: opcache.jit_buffer_size is $got, expected '64M'"
+  got=$(jit_size -m 256m -e PHP_OPCACHE_JIT_BUFFER=16M)
+  [ "$got" = "'16M'" ] || fail "256m with PHP_OPCACHE_JIT_BUFFER=16M: opcache.jit_buffer_size is $got, expected '16M' (an explicit size is used exactly)"
+elif [ "$PHP_MM" = 8.0 ]; then
+  got=$(jit_size -m 256m)
+  [ "$got" = false ] || fail "PHP 8.0/arm64: opcache.jit_buffer_size is $got, expected no such directive (8.0 builds no aarch64 JIT)"
+fi
 got=$(opcache_sizes -m 4g)
 [ "$got" = "512 $interned_cap started" ] || fail "4g: opcache memory/interned/state is '$got', expected '512 $interned_cap started'"
-echo "ok: opcache segment is at least 128MB, the interned strings buffer scales with it, and opcache starts ($got at 4g)"
+echo "ok: opcache segment is 256-512MB but at most half of the limit, the JIT buffer and interned strings buffer scale with it, and opcache starts ($got at 4g)"
 
 got=$(opcache_sizes -m 4g -e PHP_OPCACHE_MEMORY=64M)
 [ "$got" = "64 8 started" ] || fail "PHP_OPCACHE_MEMORY=64M: opcache memory/interned/state is '$got', expected '64 8 started' (an explicit size is used exactly)"
@@ -637,6 +677,7 @@ if [ "$FLAVOR" = fpm ]; then
 # PHP_FPM_STATUS_PATH= would unpublish the status endpoint. Asserts on the branded
 # message, not just a non-zero exit.
 for v in PHP_FPM_MAX_REQUESTS PHP_FPM_STATUS_PATH PHP_FPM_MAX_CHILDREN \
+         PHP_FPM_EMERGENCY_RESTART_THRESHOLD PHP_FPM_EMERGENCY_RESTART_INTERVAL \
          PHP_MEMORY_LIMIT PHP_OPCACHE_JIT PHP_EXT_ENABLE; do
   set +e
   out=$(drun --rm -m 512m -e "${v}=" "$IMAGE" php-fpm -tt 2>&1)

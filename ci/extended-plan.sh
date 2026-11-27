@@ -6,7 +6,22 @@
 #   EXT_ONLY=<csv of versions> EXT_FLAVOR=<csv of flavors>
 #   EXT_APPS=<true|false> EXT_BENCH=<true|false>   (empty = default: true / false)
 #   EXT_EVENT=<github.event_name>
+#   EXT_CANDIDATE=<release-candidate.json of the triggering ci run> EXT_CI_RUN=<its run id>
+#                            (workflow_run only; extended.yml downloads it by run id)
 #   ci/extended-plan.sh
+#
+# For a workflow_run, plan refuses to go on unless that candidate is for the
+# commit under test, this tree's inputs-hash and that ci run (ci/candidate.py
+# check), and extended.yml then freezes the file as the extended-candidate
+# artifact: every leg pulls the images of that file by digest. dev:<tag>-<sha12>
+# is mutable (a develop rebuild of the commit re-points it), so a tag pull can
+# test other images than the ones main copies. A dispatch or an extended-run
+# push has no candidate: its legs pull by tag, and plan logs that this run
+# cannot qualify a copy (ci/release_source.py needs the workflow_run title).
+# A workflow_run whose extended.yml predates the candidate (main's, until the
+# next promotion) leaves EXT_CANDIDATE unset: plan warns and the legs pull by
+# tag too, and that run, titled the old way, cannot qualify a copy either. An
+# EXT_CANDIDATE that is set but names no file is still fatal.
 #
 # For a push to extended-run (EXT_EVENT=push) with no dev:<tag>-<sha12> images
 # of the pushed commit, plan falls back to the floating dev:<tag> images when
@@ -26,7 +41,12 @@
 #             equal inputs-hash proves the tree still matches the images. It is
 #             checked here once rather than in every job (extended.sh pull
 #             checks again per job).
-#   versions  JSON array of the matrix.json versions to test
+#   versions  JSON array of the shards to run, longest first: a matrix.json
+#             version (`8.2`) or half of one (`8.4~fpm`, `8.4~cli`, see
+#             ci/extended_shards.py). extended.yml expands it as the versions
+#             matrix; ci/extended-run.sh resolves a shard id from EXT_ONLY. A
+#             tree without ci/extended_shards.py (an older commit tested from
+#             its own tree) gets whole versions, as does a run without apps.
 #   only, flavor  the validated selections, no spaces
 #   fpm       true when the selection has the fpm flavor (corpus-tiers needs it)
 #   apps      EXT_APPS, forced to false when the selection has no fpm, cli or
@@ -35,6 +55,12 @@
 #             cell for any selected version and flavor (a gap in the matrix:
 #             cli-builder on a version no builder row covers)
 #   bench
+#   own       true when the images are the commit's own dev:<tag>-<sha12> (not
+#             the floating fallback)
+#   full      true when the selection is everything (no only, no flavor, apps
+#             on and planned). own, full and checkout == sha are what
+#             ci/extended-status.sh needs before it posts the `release/extended`
+#             commit status (a pointer: release_source.py trusts the run).
 #
 # fpm and apps are also what ci/extended-summary.sh reads (from the needs
 # context) to decide which jobs had to succeed.
@@ -148,6 +174,24 @@ else
   echo "plan: using the floating images, built from ${sha:0:12} (inputs-hash matches this tree's): not own images"
 fi
 
+if [ "${EXT_EVENT:-}" = workflow_run ]; then
+  [ "$floating" -eq 0 ] || die "a workflow_run run tests its ci run's images, not the floating ones"
+  if [ -z "${EXT_CANDIDATE+x}" ]; then
+    # The extended.yml on main (it runs every workflow_run until the next promotion) does not
+    # pass a candidate, give the run a name or freeze one for the legs.
+    echo "::warning::EXT_CANDIDATE is not set (the extended.yml of the default branch predates the release candidate): the legs pull dev:<tag>-<sha12> by tag, and this run is not titled for ci/release_source.py, so it never qualifies a copy"
+    echo "plan: by tag, no release candidate (an older extended.yml): the legs pull dev:<tag>-<sha12>, which a develop rebuild may re-point"
+  else
+    [ -n "$EXT_CANDIDATE" ] && [ -f "$EXT_CANDIDATE" ] || die "no release candidate of ci run ${EXT_CI_RUN:-?} (the release-candidate artifact is missing or expired): without it the images cannot be pinned by digest"
+    [ -n "${EXT_CI_RUN:-}" ] || die "EXT_CI_RUN is not set"
+    python3 ci/candidate.py check --candidate "$EXT_CANDIDATE" --sha "$sha" --inputs-hash "$(bash scripts/inputs-hash.sh)" --run-id "$EXT_CI_RUN" \
+      || die "the release candidate of ci run $EXT_CI_RUN is not for ${sha:0:12} and this tree"
+    echo "plan: by digest, from the release candidate of ci run $EXT_CI_RUN: every leg pulls dev@<index digest>, not the mutable tag"
+  fi
+else
+  echo "plan: by tag, no release candidate (a ${EXT_EVENT:-?} run): the legs pull dev:<tag>-<sha12>, which a develop rebuild may re-point. What this run tests is not what main copies, and it never qualifies a copy"
+fi
+
 apps="${EXT_APPS:-true}"
 [ "$(jq -r .apps <<<"$sel")" = true ] || apps=false
 apps_note=""
@@ -157,19 +201,44 @@ if [ "$apps" = true ]; then
   if [ -z "$cells" ]; then apps=false; apps_note=" (tests/apps/sets has no cell for this selection)"; fi
 fi
 bench="${EXT_BENCH:-false}"
+
+only_csv="$(jq -r .only <<<"$sel")"
+flavor_csv="$(jq -r .flavor <<<"$sel")"
+versions_json="$(jq -c .versions <<<"$sel")"
+shard_table=""
+if git cat-file -e "$checkout:ci/extended_shards.py" 2>/dev/null; then
+  versions_json="$(python3 ci/extended_shards.py plan --only "$only_csv" --flavor "$flavor_csv" --apps "$apps")" \
+    || die "ci/extended_shards.py plan failed"
+  shard_table="$(python3 ci/extended_shards.py plan --only "$only_csv" --flavor "$flavor_csv" --apps "$apps" --table)"
+else
+  echo "plan: $checkout has no ci/extended_shards.py: whole versions, no shards"
+fi
+own=false
+[ "$floating" -eq 1 ] || own=true
+full=false
+[ "$own" = true ] && [ -z "$only_csv" ] && [ -z "$flavor_csv" ] && [ "$apps" = true ] && full=true
 {
   echo "sha=$sha"
   echo "checkout=$checkout"
-  echo "versions=$(jq -c .versions <<<"$sel")"
+  echo "versions=$versions_json"
   echo "only=$(jq -r .only <<<"$sel")"
   echo "flavor=$(jq -r .flavor <<<"$sel")"
   echo "fpm=$(jq -r .fpm <<<"$sel")"
   echo "apps=$apps"
   echo "bench=$bench"
+  echo "own=$own"
+  echo "full=$full"
 } >> "$out"
 
 {
   echo "### extended tests: $mode"
   echo
-  echo "versions: $(jq -r '.versions | join(", ")' <<<"$sel"); only '$(jq -r .only <<<"$sel")', flavor '$(jq -r .flavor <<<"$sel")', apps ${apps}${apps_note}, bench $bench"
+  echo "versions: $(jq -r '.versions | join(", ")' <<<"$sel"); only '$only_csv', flavor '$flavor_csv', apps ${apps}${apps_note}, bench $bench"
+  echo "own images: $own, full selection: $full, tests from the commit's own tree: $( [ "$checkout" = "$sha" ] && echo true || echo false ) ($( [ "$full" = true ] && [ "$checkout" = "$sha" ] && echo "posts release/extended" || echo "no release/extended status" ))"
+  if [ -n "$shard_table" ]; then
+    echo
+    echo "$(jq length <<<"$versions_json") shards per arch, longest first (estimated minutes):"
+    echo
+    echo "$shard_table"
+  fi
 } | tee -a "$summary"

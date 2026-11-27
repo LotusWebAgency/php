@@ -9,7 +9,9 @@
 #
 # Callers pass --mount=type=cache,target=/var/cache/src,id=php-src-cache on the
 # RUN that invokes this so the cache survives BuildKit layer invalidation;
-# FETCH_VERIFIED_CACHE_DIR overrides the directory for the unit-level test.
+# FETCH_VERIFIED_CACHE_DIR overrides the directory for the unit-level test, and
+# FETCH_VERIFIED_RETRIES / FETCH_VERIFIED_RETRY_DELAY (default 40 / 15 s) the
+# curl retry budget, which the test shrinks so an unreachable origin fails fast.
 #
 # A missing cache directory (no mount, or a stage that did not declare it) is a
 # plain uncached fetch, not an error: creating one on the fly would hide the
@@ -43,7 +45,7 @@ elif [ -d "$CACHE_DIR" ] && [ -f "$entry" ]; then
 fi
 
 echo "fetch-verified: fetching $url" >&2
-curl -fsSL --retry 40 --retry-all-errors --retry-delay 15 --connect-timeout 10 -o "$dest" "$url"
+curl -fsSL --retry "${FETCH_VERIFIED_RETRIES:-40}" --retry-all-errors --retry-delay "${FETCH_VERIFIED_RETRY_DELAY:-15}" --connect-timeout 10 -o "$dest" "$url"
 echo "${sha}  ${dest}" | sha256sum -c -
 
 # Storing is best effort: the download is already verified, so a cache directory

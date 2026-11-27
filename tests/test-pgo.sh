@@ -252,6 +252,8 @@ docker rm -f "$cid" >/dev/null; cid=""
 TEXT_HOT_MIN_PERCENT="$(field text_hot_min_percent)"
 [ -n "$TEXT_HOT_MIN_PERCENT" ] && [ "$TEXT_HOT_MIN_PERCENT" -gt 0 ] 2>/dev/null \
   || fail "the build record carries no text_hot_min_percent; this image predates the floor and its .text.hot claim is unverifiable"
+OPCACHE_TEXT_HOT_MIN_PERCENT="$(field opcache_text_hot_min_percent)"
+: "${OPCACHE_TEXT_HOT_MIN_PERCENT:=$TEXT_HOT_MIN_PERCENT}"
 
 # section_size <readelf -SW output> <section name> -> size in bytes, 0 if absent
 #
@@ -288,9 +290,11 @@ for bin in "${binaries[@]}"; do
   total=$((text + hot + unlikely))
   [ "$total" -gt 0 ] || fail "$name has no executable text at all -- nothing was measured"
   pct=$((100 * hot / total))
+  floor="$TEXT_HOT_MIN_PERCENT"
+  [ "$name" = opcache.so ] && floor="$OPCACHE_TEXT_HOT_MIN_PERCENT"
   if [ "$expect_pgo" = true ]; then
-    [ "$pct" -ge "$TEXT_HOT_MIN_PERCENT" ] \
-      || fail "$name has $hot bytes of .text.hot, ${pct}% of its text, below the ${TEXT_HOT_MIN_PERCENT}% a profile-guided build produces -- php $VERSION is pgo=true in matrix.json but this binary was compiled without the profile"
+    [ "$pct" -ge "$floor" ] \
+      || fail "$name has $hot bytes of .text.hot, ${pct}% of its text, below the ${floor}% a profile-guided build produces -- php $VERSION is pgo=true in matrix.json but this binary was compiled without the profile"
     echo "ok: $name has $hot bytes of .text.hot (${pct}% of text) -- the profile reached the compiler"
   else
     [ "$hot" -eq 0 ] \

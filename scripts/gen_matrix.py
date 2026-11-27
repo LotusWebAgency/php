@@ -192,6 +192,58 @@ def build_legs(targets):
     return legs
 
 
+# Longest-first ordering hints for the per-version CI jobs, in rough minutes of
+# wall time: arm64 finishes sooner than amd64, legacy versions build extra
+# dependencies, 8.4 is the heaviest modern version. Only the order matters.
+ARCH_WEIGHT = {"amd64": 40, "arm64": 35}
+LEGACY_WEIGHT = 5
+HEAVY_WEIGHT = {"8.4": 10}
+
+
+def job_weight(spec, php, arch):
+    weight = ARCH_WEIGHT[arch] + HEAVY_WEIGHT.get(php, 0)
+    return weight + LEGACY_WEIGHT if spec["era"] == "legacy" else weight
+
+
+def build_version_jobs(matrix, targets, arches=None):
+    """One CI job per (php, uarch, arch): every selected target of that version, one bake call.
+
+    `targets` is a (sub)selection of build_targets(); `arches` limits the
+    platforms (default: all of the matrix's). Sorted heaviest first so the
+    longest jobs start first. The per-target `tag` is its first (canonical) tag.
+    """
+    corpus = {}
+    grouped = {}
+    for t in targets:
+        key = (t["php"], t["uarch"])
+        grouped.setdefault(key, []).append({
+            "name": t["name"], "flavor": t["flavor"], "tag": t["tags"][0], "tags": t["tags"],
+        })
+        corpus[key] = t["corpus"]
+    jobs = []
+    for (php, uarch), members in grouped.items():
+        spec = matrix["versions"][php]
+        for platform in matrix["platforms"]:
+            arch = platform.split("/")[1]
+            if arches is not None and arch not in arches:
+                continue
+            slug = php if uarch == "baseline" else f"{php}-{uarch}"
+            jobs.append({
+                "name": f"{slug}-{arch}",
+                "php": php,
+                "uarch": uarch,
+                "era": spec["era"],
+                "arch": arch,
+                "platform": platform,
+                "corpus": corpus[(php, uarch)],
+                "bake": " ".join(m["name"] for m in members),
+                "targets": members,
+                "weight": job_weight(spec, php, arch),
+            })
+    jobs.sort(key=lambda j: (-j["weight"], j["name"]))
+    return jobs
+
+
 def build_compile_jobs(matrix):
     """One entry per distinct compile: version x uarch x arch. 26 total."""
     jobs = []
@@ -226,7 +278,7 @@ def render(matrix):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true", help="exit 1 if generated file is stale")
-    parser.add_argument("--github", choices=["targets", "build", "compile", "pr"], help="print a GitHub Actions matrix")
+    parser.add_argument("--github", choices=["targets", "build", "compile", "pr", "version"], help="print a GitHub Actions matrix")
     args = parser.parse_args()
     matrix = load()
     validate_support_fields(matrix)
@@ -241,8 +293,11 @@ def main():
         print(json.dumps({"include": build_compile_jobs(matrix)}))
         return 0
     if args.github == "pr":
-        include = build_legs([t for t in build_targets(matrix) if t["name"] in PR_SUBSET])
-        print(json.dumps({"include": include}))
+        subset = [t for t in build_targets(matrix) if t["name"] in PR_SUBSET]
+        print(json.dumps({"include": build_version_jobs(matrix, subset, arches={"amd64"})}))
+        return 0
+    if args.github == "version":
+        print(json.dumps({"include": build_version_jobs(matrix, build_targets(matrix))}))
         return 0
 
     rendered = render(matrix)

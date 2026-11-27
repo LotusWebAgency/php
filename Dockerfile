@@ -1,6 +1,6 @@
-# syntax=docker/dockerfile:1.28@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
+# syntax=docker/dockerfile:1.29@sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183
 # One Dockerfile for every published tag; docker-bake.hcl feeds it the matrix.
-ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:be019c1c74fe69204a42c4e10bc4d886a49bf5403ffa74374ef7baa408fc9a26
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest@sha256:28c39be5a5e1e9b85081c10740e8495f6518a865b23bc6a486637c4b21e74b43
 ARG PHP_ERA=modern
 # Declared before any FROM so `FROM toolchain-select-${COMPILER}` can resolve it.
 # The toolchain-base stage redeclares it for use inside the stage.
@@ -49,11 +49,17 @@ ARG NM_COMPILER=llvm-nm
 # upgrade: the digest-pinned base can hold a library older than the -dev package the
 # deps stages install next (sqlite-libs 3.54.0 beside sqlite-dev 3.54.1, whose
 # libsqlite3.so names a file only 3.54.1 ships), and lld, unlike GNU ld, fails the
-# link on that dangling symlink. WOLFI_INDEX_STATE re-runs this layer whenever the
-# index stamp changes instead of replaying a cached upgrade.
-ARG WOLFI_INDEX_STATE=""
+# link on that dangling symlink. TOOLCHAIN_EPOCH (ci/toolchain-epoch.sh: the ISO
+# week, shifted so it turns over once a week) re-runs this layer weekly instead of
+# on every Wolfi index change, so the registry cache keeps hitting for the compile
+# toolchain, ImageMagick and the deps stages; the build toolchain may lag Wolfi by
+# up to that week. Every later stage that runs `apk add` runs `apk upgrade` first,
+# so a cache miss in mid-week cannot pair a week-old library with a newer -dev
+# package. The runtime stages below keep WOLFI_INDEX_STATE: what ships stays
+# current.
+ARG TOOLCHAIN_EPOCH=""
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    echo "wolfi index state: ${WOLFI_INDEX_STATE:-unset}" \
+    echo "toolchain epoch: ${TOOLCHAIN_EPOCH:-unset}" \
     && echo 'https://packages.wolfi.dev/os' > /etc/apk/repositories \
     && apk upgrade --cache-dir /var/cache/apk -U \
     && apk add --cache-dir /var/cache/apk \
@@ -115,7 +121,8 @@ FROM toolchain-select-${COMPILER} AS toolchain
 # UARCH: ImageMagick is always baseline.
 FROM toolchain AS imagemagick
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    apk add --cache-dir /var/cache/apk -U \
+    apk upgrade --cache-dir /var/cache/apk -U \
+    && apk add --cache-dir /var/cache/apk \
       libpng-dev libjpeg-turbo-dev libwebp-dev tiff-dev freetype-dev \
       openjpeg-dev cmake samurai meson nasm
 COPY deps/build-imagemagick.sh deps/build-heif.sh deps/versions.lock deps/fetch-verified.sh /build/deps/
@@ -133,7 +140,8 @@ ENV PKG_CONFIG_PATH=/opt/imagemagick/lib/pkgconfig
 FROM imagemagick AS deps-modern
 # GD also needs libavif-dev; the other image libraries come from the imagemagick stage.
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    apk add --cache-dir /var/cache/apk -U \
+    apk upgrade --cache-dir /var/cache/apk -U \
+    && apk add --cache-dir /var/cache/apk \
       openssl-4.0-dev curl-dev libxml2-dev libxslt-dev icu-dev \
       oniguruma-dev libzip-dev sqlite-dev postgresql-18-dev zlib-dev zstd-dev \
       brotli-dev libavif-dev \
@@ -185,7 +193,8 @@ ARG PHP_VERSION
 # libavif-dev: GD has no AVIF before 8.1.
 # Otherwise the package set mirrors deps-modern and must be kept in sync by hand.
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    apk add --cache-dir /var/cache/apk -U \
+    apk upgrade --cache-dir /var/cache/apk -U \
+    && apk add --cache-dir /var/cache/apk \
       openssl-4.0-dev curl-dev pkgconf-dev \
       oniguruma-dev libzip-dev sqlite-dev postgresql-18-dev zlib-dev zstd-dev \
       brotli-dev \
@@ -288,8 +297,13 @@ RUN for pc in libargon2 libmemcached; do \
 # rather than in `toolchain` because only this stage compiles with a profile
 # flag; upstream it would put ImageMagick and the legacy vendored libraries in
 # the invalidation path of every PGO change.
+# The upgrade comes first for the reason given at toolchain-base; the compiler
+# revisions are recorded again because ccache's compiler check (CCACHE_COMPILERCHECK)
+# reads them and the upgrade may have moved a compiler.
 RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
-    apk add --cache-dir /var/cache/apk -U compiler-rt-19 \
+    apk upgrade --cache-dir /var/cache/apk -U \
+    && apk add --cache-dir /var/cache/apk compiler-rt-19 \
+    && apk list -I gcc binutils clang-19 lld-19 llvm-19 | sort > /etc/compiler-revisions \
     && { command -v llvm-profdata >/dev/null || { echo "llvm-profdata is missing; two-pass PGO cannot merge a profile" >&2; exit 1; }; } \
     && { [ -n "$(find /usr/lib/llvm-* -name 'libclang_rt.profile*' -print -quit)" ] \
          || { echo "no libclang_rt.profile under /usr/lib/llvm-*; -fprofile-generate cannot link" >&2; exit 1; }; }
@@ -815,6 +829,8 @@ ENV PHP_FPM_PM=dynamic \
     PHP_FPM_ACCESS_LOG=/proc/self/fd/2 \
     PHP_FPM_SLOWLOG_TIMEOUT=10s \
     PHP_FPM_REQUEST_TERMINATE_TIMEOUT=600s \
+    PHP_FPM_EMERGENCY_RESTART_THRESHOLD=10 \
+    PHP_FPM_EMERGENCY_RESTART_INTERVAL=1m \
     PHP_DISABLE_FUNCTIONS="passthru, shell_exec, exec, system, show_source, dl, popen, pcntl_exec"
 # One RUN for everything that edits or verifies the files above.
 RUN set -eux; \
@@ -844,6 +860,22 @@ RUN set -eux; \
     sed -i -E 's|^;?error_log[[:space:]]*=.*|error_log = /proc/self/fd/2|' /usr/local/etc/php-fpm.conf; \
     grep -qx 'error_log = /proc/self/fd/2' /usr/local/etc/php-fpm.conf \
       || { echo "FATAL: php-fpm.conf error_log substitution did not apply" >&2; exit 1; }; \
+# Emergency restart: php-fpm reloads itself when PHP_FPM_EMERGENCY_RESTART_THRESHOLD
+# workers die on SIGSEGV or SIGBUS within PHP_FPM_EMERGENCY_RESTART_INTERVAL, so a
+# crashing JIT or extension costs one reload instead of a pool of respawning
+# corpses. The stock file carries both directives commented out, once each; the
+# values are ${VAR}-driven like www.conf's, with the ENV above as the baked default.
+    for d in emergency_restart_threshold emergency_restart_interval; do \
+      n="$(grep -cE "^;${d}[[:space:]]*=" /usr/local/etc/php-fpm.conf || true)"; \
+      [ "$n" = "1" ] || { echo "FATAL: expected exactly one commented ${d} in php-fpm.conf, found $n" >&2; exit 1; }; \
+    done; \
+    sed -i -E \
+      -e 's|^;emergency_restart_threshold[[:space:]]*=.*|emergency_restart_threshold = ${PHP_FPM_EMERGENCY_RESTART_THRESHOLD}|' \
+      -e 's|^;emergency_restart_interval[[:space:]]*=.*|emergency_restart_interval = ${PHP_FPM_EMERGENCY_RESTART_INTERVAL}|' \
+      /usr/local/etc/php-fpm.conf; \
+    grep -qx 'emergency_restart_threshold = ${PHP_FPM_EMERGENCY_RESTART_THRESHOLD}' /usr/local/etc/php-fpm.conf \
+      && grep -qx 'emergency_restart_interval = ${PHP_FPM_EMERGENCY_RESTART_INTERVAL}' /usr/local/etc/php-fpm.conf \
+      || { echo "FATAL: php-fpm.conf emergency_restart substitution did not apply" >&2; exit 1; }; \
 # docker-php-entrypoint refuses a PHP_FPM_*_EFFECTIVE differing from what this
 # stage baked (they are computed outputs, and the only pool variables
 # `docker image inspect` shows, so operators find and set them by mistake). It

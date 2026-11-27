@@ -5,7 +5,17 @@
 # commits that are older than RETENTION_DAYS (14) and that no floating tag points
 # at; the rules are in ci/ghcr_prune_dev.py. It only ever talks to the package
 # `php/dev`: the name is a constant there, so the hash-pinned PGO corpora
-# (`php/corpus`) that every build pulls and the build cache are out of reach.
+# (`php/corpus`) that every build pulls are out of reach.
+#
+# Two more jobs keep caches from piling up. `prune-actions-caches` runs the shared
+# cache-cleanup workflow (caches of closed pull requests and deleted branches,
+# idle ones, and all but the newest php-src and Trivy DB cache per ref).
+# `prune-registry-cache` clears the build-cache package `php/cache`, which holds
+# the toolchain, ImageMagick and deps layers (docker-bake.hcl's deps-cache target
+# writes `<php>-<uarch>-<arch>-<YYYY>-W<WW>`, one ref per toolchain epoch):
+# untagged versions older than two days, and tagged ones whose ISO-week suffix is
+# neither this week nor last. The epoch turns over on Monday evening, so the week
+# in use is always one of those two. Nothing else.
 #
 # A scheduled run deletes; a manual run is a dry run unless dry_run is switched
 # off. (GitHub runs cron and lists dispatchable workflows only from the default
@@ -61,3 +71,48 @@ jobs:
           args=()
           [ "$DRY_RUN" = true ] && args+=(--dry-run)
           python3 ci/ghcr_prune_dev.py "${args[@]}"
+
+  prune-actions-caches:
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    uses: LotusWebAgency/docker-workflows/.github/workflows/cache-cleanup.yml@v1
+    with:
+      keep-newest-prefixes: "cache-trivy- php-src-"
+      max-idle-days: 7
+      dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+
+  prune-registry-cache:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # list and delete versions of the php/cache package
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+      PACKAGE: php/cache
+    steps:
+      - name: Prune the build cache
+        run: |
+          set -euo pipefail
+          url="/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/${PACKAGE//\//%2F}/versions"
+          keep_weeks="$(date -u +%G-W%V) $(date -u -d '7 days ago' +%G-W%V)"
+          cutoff="$(date -u -d '2 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          plan="$(gh api --paginate "$url?per_page=100" | jq -s --arg weeks "$keep_weeks" --arg cutoff "$cutoff" '
+            ($weeks | split(" ")) as $keep
+            | [ .[][] | { id, created: .created_at, tags: (.metadata.container.tags // []) }
+                | if (.tags | length) == 0 then select(.created < $cutoff) | . + { why: "untagged" }
+                  elif all(.tags[]; test("-[0-9]{4}-W[0-9]{2}$") and ((capture("(?<w>[0-9]{4}-W[0-9]{2})$").w) as $w | $keep | index($w) | not))
+                    then . + { why: "old week" }
+                  else empty end ]')"
+          echo "$(jq length <<<"$plan") versions of $PACKAGE to delete ($(jq '[.[] | select(.why == "untagged")] | length' <<<"$plan") untagged)"
+          jq -r '.[] | select(.why == "old week") | "\(.id) \(.tags | join(","))"' <<<"$plan"
+          if [ "$DRY_RUN" = true ]; then
+            echo "dry run: nothing deleted"
+            exit 0
+          fi
+          for id in $(jq -r '.[].id' <<<"$plan"); do
+            gh api -X DELETE "$url/$id" --silent || echo "::warning::could not delete version $id"
+          done

@@ -1,3 +1,7 @@
+Fixes: ext/openssl reads ASN1_STRING members and ERR_NUM_ERRORS, which OpenSSL 4 made opaque or stopped exporting, so it does not compile against the system OpenSSL 4.
+Origin: own
+Upstream: never: PHP-8.2 and later use the accessors; 8.1 is EOL and will not get the change
+Drop-when: 8.1 leaves the matrix
 Source: local. Adapts the 8.1 branch's ext/openssl to OpenSSL 4, which made ASN1_STRING (and its ASN1_OCTET_STRING / ASN1_UTCTIME aliases) opaque and stopped exporting ERR_NUM_ERRORS. php-src's 8.2 and later branches no longer access these members directly; 8.1 is security-only and never got the change.
 
 --- a/ext/openssl/openssl.c

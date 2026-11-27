@@ -1,0 +1,16 @@
+# Layered over tests/apps/compose.yml by tests/bench-apps.sh: pins every service
+# to its own CPUs so the php workers never share a core with the load generator
+# or the database, and gives php a fixed memory limit (the image sizes opcache
+# and its pool from it). The sysctls keep a static pool at several hundred
+# req/s from running out of ephemeral ports to the database in TIME_WAIT.
+services:
+  db: {cpuset: "${BENCH_CPUSET_SVC:?}"}
+  redis: {cpuset: "${BENCH_CPUSET_SVC:?}"}
+  memcached: {cpuset: "${BENCH_CPUSET_SVC:?}"}
+  web: {cpuset: "${BENCH_CPUSET_SVC:?}"}
+  php:
+    cpuset: "${BENCH_CPUSET_PHP:?}"
+    mem_limit: "${BENCH_PHP_MEM:-6g}"
+    sysctls:
+      net.ipv4.ip_local_port_range: "1024 65535"
+      net.ipv4.tcp_tw_reuse: "1"

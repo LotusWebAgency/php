@@ -23,7 +23,7 @@ ok()      { echo "ok: $*"; }
 fail()    { echo "FAIL: $*" >&2; FAILED+=("$*"); }
 
 # ---------------------------------------------------------- 1. matrix drift
-section "1/12 matrix.gen.hcl drift (scripts/gen_matrix.py --check)"
+section "1/13 matrix.gen.hcl drift (scripts/gen_matrix.py --check)"
 if python3 scripts/gen_matrix.py --check; then
   ok "matrix.gen.hcl matches matrix.json"
 else
@@ -31,7 +31,7 @@ else
 fi
 
 # -------------------------------------------------------------- 2. pgo tiers
-section "2/12 PGO corpus tiers (scripts/pgo_tiers.py check)"
+section "2/13 PGO corpus tiers (scripts/pgo_tiers.py check)"
 if python3 scripts/pgo_tiers.py check; then
   ok "every pgo=true version has a tier, every opt-out has a reason"
 else
@@ -39,7 +39,7 @@ else
 fi
 
 # --------------------------------------------------- 3. bake --print + COMPILER
-section "3/12 bake --print for every target and the pr subset (both platforms), COMPILER cross-check"
+section "3/13 bake --print for every target and the pr subset (both platforms), COMPILER cross-check"
 bake_print() {  # bake_print <group> -> the rendered JSON, or empty + FAIL on error
   local out
   if ! out=$(docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$1" --print 2>&1); then
@@ -107,42 +107,49 @@ fi
 
 if [ -n "${pr_json:-}" ]; then
   # The pr group in docker-bake.hcl and the CI matrix (scripts/gen_matrix.py
-  # --github pr, whose legs name every target they bake, riders included) are
-  # two spellings of one list; a target in one and not the other is a PR that
-  # silently stops building something, or a leg bake cannot resolve.
+  # --github pr: one amd64 entry per PHP version in the PR subset, each naming
+  # every target it bakes in `bake` and `targets`) are two spellings of one
+  # list; a target in one and not the other is a PR that silently stops
+  # building something, or a job bake cannot resolve.
   pr_json_file="$(mktemp)"
   printf '%s' "$pr_json" > "$pr_json_file"
   pr_out="$(python3 scripts/gen_matrix.py --github pr | python3 -c '
 import json, sys
-legs = json.load(sys.stdin)["include"]
+jobs = json.load(sys.stdin)["include"]
 bake = json.load(open(sys.argv[1]))
-ci = {n for leg in legs for n in leg["bake"].split()}
+ci = {n for job in jobs for n in job["bake"].split()}
+nt = sum(len(job["targets"]) for job in jobs)
+if nt != len(ci):
+    print(f"PROBLEM: pr jobs list {nt} targets but bake {len(ci)} distinct names")
+for job in jobs:
+    if job["bake"].split() != [t["name"] for t in job["targets"]]:
+        print(f"PROBLEM: pr job {job['name']}: bake and targets disagree")
 grp = set(bake["group"]["pr"]["targets"])
 for n in sorted(ci - grp):
-    print(f"PROBLEM: {n} is built by a CI pr leg but is not in the bake pr group")
+    print(f"PROBLEM: {n} is built by a CI pr job but is not in the bake pr group")
 for n in sorted(grp - ci):
-    print(f"PROBLEM: {n} is in the bake pr group but no CI pr leg builds it")
-print(f"pr legs: {len(legs)}, targets they bake: {len(ci)}, bake pr group: {len(grp)}")
+    print(f"PROBLEM: {n} is in the bake pr group but no CI pr job builds it")
+print(f"pr jobs: {len(jobs)}, targets they bake: {len(ci)}, bake pr group: {len(grp)}")
 ' "$pr_json_file")"
   rm -f "$pr_json_file"
   echo "$pr_out"
   if grep -q '^PROBLEM:' <<<"$pr_out"; then
     fail "the bake pr group and scripts/gen_matrix.py --github pr disagree (see above)"
   else
-    ok "the bake pr group matches the targets the CI pr legs build"
+    ok "the bake pr group matches the targets the CI pr jobs build"
   fi
 fi
 
 # ------------------------------------------------------------- 4. shellcheck
-section "4/12 shellcheck on every shell file"
+section "4/13 shellcheck on every shell file"
 command -v shellcheck >/dev/null || fail "shellcheck not found on this host"
+php_files=()
 if command -v shellcheck >/dev/null; then
   # rootfs's runtime scripts have no .sh extension (they ship as bare
   # executables in the image). A shell shebang sends one to shellcheck, a php
   # shebang to `php -l` (php-fcgi runs under `php -n` and is written in PHP 7.0
   # syntax; shellcheck cannot parse it), and anything else fails the gate.
   shell_files=()
-  php_files=()
   while IFS= read -r f; do shell_files+=("$f"); done < <(find . -name '*.sh' -not -path './.git/*' -not -path './.claude/*' | sort)
   while IFS= read -r f; do
     shebang="$(head -n1 "$f")"
@@ -197,7 +204,7 @@ if [ "${#php_files[@]}" -gt 0 ]; then
 fi
 
 # ----------------------------------------------------- 5. fetch-verified.sh
-section "5/12 deps/fetch-verified.sh (tests/test-fetch-verified.sh)"
+section "5/13 deps/fetch-verified.sh (tests/test-fetch-verified.sh)"
 if bash "$HERE/test-fetch-verified.sh"; then
   ok "test-fetch-verified.sh"
 else
@@ -205,7 +212,7 @@ else
 fi
 
 # --------------------------------------------- 6. python unit/lock-format tests
-section "6/12 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex, retry helper; tests/apps/: app cell planner)"
+section "6/13 python unit tests (scripts/: matrix/ext-registry/elf-hardening/flags/locks; ci/: vex, retry helper; tests/apps/: app cell planner)"
 # Covers, among others, the lock-file format checks:
 # scripts/test_versions_lock.py (deps/versions.lock), scripts/test_release_keys.py
 # (php/release-keys.asc), scripts/test_fetch_verified_sync.py (the two
@@ -221,7 +228,7 @@ fi
 # input): vex/php.openvex.json is valid OpenVEX, .trivyignore is the file
 # generated from it, the attestation predicate refuses a Trivy step that did not
 # succeed. It does NOT assert that no review-by date has passed: preflight gates
-# every build job, so a date-triggered failure here would stop the whole publish
+# every images job, so a date-triggered failure here would stop the whole publish
 # on the deadline Monday. The deadline gate is Trivy itself (the generated
 # .trivyignore lines carry exp:); `python3 ci/vex.py check --warn-within 14`
 # warns in CI ahead of time.
@@ -240,7 +247,7 @@ else
 fi
 
 # ----------------------------------------------- 7. matrix <-> label consistency
-section "7/12 matrix.json <-> local image com.lotuswebagency.compiler labels (report-only for missing)"
+section "7/13 matrix.json <-> local image com.lotuswebagency.compiler labels (report-only for missing)"
 # Whatever fpm images already exist locally (from an earlier build-all.sh run,
 # or a one-off bake) get cross-checked against matrix.json right now, the same
 # comparison tests/smoke.sh makes per image at test time -- catching a stale
@@ -277,7 +284,7 @@ fi
 rm -f "$label_check_out"
 
 # --------------------------------- 8. build-all.sh vs bake --print target lists
-section "8/12 tests/build-all.sh's target list vs bake --print's target list"
+section "8/13 tests/build-all.sh's target list vs bake --print's target list"
 # tests/build-all.sh enumerates every image it builds from
 # scripts/gen_matrix.py --github targets -- the same source matrix.gen.hcl's
 # TARGETS variable is rendered from -- rather than naming a flavor or a count
@@ -316,7 +323,7 @@ else
 fi
 
 # ------------------------------------------------------------- 9. runners
-section "9/12 no ubuntu-slim runners in .github/workflows"
+section "9/13 no ubuntu-slim runners in .github/workflows"
 # ubuntu-slim runs jobs in a 1-vCPU container: a compile or test job there is
 # several times slower and a 180-minute build leg times out. Every runs-on and
 # matrix runner label must name a full VM image.
@@ -330,7 +337,7 @@ case "$slim_rc" in
 esac
 
 # ------------------------------------------------- 10. no Debian leftovers
-section "10/12 no apt, dpkg or Debian leftovers in the image sources"
+section "10/13 no apt, dpkg or Debian leftovers in the image sources"
 # The base is Wolfi: a Debian package manager command or a trixie reference in a
 # Dockerfile, test, script or CI helper is a leftover from the Debian era or a
 # command that cannot work. Each legitimate mention is allowlisted below by file
@@ -383,7 +390,7 @@ for ((i = 0; i < ${#DEBIAN_ALLOW[@]}; i += 3)); do
 done
 
 # ------------------------------------------------- 11. one wolfi-base digest
-section "11/12 every wolfi-base digest pin is identical"
+section "11/13 every wolfi-base digest pin is identical"
 # Renovate bumps all of them in one PR; a hand edit that misses one leaves
 # ci/sources.sh (it pulls the Dockerfile's default) on another base than bake.
 wolfi_pins="$(git grep -n -I --untracked -oE 'cgr\.dev/chainguard/wolfi-base(:[^@" ]+)?@sha256:[a-f0-9]{64}' \
@@ -398,7 +405,7 @@ else
 fi
 
 # ------------------------------------------------- 12. DOCKERHUB.md size
-section "12/12 DOCKERHUB.md stays under Docker Hub's 25,000-character limit"
+section "12/13 DOCKERHUB.md stays under Docker Hub's 25,000-character limit"
 # The Hub rejects a longer overview, and the description sync in CI would fail
 # after the images were already published. Characters, not bytes, whatever the locale.
 dockerhub_chars="$(python3 -c 'import sys; print(len(open(sys.argv[1], encoding="utf-8").read()))' DOCKERHUB.md)"
@@ -406,6 +413,18 @@ if [ "$dockerhub_chars" -ge 25000 ]; then
   fail "DOCKERHUB.md is $dockerhub_chars characters; Docker Hub's limit is 25,000, so it must stay under"
 else
   ok "DOCKERHUB.md is $dockerhub_chars characters (limit 25,000)"
+fi
+
+# ------------------------------------------- 13. patch inventory
+section "13/13 deps/patches headers and inventory tables (ci/patches.py check)"
+# Every patch carries Fixes/Origin/Upstream/Drop-when, every directory names a pinned
+# version or extension tag, and the tables in deps/patches/README.md are generated
+# from those headers. The GitHub side (which patches a pin already carries) is
+# `python3 ci/patches.py online`, run per release pass and per version bump.
+if python3 ci/patches.py check; then
+  ok "patch headers valid, deps/patches/README.md current"
+else
+  fail "ci/patches.py check failed -- fix the header, then: python3 ci/patches.py write"
 fi
 
 # ------------------------------------------------------------------ summary

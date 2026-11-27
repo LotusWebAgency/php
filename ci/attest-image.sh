@@ -10,12 +10,12 @@
 #                 attached to it to Docker Hub, same digests)
 #   list-digest   the multi-platform manifest list the tags point at
 #   flavor        fpm | cli | cli-builder | ext-builder (selects the VEX statements)
-#   results-dir   holds, per architecture, <arch> (the index digest the build job
-#                 pushed) and <arch>.test-result.json (written by the build job's
+#   results-dir   holds, per architecture, <arch> (the index digest the images job
+#                 pushed) and <arch>.test-result.json (written by the images job's
 #                 ci/result_predicate.py once smoke and Trivy passed)
 #
 # platforms runs BEFORE the list exists. A platform manifest is addressable from
-# the per-arch index digest the build job pushed (and is the same bytes the list
+# the per-arch index digest the images job pushed (and is the same bytes the list
 # will hold), so every platform attestation goes on before any tag is created.
 # Everything is checked first -- every architecture has a result, and each result
 # was recorded for the manifest its index resolves to -- so a missing or foreign
@@ -97,7 +97,7 @@ attest_vex() {  # attest_vex <digest>
   esac
 }
 
-# The architectures the build job produced a result for, sorted.
+# The architectures the images job produced a result for, sorted.
 result_arches() {
   local f
   for f in "$dir"/*.test-result.json; do
@@ -107,7 +107,7 @@ result_arches() {
 }
 
 if [ "$mode" = platforms ]; then
-  # An architecture is expected wherever the build job left an index digest.
+  # An architecture is expected wherever the images job left an index digest.
   expected=()
   for f in "$dir"/*; do
     case "$f" in *.json) continue ;; esac

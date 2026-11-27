@@ -5,25 +5,67 @@
 #
 # Three modes, chosen by the event and the ref:
 #
-#   pull request (to main or develop)  `verify` builds, tests and Trivy-gates a
+#   pull request (to main or develop)  `images` builds, tests and Trivy-gates a
 #     small subset on amd64 without publishing. The aggregate `pr-gate` is the one
-#     required check, so a PHP version bump that renames per-leg check names cannot
-#     silently stop branch protection from covering anything.
-#   push or dispatch on develop  `verify` over the whole matrix, natively on amd64
-#     and arm64 (no QEMU): build --load, smoke, the ext-builder end-to-end test,
-#     the slim parity check, Trivy. Every image that passed is pushed to GHCR as
-#     ghcr.io/lotuswebagency/php/dev:<tag>-<sha>-<arch> for further testing;
-#     `dev-manifest` joins the arches into dev:<tag>-<sha> and, when every verify
-#     leg succeeded, moves the floating dev:<tag>. These are unpublished test
-#     builds, pruned by dev-prune.yml. Nothing reaches Docker Hub: no job here
-#     logs in to it, holds the `release` environment or sets a push output on a
-#     bake build. The PGO corpus is built and published to GHCR; the build cache
-#     is read from GHCR but only `build` writes it.
-#   push or dispatch on main, and the weekly cron (default branch only)  `build`
-#     pushes every image by digest, with SBOM + max-mode provenance, to the GHCR
-#     staging repository ghcr.io/lotuswebagency/php/release and tests that digest.
-#     `merge` assembles the multi-arch lists, signs every manifest keylessly with
-#     cosign and attaches keyless attestations: the test results `build` recorded
+#     required check, so a PHP version bump that renames per-entry check names
+#     cannot silently stop branch protection from covering anything.
+#   push or dispatch on develop  `images` over the whole matrix, natively on amd64
+#     and arm64 (no QEMU): every image is pushed by digest to GHCR
+#     (ghcr.io/lotuswebagency/php/dev, with SBOM and max-mode provenance), pulled
+#     back and tested by that digest: smoke, the ext-builder end-to-end test, the
+#     slim parity check, Trivy. Every image that passed is tagged
+#     dev:<tag>-<sha12>-<arch> for further testing; `dev-manifest` joins the
+#     arches into dev:<tag>-<sha12> and, when every entry succeeded, moves the
+#     floating dev:<tag>; `candidate` records the run's digests as
+#     release-candidate.json. These are unsigned test builds, pruned by
+#     dev-prune.yml. Nothing reaches Docker Hub: no job here logs in to it or
+#     holds the `release` environment. The PGO corpus is built and published to
+#     GHCR, and `fixtures` builds the application fixtures `extended` needs there.
+#     Develop and main write, and every build reads, a registry build cache (the
+#     deps-cache target in docker-bake.hcl).
+#     A develop push or dispatch whose inputs hash (scripts/inputs-hash.sh) equals
+#     that of the newest green develop run's release candidate, with every image
+#     at most five days old, builds nothing (ci/reuse_plan.py, run by `plan`):
+#     `images` pulls that run's images by digest, tests them again with today's
+#     Trivy DB, tags them for this commit and records them in this run's
+#     candidate with their original build run and time. The dispatch input
+#     `rebuild` forces a build.
+#   pull request from develop to main (the promote PR)  the `promote-check` job
+#     applies the checks a copy release makes (below) to the PR head and decides
+#     `copy` or not. When main could publish develop's images by copy, `images` is
+#     skipped (nothing is built, and the merge ref's tree is the head's, so what the
+#     PR gate passes is exactly what the push to main will copy). When it could not
+#     (develop's run is stale or reused images, the first promotion after a change to
+#     extended.yml's run-name, no extended run yet), `images` runs the subset build
+#     like any other pull request and main rebuilds on the merge. promote-check
+#     fails, and so blocks the PR, only for a set RELEASE_HOLD (the copy path and this
+#     check only: a hold does not stop a push to main from building and publishing),
+#     a merge ref that is not a merge of the PR head, or a merge ref whose tree is
+#     not the head's.
+#   push on main, when a merge commit of develop carries develop's tree unchanged
+#     (ci/release_source.py, run by `release-source`; the checks are in its
+#     header: the develop run of the second parent succeeded as a whole and built
+#     every image itself and no later develop run of the commit exists, the
+#     extended.yml run that completion started (event workflow_run, titled with
+#     that commit and that run attempt) succeeded having pulled the images by the
+#     digests of the run's release candidate, and that candidate is complete, for this inputs hash and this
+#     ci.yml, at most seven days old, re-checked in every `merge` leg)  copies
+#     instead of building: `images`, `corpus`, `corpus-merge` and `sources` are skipped,
+#     and each `merge` leg takes the develop run's digests and test results by
+#     run id, checks them against the candidate, copies the two per-arch indexes
+#     from php/dev to the staging repository by digest (regctl; same digests, same
+#     SBOM and provenance, which name develop's run), rescans both platform
+#     manifests with today's Trivy DB (vulnerability, KEV, package floor), and goes
+#     on as below: list, signatures, attestations, tags. The test-result
+#     predicates keep develop's commit and run (git_sha, git_ref,
+#     workflow_run_url); the list, its signatures and its attestations are main's.
+#     The image's own revision label is develop's commit, the merge commit's
+#     second parent, whose tree is the merge commit's.
+#   push or dispatch on main with any other history, a dispatch, and the weekly cron
+#     (default branch only) always build: `images` pushes every image by digest, with SBOM + max-mode provenance, to the
+#     GHCR staging repository ghcr.io/lotuswebagency/php/release and tests that
+#     digest. `merge` assembles the multi-arch lists, signs every manifest keylessly
+#     with cosign and attaches keyless attestations: the test results `images` recorded
 #     after smoke and Trivy passed, and the OpenVEX statements from
 #     vex/php.openvex.json where one applies to the flavor. `promote` copies each
 #     signed list to Docker Hub with its signatures and attestations, same
@@ -35,12 +77,10 @@
 #     `release`, with that environment limited to `main`: a repository setting
 #     this file cannot enforce.
 #
-# ext-builder, fpm-slim and cli-slim are not legs of their own. Each is built in the
-# same bake invocation as its host (scripts/gen_matrix.py's build legs: ext-builder
-# with cli, fpm-slim with fpm, cli-slim with cli-builder), so the php-build stage
-# (PHP compile plus the PGO passes) is shared. The rider's image is still tested,
-# pushed by its own digest, merged and signed separately. A leg has at most one
-# rider; the steps below call it the rider and key on rider_flavor. The slim
+# One `images` entry is one PHP version for one microarchitecture and architecture
+# (scripts/gen_matrix.py's version entries) and builds every flavor of it in one
+# bake invocation, so the stages the flavors share are built once. Each image is
+# still tested, pushed by its own digest, merged and signed separately. The slim
 # flavors are also checked against their host's image (tests/test-slim-parity.sh:
 # the same php, php-fpm, extension binaries and /usr/local tree).
 #
@@ -56,7 +96,7 @@
 # published as the floating `php<tier>` ref that every target's `corpus` context
 # names and as `php<tier>-<inputs-hash>`. A `docker-image://` context resolves a
 # multi-platform index to the building target's own platform, so one ref serves
-# both the amd64 and the arm64 legs. Every verify/build leg mounts the hash-pinned
+# both the amd64 and the arm64 entries. Every images entry mounts the hash-pinned
 # ref and asserts the pulled image's inputs-hash label: the floating tag can point
 # at a corpus another tree trained (after a revert, for instance).
 #
@@ -82,11 +122,11 @@
 #     source can change what is pulled.
 #   - The run's only Docker Hub reads are hub-verify's few anonymous ones.
 #   - The base image is not on Docker Hub: cgr.dev/chainguard/wolfi-base, pinned
-#     by digest in matrix.json and the Dockerfiles. Preflight verifies that
+#     by digest in matrix.json and the Dockerfiles. `plan` verifies that
 #     digest's Chainguard cosign signature before any job builds on it.
 # Registry calls that can still meet a 429/5xx run under ci/retry.sh; builds also
 # retry transient HTTP and apk failures, never deterministic build errors.
-# Trivy's vulnerability DB is refreshed once per run in parallel with preflight,
+# Trivy's vulnerability DB is refreshed once per run in parallel with plan,
 # then shared as an artifact so matrix scans use the same DB without updating it.
 # The CISA KEV catalog is fetched in the same job and shared the same way.
 name: ci
@@ -97,12 +137,14 @@ on:
   push:
     branches: [main, develop]
   workflow_dispatch:
+    inputs:
+      rebuild:
+        description: Build the images even when the last develop build has the same inputs. On develop it re-points the commit's dev tags, so the release of that commit rebuilds instead of copying (an older extended run no longer vouches for them)
+        type: boolean
+        default: false
   schedule:
-    # Weekly rebuild: fresh base layers and Wolfi package updates. The bake
-    # cache ref includes an ISO-week component (docker-bake.hcl's CACHE_WEEK)
-    # so this run always starts the runtime-package layer's cache scope
-    # empty instead of replaying last week's apk add forever.
-    - cron: "10 4 * * 1"
+    # Weekly rebuild: fresh base layers and Wolfi package updates.
+    - cron: "10 19 * * 1"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -118,6 +160,9 @@ permissions: {}
 
 env:
   GHCR_CORPUS_REGISTRY: ghcr.io/lotuswebagency/php
+  # develop's images: pushed by digest, tagged per commit and architecture, and
+  # the repository a release candidate names.
+  DEV_REPO: ghcr.io/lotuswebagency/php/dev
   # main's images between build and promotion: pushed by digest, tested, merged,
   # signed and attested here; promote copies them to Docker Hub. Its tags follow
   # the Docker Hub ones from the merge job on (see merge).
@@ -130,7 +175,7 @@ env:
   # action's own setup and run it.
   SETUP_TRIVY_VERSION: v0.76.2
   # The Cosign release cosign-installer fetches (its own default is older).
-  COSIGN_VERSION: v3.1.4
+  COSIGN_VERSION: v3.1.5
   # Control for the Trivy scans: an image's report must list more than this many
   # OS packages (the "Trivy package floor" steps), so a scan that read no package
   # database (an empty report passes every gate above it) cannot go green. A
@@ -144,16 +189,15 @@ jobs:
   # Everything tests/preflight.sh already checks without building an image:
   # matrix.gen.hcl drift, PGO tier coverage, bake --print + COMPILER
   # cross-check, shellcheck, the python unit suite, build-all.sh/bake target
-  # list drift. Runs on every push and PR -- cheap, and it is what catches a
-  # stale generated file or a shellcheck regression in seconds rather than
-  # forty minutes into a from-source PGO build.
+  # list drift. Runs on every push and PR, beside `plan` rather than in front of
+  # the images job: it catches a stale generated file or a shellcheck regression
+  # in minutes, and what it gates is whatever publishes or moves a floating tag
+  # (dev-manifest, promote) and the PR gate, not the builds themselves.
   preflight:
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
-    outputs:
-      wolfi-index-state: ${{ steps.wolfi.outputs.index-state }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -189,12 +233,72 @@ jobs:
       # against two throwaway registries (GHCR-like and Docker Hub-like) and a
       # local key, in the merge and promote jobs' order.
       - name: Install Cosign
-        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        uses: sigstore/cosign-installer@881c63bd87e38389154debd8331404ce7ca8a3ab # v4.1.4
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
       - name: Install regctl
         run: ./ci/install-regctl.sh
+
+      - name: tests/test-attest.sh
+        run: ./tests/test-attest.sh
+
+  # -------------------------------------------------------------------- plan
+  # Everything the images job takes as a given, computed once per run, so no entry
+  # does it again and no two entries can disagree:
+  #   - the base image's signature (below), before any job builds on it;
+  #   - the Wolfi index state, the inputs hash and the toolchain epoch;
+  #   - the matrices (scripts/gen_matrix.py, the source tests/preflight.sh's
+  #     bake --print cross-check trusts).
+  # Runs on every event; the jobs that consume a matrix gate on the ref.
+  #
+  # `matrix` is one entry per (PHP version, uarch, arch) with every target of
+  # that version in it (`--github version`, longest first, so the slowest
+  # compiles start first and the short ones fill in behind them); a pull request
+  # gets the bake `pr` subset (php-7_0-fpm, php-8_2-fpm, php-8_5-fpm,
+  # php-8_5-cli-builder and php-8_5-cli, which carries ext-builder, plus the slim
+  # riders php-8_5-fpm-slim, php-8_5-cli-slim and php-7_0-fpm-slim -- oldest and
+  # newest ends, one mid-range version, the heaviest flavor, the extension
+  # build stage and both slim flavors) on amd64 only (`--github pr`, the same
+  # entry shape). The runner follows from an entry's `arch`.
+  # `targets` is the full 78-target list for merge, promote and hub-verify.
+  #
+  # Preflight runs beside this job and gates nothing that builds: only what
+  # publishes or moves a floating tag (dev-manifest, promote) and the PR gate
+  # wait for it.
+  #
+  # `mode` is `build`, or `reuse` for a develop push or dispatch whose images the
+  # newest green develop run already built from the same inputs (ci/reuse_plan.py
+  # lists the conditions; the reason is in the step summary). A reuse run skips
+  # the corpus, the sources and every bake, and its `images` entries only test.
+  plan:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read # the develop runs and their release-candidate artifact (reuse)
+    env:
+      # Repository variable: a forced toolchain refresh before the week ends,
+      # for example 2026-W48.1 (see ci/toolchain-epoch.sh). Empty: the epoch.
+      TOOLCHAIN_EPOCH_OVERRIDE: ${{ vars.TOOLCHAIN_EPOCH_OVERRIDE }}
+    outputs:
+      wolfi-index-state: ${{ steps.wolfi.outputs.index-state }}
+      inputs-hash: ${{ steps.hash.outputs.inputs-hash }}
+      toolchain-epoch: ${{ steps.epoch.outputs.toolchain-epoch }}
+      cache-week: ${{ steps.epoch.outputs.cache-week }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      targets: ${{ steps.matrix.outputs.targets }}
+      mode: ${{ steps.reuse.outputs.mode }}
+      ci-hash: ${{ steps.hash.outputs.ci-hash }}
+      promote: ${{ steps.promote.outputs.promote }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@881c63bd87e38389154debd8331404ce7ca8a3ab # v4.1.4
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
 
       # Every digest the tree pins for the base (matrix.json, the Dockerfile's
       # and the bootstrap Dockerfile's ARG default) must carry Chainguard's
@@ -216,14 +320,11 @@ jobs:
               --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
           done <<<"$refs"
 
-      - name: tests/test-attest.sh
-        run: ./tests/test-attest.sh
-
       # Wolfi's index changes many times a day. Computed here once and handed to
-      # every verify and build leg on both architectures through needs.preflight,
+      # every images entry on both architectures through needs.plan,
       # so the image that was verified is built from the same index as the one
       # that is published. The runtime apk-upgrade layer rebuilds whenever this
-      # value moved (cheap; the php-build stages stay cached).
+      # value moved; the compile stages key on the toolchain epoch instead.
       - name: Pin the Wolfi index state for every build leg
         id: wolfi
         run: |
@@ -232,11 +333,207 @@ jobs:
           [ -n "$WOLFI_INDEX_STATE" ] || { echo "::error::ci/wolfi-index-state.sh printed no index state"; exit 1; }
           echo "index-state=$WOLFI_INDEX_STATE" >> "$GITHUB_OUTPUT"
 
+      - name: Compute the inputs hash
+        id: hash
+        run: |
+          set -euo pipefail
+          hash="$(./scripts/inputs-hash.sh)"
+          [ -n "$hash" ] || { echo "::error::scripts/inputs-hash.sh printed no hash"; exit 1; }
+          echo "inputs-hash=$hash" >> "$GITHUB_OUTPUT"
+          # How the images are built (bake flags, SBOM, provenance, tests) is not
+          # in the inputs hash; a reuse or a copy only trusts images built under
+          # this very file.
+          ci_hash="$(sha256sum .github/workflows/ci.yml | cut -d' ' -f1)"
+          [[ "$ci_hash" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no sha256 of ci.yml"; exit 1; }
+          echo "ci-hash=$ci_hash" >> "$GITHUB_OUTPUT"
+
+      # The pull request that promotes develop: same repository, head develop,
+      # base main. `promote-check` decides whether `images` runs for it.
+      - name: Recognize the promote pull request
+        id: promote
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          promote=false
+          if [ "$EVENT_NAME" = pull_request ] && [ "$HEAD_REF" = develop ] && [ "$BASE_REF" = main ] && [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ]; then
+            promote=true
+          fi
+          echo "promote=$promote" >> "$GITHUB_OUTPUT"
+
+      # The toolchain layers (and with them the registry cache scope) turn over
+      # weekly; CACHE_WEEK is the epoch without a forced-refresh `.N` suffix.
+      - name: Compute the toolchain epoch
+        id: epoch
+        run: |
+          set -euo pipefail
+          EP="$(./ci/toolchain-epoch.sh)"
+          {
+            echo "toolchain-epoch=$EP"
+            echo "cache-week=${EP%%.*}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Emit the matrices
+        id: matrix
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            matrix="$(python3 scripts/gen_matrix.py --github pr | jq -ce '.include | select(length > 0)')"
+          else
+            matrix="$(python3 scripts/gen_matrix.py --github version | jq -ce '.include | select(length > 0)')"
+          fi
+          targets="$(python3 scripts/gen_matrix.py --github targets | jq -ce '.include | select(length > 0)')"
+          {
+            echo "matrix=$matrix"
+            echo "targets=$targets"
+          } >> "$GITHUB_OUTPUT"
+
+      # Never fails the run: anything unreadable or unexpected is a build, with
+      # the reason in the summary. The verified candidate goes to this run's
+      # `images` entries as an artifact, so they all read the one file the
+      # decision was made on.
+      - name: Decide whether to reuse the last develop build
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REBUILD: ${{ inputs.rebuild }}
+          INPUTS_HASH: ${{ steps.hash.outputs.inputs-hash }}
+          CI_HASH: ${{ steps.hash.outputs.ci-hash }}
+          TARGETS: ${{ steps.matrix.outputs.targets }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/reuse"
+          printf '%s\n' "$TARGETS" > "$RUNNER_TEMP/targets.json"
+          decision="$(python3 ci/reuse_plan.py plan --repo "$GITHUB_REPOSITORY" --event "$EVENT_NAME" --ref "$GITHUB_REF" \
+            --rebuild "$REBUILD" --inputs-hash "$INPUTS_HASH" --ci-hash "$CI_HASH" --targets "$RUNNER_TEMP/targets.json" --dev-repo "$DEV_REPO" \
+            --run-id "$GITHUB_RUN_ID" --save-candidate "$RUNNER_TEMP/reuse/release-candidate.json")" || {
+            echo "::warning::ci/reuse_plan.py failed; building"
+            decision='{"mode":"build","reason":"ci/reuse_plan.py failed"}'
+          }
+          mode="$(jq -er .mode <<<"$decision")"
+          reason="$(jq -er .reason <<<"$decision")"
+          echo "mode=$mode: $reason"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          printf '### Images: %s\n\n%s\n' "$mode" "$reason" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the candidate to reuse
+        if: ${{ steps.reuse.outputs.mode == 'reuse' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reuse-candidate
+          path: ${{ runner.temp }}/reuse/release-candidate.json
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  # ---------------------------------------------------------- release-source
+  # Decides, on a push to main, whether the release copies the images develop
+  # already built and tested (`copy`) or builds them (`rebuild`); see the header
+  # of ci/release_source.py for the rules. Runs on every event so that the jobs
+  # that read its output are never skipped by a skipped need; the decision is
+  # made only for a push to main, and anything else leaves the mode empty, which
+  # is a build. Never fails the run on an unreadable GitHub: that is a rebuild,
+  # with the reason in the summary. The verified candidate goes to the `merge`
+  # legs as an artifact, so every leg reads the one file the decision was made on.
+  #
+  # The job's outputs are written by its last step, which runs only when every
+  # step before it succeeded: a job that fails anywhere (the decision script, the
+  # candidate upload) has no mode, which every consumer reads as a build, and the
+  # consumers that would otherwise be skipped with it (`sources`, `corpus`) run on
+  # `!cancelled()` instead of the implicit success of their needs.
+  release-source:
+    needs: plan
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read # develop's ci runs, the extended run and the release-candidate artifact
+      statuses: read # the release/extended commit status
+    outputs:
+      mode: ${{ steps.publish.outputs.mode }}
+      run-id: ${{ steps.publish.outputs.run-id }}
+      sha: ${{ steps.publish.outputs.sha }}
+    steps:
+      # Two commits deep: the merge commit and both its parents, which is all
+      # the tree comparison reads.
+      - name: Checkout
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Decide between copying develop's images and building
+        id: decide
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUTS_HASH: ${{ needs.plan.outputs.inputs-hash }}
+          CI_HASH: ${{ needs.plan.outputs.ci-hash }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          RELEASE_HOLD: ${{ vars.RELEASE_HOLD }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/copy"
+          printf '%s\n' "$TARGETS" > "$RUNNER_TEMP/targets.json"
+          decision="$(python3 ci/release_source.py decide --mode main --repo "$GITHUB_REPOSITORY" --inputs-hash "$INPUTS_HASH" \
+            --ci-hash "$CI_HASH" --targets "$RUNNER_TEMP/targets.json" --dev-repo "$DEV_REPO" --hold "$RELEASE_HOLD" \
+            --save-candidate "$RUNNER_TEMP/copy/release-candidate.json")" || {
+            echo "::warning::ci/release_source.py failed; building"
+            decision='{"mode":"rebuild","reason":"ci/release_source.py failed"}'
+          }
+          mode="$(jq -er .mode <<<"$decision")"
+          reason="$(jq -er .reason <<<"$decision")"
+          if [ "$mode" = copy ]; then
+            run_id="$(jq -er .run_id <<<"$decision")"
+            sha="$(jq -er .sha <<<"$decision")"
+            if [[ ! "$run_id" =~ ^[0-9]+$ ]] || [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              mode=rebuild
+              reason="ci/release_source.py named a run '$run_id' and a commit '$sha'"
+            fi
+          fi
+          echo "mode=$mode: $reason"
+          {
+            echo "mode=$mode"
+            if [ "$mode" = copy ]; then
+              echo "run-id=$run_id"
+              echo "sha=$sha"
+            fi
+          } >> "$GITHUB_OUTPUT"
+          printf '### Release: %s\n\n%s\n' "$mode" "$reason" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the verified candidate
+        if: ${{ steps.decide.outputs.mode == 'copy' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: copy-candidate
+          path: ${{ runner.temp }}/copy/release-candidate.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+      - name: Publish the decision
+        id: publish
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        env:
+          MODE: ${{ steps.decide.outputs.mode }}
+          RUN_ID: ${{ steps.decide.outputs.run-id }}
+          SHA: ${{ steps.decide.outputs.sha }}
+        run: |
+          {
+            echo "mode=$MODE"
+            echo "run-id=$RUN_ID"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
+
   # ---------------------------------------------------------------- trivy-db
-  # One vulnerability DB refresh per run, parallel with preflight, instead of
-  # every verify/build leg racing the registry and the same dated cache key.
+  # One vulnerability DB refresh per run, parallel with plan, instead of
+  # every images entry racing the registry and the same dated cache key.
   # The artifact gives every architecture the same DB for its scan and recorded
-  # test-result predicate; a failed refresh stops those legs before they build.
+  # test-result predicate; a failed refresh stops those entries before they build.
   trivy-db:
     runs-on: ubuntu-26.04
     timeout-minutes: 60
@@ -307,8 +604,11 @@ jobs:
   # php-src-cache mount before the first bake. A miss anywhere only means that
   # leg fetches the file itself: deps/fetch-verified.sh re-checks every sha256 it
   # reads from the mount, and a mount's content is not part of any cache key, so
-  # the cache can never change what is built.
+  # the cache can never change what is built. A reuse run builds nothing and
+  # skips it.
   sources:
+    needs: [plan, release-source, promote-check]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && (needs.plan.outputs.promote != 'true' || (needs.promote-check.result == 'success' && needs.promote-check.outputs.copy == 'false')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
@@ -340,111 +640,99 @@ jobs:
           path: ${{ runner.temp }}/php-src-cache
           key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock', 'ci/sources.sh') }}
 
-  # ----------------------------------------------------------- verify-matrix
-  # What the verify job below builds, and on which architectures. A pull
-  # request gets the bake `pr` subset (php-7_0-fpm, php-8_2-fpm, php-8_5-fpm,
-  # php-8_5-cli-builder and php-8_5-cli, which carries ext-builder, plus the slim
-  # riders php-8_5-fpm-slim, php-8_5-cli-slim and php-7_0-fpm-slim -- oldest and
-  # newest ends, one mid-range version, the heaviest flavor, the extension
-  # build stage and both slim flavors) on amd64 only; develop gets every build leg on amd64 and arm64.
-  # Both lists come from scripts/gen_matrix.py, the source tests/preflight.sh's
-  # bake --print cross-check trusts.
-  verify-matrix:
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/develop'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    outputs:
-      legs: ${{ steps.matrix.outputs.legs }}
-      arches: ${{ steps.matrix.outputs.arches }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - id: matrix
-        run: |
-          set -euo pipefail
-          amd64='{"name":"amd64","runner":"ubuntu-26.04","platform":"linux/amd64"}'
-          arm64='{"name":"arm64","runner":"ubuntu-26.04-arm","platform":"linux/arm64"}'
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
-            legs="$(python3 scripts/gen_matrix.py --github pr | jq -ce '.include | select(length > 0)')"
-            echo "legs=$legs" >> "$GITHUB_OUTPUT"
-            echo "arches=[$amd64]" >> "$GITHUB_OUTPUT"
-          else
-            legs="$(python3 scripts/gen_matrix.py --github build | jq -ce '.include | select(length > 0)')"
-            echo "legs=$legs" >> "$GITHUB_OUTPUT"
-            echo "arches=[$amd64,$arm64]" >> "$GITHUB_OUTPUT"
-          fi
-
-  # ------------------------------------------------------------------ verify
-  # Build the leg's bake targets for this architecture with --load, smoke.sh
-  # each image, the ext-builder end-to-end test where the leg carries it, and
-  # the Trivy gate on the loaded images. On develop, once all of that passed,
-  # the tested images are pushed to ghcr.io/lotuswebagency/php/dev under
-  # per-arch tags (the last step; dev-manifest below joins them). Never reaches
-  # Docker Hub: no Docker Hub login, no `release` environment, and no PUSH
-  # variable, so the bake build itself has no output a registry could receive --
-  # the dev push is a plain `docker push` of the image that was just tested.
-  # This is the whole of what runs for a pull request and for develop; main's
-  # publishing counterpart is the `build` job below.
+  # ------------------------------------------------------------------ images
+  # One job per matrix entry of `plan`: one PHP version x microarchitecture x
+  # architecture, natively on that architecture's runner, no QEMU. It builds every
+  # target of the entry in one `docker buildx bake` call (BuildKit builds the
+  # shared php-build stage once), mounts each target's tier corpus by its
+  # hash-pinned GHCR ref, then tests the images with ci/test-images.sh: smoke,
+  # slim parity, the ext-builder end-to-end test, and the Trivy, KEV, package-floor
+  # and AGPL gates. No Docker Hub login and no `release` environment: every
+  # Docker Hub base image is read anonymously, through the mirrors.
   #
-  # Mounts each target's tier corpus by its hash-pinned GHCR ref and asserts the
-  # pulled image's inputs-hash label matches, never the floating ref (see the
-  # header). A PR that changes the PGO corpus itself is not re-trained by its own
-  # gate (the corpus job runs only on develop and main), so it is graded against
-  # the last published corpus for its tier; a develop push has its corpus built by
-  # the corpus jobs first.
+  #   pull request   `--load` into the local daemon, tested as loaded. Nothing is
+  #                  pushed. The registry cache is read-only, and absent for a
+  #                  fork's pull request.
+  #   develop        pushed by digest (SBOM + max provenance) to php/dev, pulled
+  #                  back and tested by that digest. Targets that passed get
+  #                  dev:<tag>-<sha12>-<arch> (ci/dev-tag.sh, which dev-manifest
+  #                  joins) and a digest-<target>-<arch> artifact. The `candidate`
+  #                  job records the whole run once every entry passed.
+  #   main           pushed by digest to the staging repository php/release,
+  #                  tested the same way; the digest-<target>-<arch> artifacts are
+  #                  what `merge` assembles, signs and attests. Nothing is
+  #                  pullable under a real name until merge tags it.
+  # What gets tested and merged is byte-for-byte what was pushed, never a separate
+  # --load build that could drift if a base layer refreshed between two builds.
+  #
+  # A reuse run (`plan`'s mode, develop only) skips the corpus, the sources, the
+  # builder and the bake: the entry's index digests come from the candidate
+  # `plan` verified (ci/reuse_plan.py entry), and everything from the test on
+  # runs as for a build. The test uses this run's Trivy DB, so a CVE published
+  # since the build still fails the entry, and the smoke test still refuses an
+  # image whose inputs-hash label differs from this tree's. The PGO check is the
+  # one thing left out (SMOKE_SKIP_PGO): it compares the image with the tier's
+  # corpus, which is not pulled, and both are the ones the previous run checked,
+  # since the hash that names the corpus is unchanged. The new dev tags and the
+  # candidate record carry the original build's time and run.
+  #
+  # The registry cache (CACHE_REGISTRY/cache:<php>-<uarch>-<arch>-<week>) is
+  # written on develop and main by the entry's deps-cache target in the same bake
+  # call, and read by every build. The package is public: reading it needs no login.
+  #
+  # A pull request that changes any build input (a Renovate base-digest bump, say)
+  # has an inputs hash no corpus job has built, so its hash-pinned corpus ref does
+  # not exist: it is graded against the tier's last published corpus. A pull
+  # request that changes the PGO corpus itself is not re-trained by its own gate
+  # (the corpus jobs run only on develop and main). develop and main never fall
+  # back.
   #
   # `!cancelled()` plus explicit result checks instead of the implicit success
   # gate: corpus-merge is skipped on a pull request, and one failed corpus tier
-  # on develop must only fail the legs that mount it, not skip every other leg
-  # (same reasoning as `build`'s condition).
-  verify:
-    needs: [preflight, verify-matrix, corpus-merge, trivy-db, sources]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.verify-matrix.result == 'success' && needs.trivy-db.result == 'success' }}
-    name: verify ${{ matrix.target.name }} ${{ matrix.arch.name }}
+  # on develop or main must only fail the entries that mount it, not skip every
+  # other entry.
+  #
+  # A failed test leaves the targets that passed their tags and artifacts (the
+  # steps after the test run unless the run was canceled) and fails the job.
+  images:
+    needs: [plan, release-source, promote-check, corpus-merge, trivy-db, sources]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.trivy-db.result == 'success' && needs.release-source.outputs.mode != 'copy' && (needs.plan.outputs.promote != 'true' || (needs.promote-check.result == 'success' && needs.promote-check.outputs.copy == 'false')) && (github.event_name == 'pull_request' || github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') }}
+    name: images ${{ matrix.job.name }}
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJson(needs.verify-matrix.outputs.legs) }}
-        arch: ${{ fromJson(needs.verify-matrix.outputs.arches) }}
-    runs-on: ${{ matrix.arch.runner }}
-    timeout-minutes: 180
+        job: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.job.arch == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    timeout-minutes: 240
     permissions:
       contents: read
-      # GHCR: pull of the PGO corpus image and the build cache, and, on a develop
-      # push only, the dev image push. A pull request never reaches the push
-      # step (and a fork's token is read-only whatever is asked for here).
+      # GHCR: the corpus pull, the cache push, and the develop and main image pushes.
+      # A pull request never pushes (and a fork's token is read-only whatever is
+      # asked for here).
       packages: write
     env:
-      # The same value in every leg of both jobs, computed once in preflight.
-      WOLFI_INDEX_STATE: ${{ needs.preflight.outputs.wolfi-index-state }}
-      TARGET_NAME: ${{ matrix.target.name }}
-      TARGET_BAKE: ${{ matrix.target.bake }}
-      TARGET_TAG: ${{ matrix.target.tags[0] }}
-      TARGET_PHP: ${{ matrix.target.php }}
-      TARGET_UARCH: ${{ matrix.target.uarch }}
-      TARGET_FLAVOR: ${{ matrix.target.flavor }}
-      TARGET_CORPUS: ${{ matrix.target.corpus }}
-      RIDER_NAME: ${{ matrix.target.rider_name }}
-      RIDER_TAG: ${{ matrix.target.rider_tag }}
-      RIDER_FLAVOR: ${{ matrix.target.rider_flavor }}
-      PLATFORM: ${{ matrix.arch.platform }}
-      ARCH: ${{ matrix.arch.name }}
-      # Develop reads main's build cache and never writes it (CACHE_PUSH=false
-      # drops cache-to in docker-bake.hcl); a pull request uses no cache.
-      CACHE_REGISTRY: ${{ github.event_name != 'pull_request' && 'ghcr.io/lotuswebagency/php' || '' }}
-      CACHE_PUSH: "false"
-      # Only the org.opencontainers.image.revision label (and the dev tag's sha).
+      WOLFI_INDEX_STATE: ${{ needs.plan.outputs.wolfi-index-state }}
+      INPUTS_HASH: ${{ needs.plan.outputs.inputs-hash }}
+      TOOLCHAIN_EPOCH: ${{ needs.plan.outputs.toolchain-epoch }}
+      CACHE_WEEK: ${{ needs.plan.outputs.cache-week }}
+      ENTRY_NAME: ${{ matrix.job.name }}
+      ENTRY_BAKE: ${{ matrix.job.bake }}
+      TARGET_CORPUS: ${{ matrix.job.corpus }}
+      PLATFORM: ${{ matrix.job.platform }}
+      ARCH: ${{ matrix.job.arch }}
+      # The org.opencontainers.image.revision label (and the dev tag's sha).
       REVISION: ${{ github.sha }}
-      DEV_REPO: ghcr.io/lotuswebagency/php/dev
+      # One severity list for the Trivy gates and the recorded predicate.
+      TRIVY_SEVERITY: CRITICAL,HIGH
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Free disk
+        run: ci/free-disk.sh
+
       # Install the pinned binary and use this run's prepared DB. Every scan
-      # skips setup, cache restore and DB updates, so matrix legs make no DB
+      # skips setup, cache restore and DB updates, so entries make no DB
       # registry requests after a long build.
       - name: Install Trivy
         uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
@@ -464,6 +752,10 @@ jobs:
           name: kev-catalog
           path: ${{ github.workspace }}/.cache/kev
 
+      - name: Install regctl
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/develop'
+        run: ./ci/install-regctl.sh
+
       # The BuildKit image is pulled by this daemon: mirror.gcr.io first, Docker
       # Hub when the mirror misses a blob.
       - name: Route Docker Hub pulls through mirror.gcr.io
@@ -472,9 +764,11 @@ jobs:
       # Warm the daemon's image store under the retry policy; the action's
       # builder bootstrap otherwise pulls this image without that backoff.
       - name: Pull the pinned BuildKit image
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         run: ./ci/retry.sh docker pull "$BUILDKIT_IMAGE"
 
       - name: Set up Docker Buildx
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: image=${{ env.BUILDKIT_IMAGE }}
@@ -490,9 +784,10 @@ jobs:
 
       # The run's source tarballs (see the sources job), into this builder's
       # php-src-cache mount. Whatever is missing the build fetches itself, so
-      # one dead upstream URL only fails the legs that need it; neither step
+      # one dead upstream URL only fails the entries that need it; neither step
       # can change what is built.
       - name: Restore the pinned sources
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/php-src-cache
@@ -500,6 +795,7 @@ jobs:
           restore-keys: php-src-
 
       - name: Seed the builder's source cache
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         run: |
           if [ -n "$(ls -A "$RUNNER_TEMP/php-src-cache" 2>/dev/null)" ]; then
             ./ci/retry.sh ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
@@ -507,25 +803,75 @@ jobs:
             echo "::warning::no source cache restored; the build fetches its sources itself"
           fi
 
-      - name: Log in to GHCR (corpus and cache pull, dev image push)
+      - name: Log in to GHCR (corpus pull, image pull, image and cache push)
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute inputs hash
+      # PUSH_REPO empty: a pull request, built with --load. Otherwise where the
+      # images are pushed by digest. CREATED is the one build timestamp of the
+      # entry's images (the OCI created label) and of its candidate record, and
+      # BUILT_RUN the run, and BUILT_SHA the commit (their revision label), that
+      # built them; a reuse run takes all three from the candidate it reuses
+      # (below).
+      - name: Resolve the mode and the build settings
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          ENTRY_JSON: ${{ toJson(matrix.job) }}
         run: |
+          set -euo pipefail
+          printf '%s\n' "$ENTRY_JSON" > "$RUNNER_TEMP/entry.json"
+          targets="$(jq '.targets | length' "$RUNNER_TEMP/entry.json")"
+          [ "$targets" -ge 1 ] && [ "$targets" -le 6 ] || {
+            echo "FAIL: entry $ENTRY_NAME has $targets targets; the digest upload steps below cover 1 to 6" >&2
+            exit 1
+          }
           {
-            echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)"
-            echo "CACHE_WEEK=$(date -u +%G-W%V)"
+            echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "BUILT_RUN=$GITHUB_RUN_ID"
+            echo "BUILT_SHA=$GITHUB_SHA"
+            if [ "$EVENT_NAME" = pull_request ]; then
+              echo "PUSH_REPO="
+              echo "CACHE_PUSH=false"
+              if [ "$IS_FORK" = true ]; then echo "CACHE_REGISTRY="; else echo "CACHE_REGISTRY=ghcr.io/lotuswebagency/php"; fi
+            else
+              if [ "$GITHUB_REF" = refs/heads/develop ]; then echo "PUSH_REPO=$DEV_REPO"; else echo "PUSH_REPO=$STAGE_IMAGE"; fi
+              echo "PUSH=true"
+              echo "CACHE_PUSH=true"
+              echo "CACHE_REGISTRY=ghcr.io/lotuswebagency/php"
+            fi
           } >> "$GITHUB_ENV"
 
-      # A pull request that changes any build input (a Renovate base-digest bump,
-      # say) has an inputs hash no corpus job has built, so its hash-pinned ref
-      # does not exist: it falls back to the tier's last published corpus, as the
-      # job comment above describes. develop and main never fall back.
-      - name: Pull and verify this target's hash-pinned PGO corpus
+      - name: Download the candidate this run reuses
+        if: ${{ needs.plan.outputs.mode == 'reuse' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: reuse-candidate
+          path: ${{ runner.temp }}/reuse
+
+      # What the Build step leaves in digests.json, read from the candidate
+      # instead: this entry's targets on its architecture. A candidate that lacks
+      # one fails the entry (plan already checked the whole matrix).
+      - name: Take the reused images' digests from the candidate
+        if: ${{ needs.plan.outputs.mode == 'reuse' }}
+        run: |
+          set -euo pipefail
+          [ "$PUSH_REPO" = "$DEV_REPO" ] || { echo "FAIL: reuse is for develop; PUSH_REPO is '$PUSH_REPO'" >&2; exit 1; }
+          meta="$(python3 ci/reuse_plan.py entry --candidate "$RUNNER_TEMP/reuse/release-candidate.json" \
+            --entry "$RUNNER_TEMP/entry.json" --digests-out "$RUNNER_TEMP/digests.json")"
+          {
+            echo "CREATED=$(jq -er .created <<<"$meta")"
+            echo "BUILT_RUN=$(jq -er .built_run <<<"$meta")"
+            echo "BUILT_SHA=$(jq -er .built_sha <<<"$meta")"
+          } >> "$GITHUB_ENV"
+          cat "$RUNNER_TEMP/digests.json"
+          echo "reusing the images run $(jq -er .built_run <<<"$meta") built at $(jq -er .created <<<"$meta")"
+
+      - name: Pull and verify this entry's hash-pinned PGO corpus
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -553,225 +899,256 @@ jobs:
           docker tag "$corpus_ref" "$TARGET_CORPUS"
           echo "CORPUS_REF=$corpus_ref" >> "$GITHUB_ENV"
 
-      # One invocation for the whole leg (the target, plus ext-builder when it
-      # rides along): BuildKit builds the shared php-build stage once, and
-      # `*.contexts.corpus` hands every target in it the same hash-pinned corpus
-      # -- a target left on the floating ref would be a second php-build.
-      - name: Build (load) for test
+      # One bake call for the whole entry: every target, plus the deps-cache
+      # target of its fpm image when the cache is written. `*.contexts.corpus`
+      # hands every target the same hash-pinned corpus -- a target left on the
+      # floating ref would be a second php-build. The `php-*` globs leave the
+      # deps-cache target (cache output only, no image) out of the tags and the
+      # push-by-digest output.
+      #
+      # A push retries transient registry, HTTP and apk failures with a warm
+      # layer cache, five attempts (30s to 5min waits); deterministic build
+      # failures are not retried. Safe for a push by digest: every attempt starts
+      # by deleting metadata.json, so the digests read below are the ones the
+      # attempt that succeeded wrote, and nothing else carries a digest forward.
+      # Whatever a failed attempt pushed stays an untagged, unreferenced orphan.
+      - name: Build
+        if: ${{ needs.plan.outputs.mode != 'reuse' }}
         run: |
           set -euo pipefail
-          read -ra bake_targets <<<"$TARGET_BAKE"
-          # Retry transient registry, HTTP and apk failures from the build,
-          # with mostly layer-cache hits on the next attempt. Five attempts
-          # (30s to 5min waits); deterministic build failures are not retried.
-          RETRY_KIND=registry,http,apk RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
+          read -ra bake_targets <<<"$ENTRY_BAKE"
+          if [ "$CACHE_PUSH" = true ]; then
+            bake_targets+=("deps-cache-$(jq -er '[.targets[] | select(.flavor == "fpm")][0].name' "$RUNNER_TEMP/entry.json")")
+          fi
+          mode_args=(--load)
+          if [ -n "$PUSH_REPO" ]; then
+            mode_args=(
+              --set "php-*.tags=$PUSH_REPO"
+              --set "php-*.output=type=image,name=$PUSH_REPO,push=true,push-by-digest=true,name-canonical=true"
+            )
+          fi
+          RETRY_KIND=registry,http,apk RETRY_ATTEMPTS=5 ./ci/retry.sh bash -c 'rm -f metadata.json; exec "$@"' retry-bake \
+            docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
             --set "*.platform=$PLATFORM" \
             --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
-            --load
+            "${mode_args[@]}" \
+            --metadata-file metadata.json
+          [ -n "$PUSH_REPO" ] || exit 0
+          # {"<target name>": "<repo>@sha256:<index digest>"}: the images to test.
+          jq --arg repo "$PUSH_REPO" --slurpfile entry "$RUNNER_TEMP/entry.json" '
+            . as $meta
+            | [$entry[0].targets[].name | . as $name
+               | {key: $name, value: ($meta[$name]["containerimage.digest"] as $d | if $d then "\($repo)@\($d)" else "" end)}]
+            | from_entries' metadata.json > "$RUNNER_TEMP/digests.json"
+          cat "$RUNNER_TEMP/digests.json"
 
-      - name: Smoke test
-        run: ./tests/smoke.sh "$TARGET_TAG" "$TARGET_PHP" "$TARGET_FLAVOR"
-
-      - name: Smoke test (rider, built with this leg)
-        if: matrix.target.rider_name != ''
-        run: ./tests/smoke.sh "$RIDER_TAG" "$TARGET_PHP" "$RIDER_FLAVOR"
-
-      # The cross-image half of the ext-builder tests: an extension compiled in
-      # ext-builder, COPYed into fpm and cli of the same version, loaded and
-      # called. Needs all three images; this leg has cli and ext-builder, so it
-      # builds the fpm sibling too -- same builder, same corpus context, so the
-      # php-build stage it just compiled is a layer-cache hit and only the thin
-      # fpm stage is new work.
-      - name: Build the fpm sibling, test an extension end to end (ext-builder)
-        if: matrix.target.rider_flavor == 'ext-builder'
+      # Smoke, slim parity, ext-builder, Trivy/KEV/floor/license, one target after
+      # another (see ci/test-images.sh); pushed images are pulled back by digest,
+      # and a passing one gets its signed test-result predicate.
+      - name: Test the images
+        id: test
+        env:
+          SMOKE_SKIP_PGO: ${{ needs.plan.outputs.mode == 'reuse' && '1' || '' }}
         run: |
           set -euo pipefail
-          suffix=""
-          [ "$TARGET_UARCH" != "v3" ] || suffix="-v3"
-          slug="php-${TARGET_PHP//./_}"
-          RETRY_KIND=registry,http,apk RETRY_ATTEMPTS=5 ./ci/retry.sh docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "$slug-fpm$suffix" \
-            --set "*.platform=$PLATFORM" \
-            --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
-            --load
-          ./tests/test-ext-builder.sh "$TARGET_PHP$suffix"
+          args=(--mode load)
+          [ -z "$PUSH_REPO" ] || args=(--mode digest --digests "$RUNNER_TEMP/digests.json")
+          ./ci/test-images.sh --entry "$RUNNER_TEMP/entry.json" --out "$RUNNER_TEMP/test-out" "${args[@]}"
 
-      # A slim rider must carry the host flavor's PHP byte for byte: same php,
-      # php-fpm and extension binaries, only the root filesystem differs. The
-      # cli-slim rider's host leg builds cli-builder, which is cli plus a toolchain
-      # and its own conf.d/10-php.ini; --full-is-builder accounts for exactly that.
-      - name: Slim parity with its host image
-        if: endsWith(matrix.target.rider_flavor, '-slim')
-        run: |
-          flags=()
-          [ "$RIDER_FLAVOR" != cli-slim ] || flags=(--full-is-builder)
-          ./tests/test-slim-parity.sh "${flags[@]}" "$RIDER_TAG" "$TARGET_TAG"
-
-      # A repo-root .trivyignore, if present, is honored automatically.
-      - name: Trivy vulnerability gate
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      - name: Upload the test logs
+        if: ${{ !cancelled() && steps.test.conclusion != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          image-ref: ${{ env.TARGET_TAG }}
-          format: table
-          exit-code: "1"
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          # The image just loaded, never a same-named tag on Docker Hub.
-          TRIVY_IMAGE_SRC: docker
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
+          name: test-logs-${{ matrix.job.name }}
+          path: ${{ runner.temp }}/test-out
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 5
 
-      - name: Trivy vulnerability gate (rider)
-        if: matrix.target.rider_name != ''
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.RIDER_TAG }}
-          format: table
-          exit-code: "1"
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          # The image just loaded, never a same-named tag on Docker Hub.
-          TRIVY_IMAGE_SRC: docker
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
-
-      # Docker Scout's "no high-profile vulnerabilities" policy: no finding, of any
-      # severity and fixed or not, may be in CISA's KEV catalog. Trivy applies
-      # .trivyignore before it writes the JSON report, so an accepted risk in
-      # vex/php.openvex.json stays accepted here.
-      - name: Trivy KEV report
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.TARGET_TAG }}
-          format: json
-          output: ${{ runner.temp }}/kev-target.json
-          exit-code: "0"
-          scanners: vuln
-          list-all-pkgs: true
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          TRIVY_IMAGE_SRC: docker
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
-
-      - name: KEV gate
-        run: python3 ci/kev.py "$RUNNER_TEMP/kev-target.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
-
-      - name: Trivy KEV report (rider)
-        if: matrix.target.rider_name != ''
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.RIDER_TAG }}
-          format: json
-          output: ${{ runner.temp }}/kev-rider.json
-          exit-code: "0"
-          scanners: vuln
-          list-all-pkgs: true
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          TRIVY_IMAGE_SRC: docker
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
-
-      - name: KEV gate (rider)
-        if: matrix.target.rider_name != ''
-        run: python3 ci/kev.py "$RUNNER_TEMP/kev-rider.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
-
-      # The control for the gates around it: both reports list every OS package
-      # (list-all-pkgs), and an image whose scan saw TRIVY_MIN_PACKAGES or fewer
-      # fails, so an empty scan cannot pass.
-      - name: Trivy package floor
+      # Per passed target: its digest file and test-result predicate, laid out as
+      # the merge job reads them (<arch> and <arch>.test-result.json at the
+      # artifact's root). A target that did not pass has no directory, so its
+      # upload finds nothing and merge fails on the missing artifact.
+      - name: Stage the passed targets' digests
+        id: stage
+        if: ${{ !cancelled() && steps.test.conclusion != 'skipped' && github.event_name != 'pull_request' }}
         run: |
           set -euo pipefail
-          for report in kev-target.json ${RIDER_NAME:+kev-rider.json}; do
-            count="$(jq '[.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length' "$RUNNER_TEMP/$report")"
-            echo "$report: $count OS packages (floor: more than $TRIVY_MIN_PACKAGES)"
-            [ "$count" -gt "$TRIVY_MIN_PACKAGES" ] || {
-              echo "FAIL: the Trivy scan behind $report saw $count OS packages; an empty scan proves nothing" >&2
-              exit 1
-            }
-          done
+          [ -f "$RUNNER_TEMP/test-out/passed.txt" ] || exit 0
+          while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            mkdir -p "$RUNNER_TEMP/stage/$name"
+            cp "$RUNNER_TEMP/test-out/$name/artifact/"* "$RUNNER_TEMP/stage/$name/"
+          done < "$RUNNER_TEMP/test-out/passed.txt"
 
-      # Docker Scout's "no AGPL v3 licenses" policy. ci/trivy-license.yaml narrows
-      # Trivy's forbidden category to the AGPL ids; every other category keeps its
-      # default severity (GPL and LGPL stay restricted/HIGH, unlisted ids become
-      # UNKNOWN), so gating on CRITICAL fails on AGPL only.
-      - name: Trivy license gate
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      # The artifact name is the full target name. Several target names share a
+      # prefix ("-cli"/"-cli-builder", "-fpm"/"-fpm-v3"), so the merge job must
+      # download each artifact by its exact name, never by a prefix pattern. An
+      # Actions step cannot loop, so one step per slot of the entry's targets;
+      # the step above refuses an entry with more than six.
+      - name: Upload digest (target 1)
+        if: ${{ !cancelled() && steps.stage.conclusion == 'success' && matrix.job.targets[0] }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          image-ref: ${{ env.TARGET_TAG }}
-          format: table
-          exit-code: "1"
-          scanners: license
-          severity: CRITICAL
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          TRIVY_CONFIG: ci/trivy-license.yaml
-          TRIVY_IMAGE_SRC: docker
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
+          name: digest-${{ matrix.job.targets[0].name }}-${{ matrix.job.arch }}
+          path: ${{ runner.temp }}/stage/${{ matrix.job.targets[0].name }}
+          if-no-files-found: ignore
+          retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
 
-      - name: Trivy license gate (rider)
-        if: matrix.target.rider_name != ''
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      - name: Upload digest (target 2)
+        if: ${{ !cancelled() && steps.stage.conclusion == 'success' && matrix.job.targets[1] }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          image-ref: ${{ env.RIDER_TAG }}
-          format: table
-          exit-code: "1"
-          scanners: license
-          severity: CRITICAL
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          TRIVY_CONFIG: ci/trivy-license.yaml
-          TRIVY_IMAGE_SRC: docker
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
+          name: digest-${{ matrix.job.targets[1].name }}-${{ matrix.job.arch }}
+          path: ${{ runner.temp }}/stage/${{ matrix.job.targets[1].name }}
+          if-no-files-found: ignore
+          retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
 
-      # Only reached when the smoke tests and the Trivy, KEV and license gates
-      # above passed, so a pushed image is a tested one. Per-arch tag
-      # <tag>-<sha>-<arch>; the fpm sibling built for test-ext-builder.sh is not
-      # pushed (the fpm leg pushes its own), the rider of a leg is.
-      - name: Push the tested image to GHCR (develop)
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/develop'
+      - name: Upload digest (target 3)
+        if: ${{ !cancelled() && steps.stage.conclusion == 'success' && matrix.job.targets[2] }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.job.targets[2].name }}-${{ matrix.job.arch }}
+          path: ${{ runner.temp }}/stage/${{ matrix.job.targets[2].name }}
+          if-no-files-found: ignore
+          retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
+
+      - name: Upload digest (target 4)
+        if: ${{ !cancelled() && steps.stage.conclusion == 'success' && matrix.job.targets[3] }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.job.targets[3].name }}-${{ matrix.job.arch }}
+          path: ${{ runner.temp }}/stage/${{ matrix.job.targets[3].name }}
+          if-no-files-found: ignore
+          retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
+
+      - name: Upload digest (target 5)
+        if: ${{ !cancelled() && steps.stage.conclusion == 'success' && matrix.job.targets[4] }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.job.targets[4].name }}-${{ matrix.job.arch }}
+          path: ${{ runner.temp }}/stage/${{ matrix.job.targets[4].name }}
+          if-no-files-found: ignore
+          retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
+
+      - name: Upload digest (target 6)
+        if: ${{ !cancelled() && steps.stage.conclusion == 'success' && matrix.job.targets[5] }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.job.targets[5].name }}-${{ matrix.job.arch }}
+          path: ${{ runner.temp }}/stage/${{ matrix.job.targets[5].name }}
+          if-no-files-found: ignore
+          retention-days: ${{ github.ref == 'refs/heads/main' && 1 || 10 }}
+          overwrite: true
+
+      # Only targets that passed every test above get a per-arch tag, so a tag
+      # on php/dev is a tested image; dev-manifest joins the arches.
+      - name: Tag the passed targets (develop)
+        if: ${{ !cancelled() && steps.test.conclusion != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' }}
+        env:
+          # An existing per-arch tag of this commit moves to another digest only on purpose: a
+          # dispatch or a re-run attempt (ci/dev-tag.sh). Any dispatch that gets here builds or
+          # re-tests on purpose, `rebuild` or not (a plain one builds when the inputs hash or the
+          # candidate's age says so), and leaves a develop run of this commit newer than the one
+          # an extended run tested, so ci/release_source.py rebuilds the release of this commit;
+          # a re-run attempt is another attempt, which the extended run's title must name. A push
+          # (attempt 1) never moves a tag.
+          DEV_TAG_FORCE: ${{ (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') && '1' || '' }}
+        run: ./ci/dev-tag.sh "$RUNNER_TEMP/entry.json" "$RUNNER_TEMP/test-out"
+
+      # Reached only when the whole entry passed (success() is the default): the
+      # candidate job refuses an incomplete set, and a failed entry fails it.
+      - name: Record the entry for the release candidate (develop)
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' }}
         run: |
           set -euo pipefail
-          sha="${GITHUB_SHA::12}"
-          for local_tag in "$TARGET_TAG" ${RIDER_TAG:+"$RIDER_TAG"}; do
-            dest="${DEV_REPO}:${local_tag#*:}-${sha}-${ARCH}"
-            docker tag "$local_tag" "$dest"
-            ./ci/retry.sh docker push "$dest"
-            echo "ok: pushed $dest"
-          done
+          mkdir -p "$RUNNER_TEMP/candidate"
+          python3 ci/candidate.py entry --entry "$RUNNER_TEMP/entry.json" --out "$RUNNER_TEMP/test-out" \
+            --created "$CREATED" --built-run "$BUILT_RUN" --built-sha "$BUILT_SHA" --repository "$DEV_REPO" > "$RUNNER_TEMP/candidate/$ENTRY_NAME.json"
+
+      - name: Upload the candidate record (develop)
+        if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: candidate-${{ matrix.job.name }}
+          path: ${{ runner.temp }}/candidate/${{ matrix.job.name }}.json
+          if-no-files-found: error
+          retention-days: 10
+          overwrite: true
+
+      # Last, whatever happened above.
+      - name: Disk usage
+        if: always()
+        run: ci/free-disk.sh report
+
+  # --------------------------------------------------------------- candidate
+  # develop only. The release candidate of this run: the commit, its tree, the
+  # inputs hash, and for every target and architecture the index digest, the
+  # platform digest, and the build time, build run and build commit of the tested
+  # image on php/dev (a reuse run keeps the original build's, so `created` is
+  # always when the image was built and `built_sha` is its revision label), and
+  # the sha256 of this ci.yml, which a reuse or a copy only trusts when it is the
+  # same. Written only when every entry built or reused and passed
+  # (ci/candidate.py refuses a missing target or architecture), so the
+  # file existing means the commit's whole matrix is tested and pushed.
+  candidate:
+    needs: [images, plan]
+    if: ${{ !cancelled() && needs.images.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      TARGETS: ${{ needs.plan.outputs.targets }}
+      INPUTS_HASH: ${{ needs.plan.outputs.inputs-hash }}
+      CI_HASH: ${{ needs.plan.outputs.ci-hash }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download the entries' records
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: candidate-*
+          path: ${{ runner.temp }}/records
+
+      - name: Write release-candidate.json
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$TARGETS" > "$RUNNER_TEMP/targets.json"
+          python3 ci/candidate.py merge --targets "$RUNNER_TEMP/targets.json" --records "$RUNNER_TEMP/records" \
+            --sha "$GITHUB_SHA" --tree "$(git rev-parse 'HEAD^{tree}')" --inputs-hash "$INPUTS_HASH" \
+            --ci-hash "$CI_HASH" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --out release-candidate.json
+          jq . release-candidate.json
+
+      - name: Upload release-candidate.json
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-candidate
+          path: release-candidate.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
 
   # ------------------------------------------------------------- dev-manifest
-  # develop only. Joins the per-arch dev images the verify legs pushed into one
+  # develop only. Joins the per-arch dev images the images entries tagged into one
   # manifest list per target, dev:<tag>-<sha> (both arches present), and moves
-  # the floating dev:<tag> onto it only when every verify leg of this run
+  # the floating dev:<tag> onto it only when every images entry of this run
   # succeeded and the run's commit is still the head of develop, so the floating
   # set mixes commits at most inside the short second pass of the script (a
   # cancel or crash there can split it; the prune keeps both sha sets). One job
   # over all 78 targets, not a matrix: each target is a handful of manifest calls
-  # and runners are scarce. A missing arch while verify claims success is a bug
-  # and fails the job; after a failed verify leg the missing ones are only
+  # and runners are scarce. A missing arch while images claims success is a bug
+  # and fails the job; after a failed images entry the missing ones are only
   # reported. The logic is in ci/dev-manifest.sh.
   dev-manifest:
-    needs: [verify]
-    if: ${{ !cancelled() && needs.verify.result != 'skipped' && github.ref == 'refs/heads/develop' && github.event_name != 'pull_request' }}
+    needs: [images, preflight]
+    if: ${{ !cancelled() && needs.images.result != 'skipped' && needs.preflight.result == 'success' && github.ref == 'refs/heads/develop' && github.event_name != 'pull_request' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -792,60 +1169,183 @@ jobs:
 
       - name: Assemble the dev manifest lists and move the floating tags
         env:
-          VERIFY_RESULT: ${{ needs.verify.result }}
+          IMAGES_RESULT: ${{ needs.images.result }}
         run: ./ci/dev-manifest.sh
 
-  # ----------------------------------------------------------------- pr-gate
-  # One aggregate required check instead of branch protection naming every verify
-  # matrix leg by hand: GitHub's per-leg check names include the matrix values
-  # (php version, flavor...), so a version bump renames them and silently drops
-  # coverage from a rule that names the old ones. pr-gate is the only check to
-  # require (together with preflight, which it also depends on) and it fails
-  # unless every leg that ran actually succeeded.
-  pr-gate:
-    needs: [preflight, verify]
-    if: always() && github.event_name == 'pull_request'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    steps:
-      - name: Require preflight and every verify leg to have succeeded
-        run: |
-          echo "preflight: ${{ needs.preflight.result }}"
-          echo "verify:    ${{ needs.verify.result }}"
-          [ "${{ needs.preflight.result }}" = "success" ] || { echo "FAIL: preflight did not succeed" >&2; exit 1; }
-          [ "${{ needs.verify.result }}" = "success" ] || { echo "FAIL: at least one verify leg did not succeed" >&2; exit 1; }
-          echo "ok: preflight and every verify leg succeeded"
-
-  # -------------------------------------------------------- release-matrix
-  # The full 78-target matrix (scripts/gen_matrix.py --github targets) for the
-  # merge job and the promote job, and the 39 build legs of it (--github build:
-  # ext-builder, fpm-slim and cli-slim ride with a host leg) for the build job. main only: develop's
-  # counterpart is verify-matrix.
-  release-matrix:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
+  # ---------------------------------------------------------------- fixtures
+  # develop only. The application fixtures the `extended` suites run against
+  # (tests/apps), built per architecture on a native runner and pushed to
+  # ghcr.io/lotuswebagency/php/apptest, so extended's own fixtures job finds
+  # them current instead of building them after this run. Same script and
+  # registry as extended.yml's fixtures job (ci/extended-fixtures.sh leaves a
+  # fixture whose recipe hash is current alone); no PHP image of this run is
+  # needed, so it starts beside the builds once preflight is green.
+  fixtures:
+    needs: preflight
+    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/develop' }}
+    name: fixtures ${{ matrix.arch.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - { name: amd64, runner: ubuntu-26.04 }
+          - { name: arm64, runner: ubuntu-26.04-arm }
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 240
     permissions:
       contents: read
-    outputs:
-      targets: ${{ steps.matrix.outputs.targets }}
-      legs: ${{ steps.matrix.outputs.legs }}
+      packages: write # GHCR: the app fixtures
+    env:
+      APPTEST_FIXTURE_REPO: ghcr.io/lotuswebagency/php/apptest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      # Not a gate (see preflight): a warning on every push to main and cron run
-      # within 14 days of a VEX review-by date.
-      - name: VEX review deadlines
-        run: python3 ci/vex.py check --warn-within 14
+      - name: Free disk
+        run: ci/free-disk.sh
 
-      - id: matrix
+      - name: Route Docker Hub pulls through mirror.gcr.io
+        run: ./ci/hub-mirror.sh
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the missing or stale fixtures
+        run: ci/extended-fixtures.sh
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fixtures-logs-${{ matrix.arch.name }}
+          path: ${{ runner.temp }}/extended-logs
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 5
+
+      # Last, whatever happened above.
+      - name: Disk usage
+        if: always()
+        run: ci/free-disk.sh report
+
+  # ----------------------------------------------------------------- pr-gate
+  # One aggregate required check instead of branch protection naming every images
+  # matrix entry by hand: GitHub's per-leg check names include the matrix values
+  # (php version, flavor...), so a version bump renames them and silently drops
+  # coverage from a rule that names the old ones. pr-gate is the only check to
+  # require (together with preflight, which it also depends on) and it fails
+  # unless every entry that ran actually succeeded.
+  pr-gate:
+    needs: [preflight, plan, images, promote-check]
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    env:
+      PREFLIGHT: ${{ needs.preflight.result }}
+      PLAN: ${{ needs.plan.result }}
+      IMAGES: ${{ needs.images.result }}
+      PROMOTE_CHECK: ${{ needs.promote-check.result }}
+      COPY: ${{ needs.promote-check.outputs.copy }}
+      PROMOTE: ${{ needs.plan.outputs.promote }}
+    steps:
+      - name: Require preflight, plan and the images (for the promote PR, the promote check, and the images unless main will copy)
+        run: |
+          echo "preflight:      $PREFLIGHT"
+          echo "plan:           $PLAN"
+          echo "images:         $IMAGES"
+          echo "promote-check:  $PROMOTE_CHECK (copy: ${COPY:-n/a})"
+          [ "$PREFLIGHT" = "success" ] || { echo "FAIL: preflight did not succeed" >&2; exit 1; }
+          [ "$PLAN" = "success" ] || { echo "FAIL: plan did not succeed" >&2; exit 1; }
+          if [ "$PROMOTE" = "true" ]; then
+            [ "$PROMOTE_CHECK" = "success" ] || { echo "FAIL: promote-check did not succeed" >&2; exit 1; }
+            if [ "$COPY" = "true" ]; then
+              echo "ok: preflight, plan and promote-check succeeded; main will copy, nothing to build"
+            elif [ "$COPY" = "false" ]; then
+              [ "$IMAGES" = "success" ] || { echo "FAIL: main will rebuild and at least one images entry did not succeed" >&2; exit 1; }
+              echo "ok: preflight, plan, promote-check and every images entry succeeded; main will rebuild"
+            else
+              echo "FAIL: promote-check made no decision" >&2; exit 1
+            fi
+          else
+            [ "$IMAGES" = "success" ] || { echo "FAIL: at least one images entry did not succeed" >&2; exit 1; }
+            echo "ok: preflight, plan and every images entry succeeded"
+          fi
+
+  # ----------------------------------------------------------- promote-check
+  # Decides, for the pull request from develop to main, whether the push to main
+  # that merging it makes would copy develop's images (ci/release_source.py, the same
+  # checks `release-source` runs on that push): the merge ref has two parents, its
+  # second is the PR head and its tree is the head's, the head's develop ci run
+  # succeeded as a whole and built every image itself and is the newest develop run of
+  # the head, the extended.yml run that its completion started (event workflow_run,
+  # titled with the head and that run attempt) succeeded having pulled the images by
+  # the digests of its release candidate, that candidate is complete, for this inputs hash and
+  # this ci.yml and at most seven days old, and the repository variable RELEASE_HOLD
+  # is empty. The output `copy` is `true` when all of that holds and `false`
+  # otherwise, with the reason in the step summary: `images` then builds the
+  # subset like for any pull request, and main rebuilds on the merge. Not eligible
+  # is not a failure (it cannot always be: no extended run titled the new way
+  # exists until main's extended.yml carries the run-name, so the first promotion
+  # after that change is always a rebuild, and so is one whose develop run is
+  # stale, reused images, or has no extended run yet). The job fails, and with it
+  # `pr-gate`, only for a set RELEASE_HOLD, a merge ref that is not the PR head's
+  # tree (second parent or tree), git failing, or a script error. No dispatch of
+  # extended.yml can stand in for the run the copy needs. The decision is a hint
+  # for the PR: `release-source` re-derives it on the merge commit.
+  promote-check:
+    needs: plan
+    if: ${{ needs.plan.outputs.promote == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      statuses: read
+    outputs:
+      copy: ${{ steps.decide.outputs.copy }}
+    steps:
+      # The merge ref (the default for a pull request), two commits deep.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+
+      - name: Decide whether main could copy develop's images
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUTS_HASH: ${{ needs.plan.outputs.inputs-hash }}
+          CI_HASH: ${{ needs.plan.outputs.ci-hash }}
+          TARGETS: ${{ needs.plan.outputs.targets }}
+          RELEASE_HOLD: ${{ vars.RELEASE_HOLD }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          targets="$(python3 scripts/gen_matrix.py --github targets | jq -ce '.include | select(length > 0)')"
-          legs="$(python3 scripts/gen_matrix.py --github build | jq -ce '.include | select(length > 0)')"
-          echo "targets=$targets" >> "$GITHUB_OUTPUT"
-          echo "legs=$legs" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$TARGETS" > "$RUNNER_TEMP/targets.json"
+          rc=0
+          decision="$(python3 ci/release_source.py decide --mode promote --repo "$GITHUB_REPOSITORY" --inputs-hash "$INPUTS_HASH" \
+            --ci-hash "$CI_HASH" --targets "$RUNNER_TEMP/targets.json" --dev-repo "$DEV_REPO" --hold "$RELEASE_HOLD" \
+            --head-sha "$HEAD_SHA" --save-candidate "$RUNNER_TEMP/release-candidate.json" --output "$GITHUB_OUTPUT")" || rc=$?
+          reason="$(jq -r '.reason // empty' <<<"$decision" 2>/dev/null || true)"
+          [ -n "$reason" ] || reason="ci/release_source.py made no decision (rc $rc)"
+          if [ "$rc" -ne 0 ]; then
+            printf '### Promote check: failed\n\n%s\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+            echo "FAIL: $reason" >&2
+            exit 1
+          fi
+          if [ "$(jq -er .mode <<<"$decision")" = copy ]; then
+            printf '### Promote check: main will copy\n\nThe images job is skipped.\n\n%s\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+            echo "copy: $reason"
+          else
+            printf '### Promote check: main will rebuild\n\nThe images job builds the pull request subset.\n\n%s\n' "$reason" >> "$GITHUB_STEP_SUMMARY"
+            echo "rebuild: $reason"
+          fi
 
   # ------------------------------------------------------------ corpus-matrix
   # The 7 corpus tiers (scripts/pgo_tiers.py list) as a matrix for the corpus and
@@ -875,17 +1375,16 @@ jobs:
   # One PGO corpus image per {tier, arch} (7 tiers x 2 arches = 14 legs), rebuilt
   # only when a tier's inputs change and published to GHCR under a per-arch,
   # hash-suffixed tag. corpus-merge assembles the two arches of each tier into one
-  # multi-platform index. Runs before `build`, since every php target mounts its
+  # multi-platform index. Runs before `images`, since every php target mounts its
   # tier's corpus. Runs on develop as well as main: the corpus is a GHCR image,
-  # and develop's verify legs mount it by its hash-pinned ref like main's build
-  # legs do.
+  # and develop's images entries mount it by its hash-pinned ref like main's do.
   #
   # One job per tier and arch rather than one job building all 7 tiers in a row:
   # that would be 7 bootstrap PHP compiles plus 7 application corpus builds on a
   # single runner, past any sensible timeout whenever a shared input changes.
   corpus:
-    needs: [preflight, corpus-matrix]
-    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+    needs: [plan, corpus-matrix, release-source]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.corpus-matrix.result == 'success' && needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
     name: corpus ${{ matrix.tier.floor }} ${{ matrix.arch.name }}
     strategy:
       fail-fast: false
@@ -914,7 +1413,7 @@ jobs:
 
       # This job builds through the runner's own daemon (the `docker` driver
       # below, and plain `docker build`), which does not see the BuildKit mirror
-      # setting of the build/verify jobs: the daemon's registry-mirrors does.
+      # setting of the images job: the daemon's registry-mirrors does.
       # Every Docker Hub base is digest-pinned, so the mirror cannot change what
       # is built, and the daemon falls back to Docker Hub, anonymously.
       - name: Route Docker Hub pulls through mirror.gcr.io
@@ -1012,10 +1511,10 @@ jobs:
   # One multi-platform index per tier, assembled from the two per-arch,
   # hash-suffixed images the corpus job publishes, under both the floating
   # `php<tier>` ref (what every target's `contexts.corpus` names) and
-  # `php<tier>-<inputs-hash>` (what build/verify actually mount).
+  # `php<tier>-<inputs-hash>` (what images actually mounts).
   corpus-merge:
-    needs: [corpus, corpus-matrix]
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
+    needs: [plan, corpus, corpus-matrix, release-source]
+    if: ${{ !cancelled() && needs.plan.outputs.mode != 'reuse' && needs.release-source.outputs.mode != 'copy' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') }}
     name: corpus-merge ${{ matrix.tier.floor }}
     strategy:
       fail-fast: false
@@ -1063,433 +1562,6 @@ jobs:
             echo "ok: published $TIER_TAG and $hash_tag as a multi-platform index"
           fi
 
-  # ------------------------------------------------------------------- build
-  # Every build leg x {amd64 on ubuntu-26.04, arm64 on ubuntu-26.04-arm}, native,
-  # no QEMU. A leg is one bake invocation: a target, plus ext-builder when the
-  # target is its version's cli (see the header), whose image is pushed by its own
-  # digest, tested, scanned and uploaded like any other.
-  # Build and push by digest (no tag) to the GHCR staging repository, then pull
-  # that exact digest back and smoke/Trivy-test it: what gets scanned, merged and
-  # promoted is byte-for-byte what was pushed, never a separately built --load
-  # copy that could drift if a base layer refreshed between two builds. The
-  # digest push carries no tag, so nothing is pullable under a real name until
-  # the merge job assembles the multi-arch manifest and applies one. No Docker
-  # Hub credentials here (no `release` environment, no login): every Docker Hub
-  # base image is read anonymously, through the mirrors.
-  build:
-    needs: [preflight, corpus-merge, release-matrix, trivy-db, sources]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.trivy-db.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        target: ${{ fromJson(needs.release-matrix.outputs.legs) }}
-        arch:
-          - name: amd64
-            runner: ubuntu-26.04
-            platform: linux/amd64
-          - name: arm64
-            runner: ubuntu-26.04-arm
-            platform: linux/arm64
-    name: build ${{ matrix.target.name }} ${{ matrix.arch.name }}
-    runs-on: ${{ matrix.arch.runner }}
-    timeout-minutes: 180
-    permissions:
-      contents: read
-      packages: write # GHCR: corpus pull, build-cache push, the staged image push
-    env:
-      # The same value in every leg of both jobs, computed once in preflight.
-      WOLFI_INDEX_STATE: ${{ needs.preflight.outputs.wolfi-index-state }}
-      TARGET_NAME: ${{ matrix.target.name }}
-      TARGET_BAKE: ${{ matrix.target.bake }}
-      TARGET_TAG: ${{ matrix.target.tags[0] }}
-      TARGET_PHP: ${{ matrix.target.php }}
-      TARGET_FLAVOR: ${{ matrix.target.flavor }}
-      TARGET_UARCH: ${{ matrix.target.uarch }}
-      TARGET_CORPUS: ${{ matrix.target.corpus }}
-      RIDER_NAME: ${{ matrix.target.rider_name }}
-      RIDER_FLAVOR: ${{ matrix.target.rider_flavor }}
-      PLATFORM: ${{ matrix.arch.platform }}
-      ARCH_NAME: ${{ matrix.arch.name }}
-      REVISION: ${{ github.sha }}
-      CACHE_REGISTRY: ghcr.io/lotuswebagency/php
-      # One severity list for the Trivy gate steps and the recorded predicate.
-      TRIVY_SEVERITY: CRITICAL,HIGH
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # Install the pinned binary and use this run's prepared DB. Every scan
-      # skips setup, cache restore and DB updates, so matrix legs make no DB
-      # registry requests after a long build.
-      - name: Install Trivy
-        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
-        with:
-          version: ${{ env.SETUP_TRIVY_VERSION }}
-          cache: true
-
-      - name: Download this run's Trivy DB
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: trivy-db
-          path: ${{ github.workspace }}/.cache/trivy
-
-      - name: Download this run's KEV catalog
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: kev-catalog
-          path: ${{ github.workspace }}/.cache/kev
-
-      # matrix.json's "image" field is the one source of truth for the Docker Hub
-      # repository. Nothing is pushed there from this job: it is the repository
-      # the recorded test results name, while the image itself lives in
-      # STAGE_IMAGE until promote.
-      - name: Derive Docker Hub image from matrix.json
-        run: echo "DOCKERHUB_IMAGE=docker.io/$(jq -r .image matrix.json)" >> "$GITHUB_ENV"
-
-      # The BuildKit image is pulled by this daemon: mirror.gcr.io first, Docker
-      # Hub when the mirror misses a blob.
-      - name: Route Docker Hub pulls through mirror.gcr.io
-        run: ./ci/hub-mirror.sh
-
-      # Warm the daemon's image store under the retry policy; the action's
-      # builder bootstrap otherwise pulls this image without that backoff.
-      - name: Pull the pinned BuildKit image
-        run: ./ci/retry.sh docker pull "$BUILDKIT_IMAGE"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          driver-opts: image=${{ env.BUILDKIT_IMAGE }}
-          # Base images resolve through mirror.gcr.io, then public.ecr.aws's copy
-          # of Docker's official images (BuildKit takes a mirror with a path),
-          # then Docker Hub itself -- anonymously in every case: no job that
-          # builds holds Docker Hub credentials. Every FROM is digest-pinned, so
-          # no source can change what is built: BuildKit checks the digest it
-          # gets. Pushes go to GHCR, never to a mirror.
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["mirror.gcr.io", "public.ecr.aws/docker"]
-
-      # The run's source tarballs (see the sources job), into this builder's
-      # php-src-cache mount. Whatever is missing the build fetches itself, so
-      # one dead upstream URL only fails the legs that need it; neither step
-      # can change what is built.
-      - name: Restore the pinned sources
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/php-src-cache
-          key: php-src-${{ hashFiles('php/php-src.lock', 'php/pecl.lock', 'php/ext.json', 'deps/versions.lock', 'php/pgo/corpus.lock', 'ci/sources.sh') }}
-          restore-keys: php-src-
-
-      - name: Seed the builder's source cache
-        run: |
-          if [ -n "$(ls -A "$RUNNER_TEMP/php-src-cache" 2>/dev/null)" ]; then
-            ./ci/retry.sh ./ci/sources.sh seed "$RUNNER_TEMP/php-src-cache"
-          else
-            echo "::warning::no source cache restored; the build fetches its sources itself"
-          fi
-
-      - name: Log in to GHCR
-        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compute inputs hash and build timestamp
-        run: |
-          {
-            echo "INPUTS_HASH=$(./scripts/inputs-hash.sh)"
-            echo "CREATED=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "CACHE_WEEK=$(date -u +%G-W%V)"
-          } >> "$GITHUB_ENV"
-
-      - name: Pull and verify this target's hash-pinned PGO corpus
-        run: |
-          set -euo pipefail
-          corpus_ref="${TARGET_CORPUS}-${INPUTS_HASH}"
-          ./ci/retry.sh docker pull "$corpus_ref"
-          label_hash="$(docker inspect --format '{{index .Config.Labels "com.lotuswebagency.inputs-hash"}}' "$corpus_ref")"
-          [ "$label_hash" = "$INPUTS_HASH" ] || {
-            echo "FAIL: $corpus_ref carries inputs-hash '$label_hash', expected '$INPUTS_HASH'" >&2
-            exit 1
-          }
-          echo "ok: $corpus_ref inputs-hash matches this tree"
-          # test-pgo.sh (via smoke.sh) reads the tier's MANIFEST by its floating
-          # tag; point that tag at the corpus just verified, never a pulled one.
-          docker tag "$corpus_ref" "$TARGET_CORPUS"
-          echo "CORPUS_REF=$corpus_ref" >> "$GITHUB_ENV"
-
-      - name: Build and push by digest to GHCR (SBOM + provenance)
-        id: push
-        env:
-          PUSH: "true"
-          ARCH: ${{ matrix.arch.name }}
-        run: |
-          set -euo pipefail
-          read -ra bake_targets <<<"$TARGET_BAKE"
-          # Retry transient registry, HTTP and apk failures with a warm layer
-          # cache. Safe for a push by digest: every attempt starts by deleting
-          # metadata.json, so the digest read below is always the one the attempt
-          # that succeeded wrote -- never a leftover of a failed one -- and nothing
-          # else carries a digest forward (DIGEST goes to GITHUB_ENV only after
-          # this). Whatever a failed attempt pushed stays an untagged, unreferenced
-          # orphan in the staging repository.
-          RETRY_KIND=registry,http,apk RETRY_ATTEMPTS=5 ./ci/retry.sh bash -c 'rm -f metadata.json; exec "$@"' retry-bake \
-            docker buildx bake -f matrix.gen.hcl -f docker-bake.hcl "${bake_targets[@]}" \
-            --set '*.platform='"$PLATFORM" \
-            --set "*.contexts.corpus=docker-image://$CORPUS_REF" \
-            --set "*.tags=$STAGE_IMAGE" \
-            --set "*.output=type=image,name=$STAGE_IMAGE,push=true,push-by-digest=true,name-canonical=true" \
-            --metadata-file metadata.json
-          digest="$(jq -r ".[\"$TARGET_NAME\"][\"containerimage.digest\"]" metadata.json)"
-          [ -n "$digest" ] && [ "$digest" != "null" ] || {
-            echo "FAIL: no containerimage.digest for $TARGET_NAME in metadata.json" >&2
-            cat metadata.json >&2
-            exit 1
-          }
-          echo "digest: $digest"
-          echo "DIGEST=$digest" >> "$GITHUB_ENV"
-          mkdir -p /tmp/digests
-          echo -n "$digest" > "/tmp/digests/$ARCH_NAME"
-
-          # The rider (ext-builder, fpm-slim or cli-slim): its own digest, in its own
-          # directory so the file can still be named exactly amd64/arm64 (what
-          # the merge job cats) without colliding with the leg's own.
-          if [ -n "$RIDER_NAME" ]; then
-            rider_digest="$(jq -r ".[\"$RIDER_NAME\"][\"containerimage.digest\"]" metadata.json)"
-            [ -n "$rider_digest" ] && [ "$rider_digest" != "null" ] || {
-              echo "FAIL: no containerimage.digest for $RIDER_NAME in metadata.json" >&2
-              cat metadata.json >&2
-              exit 1
-            }
-            [ "$rider_digest" != "$digest" ] || {
-              echo "FAIL: $RIDER_NAME and $TARGET_NAME resolved to the same digest $digest" >&2
-              exit 1
-            }
-            echo "digest ($RIDER_NAME): $rider_digest"
-            echo "RIDER_DIGEST=$rider_digest" >> "$GITHUB_ENV"
-            mkdir -p /tmp/digests-rider
-            echo -n "$rider_digest" > "/tmp/digests-rider/$ARCH_NAME"
-          fi
-
-      - name: Pull the pushed image back by digest
-        run: ./ci/retry.sh docker pull --quiet "${STAGE_IMAGE}@${DIGEST}"
-
-      - name: Pull the pushed rider back by digest
-        if: matrix.target.rider_name != ''
-        run: ./ci/retry.sh docker pull --quiet "${STAGE_IMAGE}@${RIDER_DIGEST}"
-
-      # The output is kept (tee, pipefail) for the signed test-result attestation:
-      # ci/result_predicate.py reads the `ok:` lines and refuses a log that
-      # does not end in SMOKE PASSED.
-      - name: Smoke test the pushed digest
-        run: |
-          set -euo pipefail
-          ./tests/smoke.sh "${STAGE_IMAGE}@${DIGEST}" "$TARGET_PHP" "$TARGET_FLAVOR" 2>&1 | tee "$RUNNER_TEMP/smoke-target.log"
-
-      - name: Smoke test the pushed rider digest
-        if: matrix.target.rider_name != ''
-        run: |
-          set -euo pipefail
-          ./tests/smoke.sh "${STAGE_IMAGE}@${RIDER_DIGEST}" "$TARGET_PHP" "$RIDER_FLAVOR" 2>&1 | tee "$RUNNER_TEMP/smoke-rider.log"
-
-      # The slim rider carries the host flavor's PHP byte for byte (cli-slim's host
-      # leg builds cli-builder: cli plus a toolchain and its own conf.d/10-php.ini,
-      # which --full-is-builder accounts for).
-      - name: Slim parity with its host digest
-        if: endsWith(matrix.target.rider_flavor, '-slim')
-        run: |
-          flags=()
-          [ "$RIDER_FLAVOR" != cli-slim ] || flags=(--full-is-builder)
-          ./tests/test-slim-parity.sh "${flags[@]}" "${STAGE_IMAGE}@${RIDER_DIGEST}" "${STAGE_IMAGE}@${DIGEST}"
-
-      # A repo-root .trivyignore is honored automatically. Scans the exact digest
-      # that was pushed and will be merged.
-      - name: Trivy vulnerability gate (pushed digest)
-        id: trivy_target
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.STAGE_IMAGE }}@${{ env.DIGEST }}
-          format: table
-          exit-code: "1"
-          severity: ${{ env.TRIVY_SEVERITY }}
-          ignore-unfixed: true
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
-
-      - name: Trivy vulnerability gate (pushed rider digest)
-        id: trivy_rider
-        if: matrix.target.rider_name != ''
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.STAGE_IMAGE }}@${{ env.RIDER_DIGEST }}
-          format: table
-          exit-code: "1"
-          severity: ${{ env.TRIVY_SEVERITY }}
-          ignore-unfixed: true
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
-
-      # The same KEV and AGPL gates as verify, on the exact digests that were
-      # pushed. ci/trivy-license.yaml narrows Trivy's forbidden licenses to AGPL.
-      - name: Trivy KEV report (pushed digest)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.STAGE_IMAGE }}@${{ env.DIGEST }}
-          format: json
-          output: ${{ runner.temp }}/kev-target.json
-          exit-code: "0"
-          scanners: vuln
-          list-all-pkgs: true
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
-
-      - name: KEV gate (pushed digest)
-        run: python3 ci/kev.py "$RUNNER_TEMP/kev-target.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
-
-      - name: Trivy KEV report (pushed rider digest)
-        if: matrix.target.rider_name != ''
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.STAGE_IMAGE }}@${{ env.RIDER_DIGEST }}
-          format: json
-          output: ${{ runner.temp }}/kev-rider.json
-          exit-code: "0"
-          scanners: vuln
-          list-all-pkgs: true
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
-
-      - name: KEV gate (pushed rider digest)
-        if: matrix.target.rider_name != ''
-        run: python3 ci/kev.py "$RUNNER_TEMP/kev-rider.json" --catalog .cache/kev/known_exploited_vulnerabilities.json
-
-      # The control for the gates around it: both reports list every OS package
-      # (list-all-pkgs), and an image whose scan saw TRIVY_MIN_PACKAGES or fewer
-      # fails, so an empty scan cannot pass.
-      - name: Trivy package floor (pushed digests)
-        run: |
-          set -euo pipefail
-          for report in kev-target.json ${RIDER_NAME:+kev-rider.json}; do
-            count="$(jq '[.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length' "$RUNNER_TEMP/$report")"
-            echo "$report: $count OS packages (floor: more than $TRIVY_MIN_PACKAGES)"
-            [ "$count" -gt "$TRIVY_MIN_PACKAGES" ] || {
-              echo "FAIL: the Trivy scan behind $report saw $count OS packages; an empty scan proves nothing" >&2
-              exit 1
-            }
-          done
-
-      - name: Trivy license gate (pushed digest)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.STAGE_IMAGE }}@${{ env.DIGEST }}
-          format: table
-          exit-code: "1"
-          scanners: license
-          severity: CRITICAL
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          TRIVY_CONFIG: ci/trivy-license.yaml
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
-
-      - name: Trivy license gate (pushed rider digest)
-        if: matrix.target.rider_name != ''
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.STAGE_IMAGE }}@${{ env.RIDER_DIGEST }}
-          format: table
-          exit-code: "1"
-          scanners: license
-          severity: CRITICAL
-          skip-setup-trivy: true
-          cache: false
-          cache-dir: ${{ github.workspace }}/.cache/trivy
-        env:
-          TRIVY_CONFIG: ci/trivy-license.yaml
-          TRIVY_SKIP_DB_UPDATE: "true"
-          TRIVY_SKIP_VERSION_CHECK: "true"
-
-      # Which scanner and database gave the verdict, for the test-result predicate.
-      # Best effort and never a gate: this uses the pinned binary on PATH and
-      # the same shared DB cache as the scans. A miss only leaves the two fields
-      # out of the predicate.
-      - name: Record the Trivy version
-        run: |
-          trivy --version --format json --cache-dir "$GITHUB_WORKSPACE/.cache/trivy" > "$RUNNER_TEMP/trivy-info.json" \
-            || echo '{}' > "$RUNNER_TEMP/trivy-info.json"
-
-      # Reached only when every smoke and Trivy step above passed. Writes the
-      # test-result predicate next to the digest file; the merge job attaches it
-      # (ci/attest-image.sh) once the manifest list exists. No result file, no
-      # attestation: a failed run uploads nothing and the merge job fails.
-      # --repository is where the image is published (Docker Hub); the digests
-      # are the same there and in the staging repository.
-      - name: Record the test results
-        env:
-          TRIVY_TARGET_OUTCOME: ${{ steps.trivy_target.outcome }}
-          TRIVY_RIDER_OUTCOME: ${{ steps.trivy_rider.outcome }}
-        run: |
-          set -euo pipefail
-          record() {  # record <index-digest> <flavor> <smoke-log> <trivy-outcome> <out>
-            local platform_digest
-            platform_digest="$(./ci/platform-digest.sh "${STAGE_IMAGE}@$1" "$ARCH_NAME")"
-            python3 ci/result_predicate.py platform \
-              --repository "$DOCKERHUB_IMAGE" --php "$TARGET_PHP" --flavor "$2" --uarch "$TARGET_UARCH" \
-              --arch "$ARCH_NAME" --image-digest "$platform_digest" --inputs-hash "$INPUTS_HASH" \
-              --git-sha "$GITHUB_SHA" --git-ref "$GITHUB_REF" \
-              --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-              --smoke-log "$3" --trivy-outcome "$4" --trivy-severity "$TRIVY_SEVERITY" \
-              --trivy-info "$RUNNER_TEMP/trivy-info.json" --out "$5"
-          }
-          record "$DIGEST" "$TARGET_FLAVOR" "$RUNNER_TEMP/smoke-target.log" "$TRIVY_TARGET_OUTCOME" "/tmp/digests/$ARCH_NAME.test-result.json"
-          if [ -n "$RIDER_NAME" ]; then
-            record "$RIDER_DIGEST" "$RIDER_FLAVOR" "$RUNNER_TEMP/smoke-rider.log" "$TRIVY_RIDER_OUTCOME" "/tmp/digests-rider/$ARCH_NAME.test-result.json"
-          fi
-
-      # The artifact name is the full target name. Several target names share a
-      # prefix ("-cli"/"-cli-builder", "-fpm"/"-fpm-v3"), so the merge job must
-      # download each artifact by its exact name, never by a prefix pattern.
-      - name: Upload digest
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: digest-${{ matrix.target.name }}-${{ matrix.arch.name }}
-          path: |
-            /tmp/digests/${{ matrix.arch.name }}
-            /tmp/digests/${{ matrix.arch.name }}.test-result.json
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Upload rider digest
-        if: matrix.target.rider_name != ''
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: digest-${{ matrix.target.rider_name }}-${{ matrix.arch.name }}
-          path: |
-            /tmp/digests-rider/${{ matrix.arch.name }}
-            /tmp/digests-rider/${{ matrix.arch.name }}.test-result.json
-          if-no-files-found: error
-          retention-days: 1
-
   # ------------------------------------------------------------------- merge
   # One job per target, all of it on GHCR: assemble the two per-arch digests
   # into a multi-arch manifest list in the staging repository, pushed by digest
@@ -1497,7 +1569,7 @@ jobs:
   # commit. The full-version tag X.Y.Z-flavor[-v3] is derived from the built
   # image and required to equal matrix.json's release -- a tag can never claim
   # a version the image does not contain. org.opencontainers.image.revision/
-  # created are already on every per-arch image from the build job's
+  # created are already on every per-arch image from the images job's
   # REVISION/CREATED bake vars. Then cosign-signs the list and every manifest
   # under it (--recursive), verifies every one of those signatures with the
   # documented identity (ci/verify-signed.sh), attests the list and verifies
@@ -1511,25 +1583,29 @@ jobs:
   # set last, only ever onto a signed and verified list; Docker Hub only gets a
   # tag once promote has copied the signed list there.
   #
-  # `if: !cancelled()` instead of the implicit `needs: build` gate: one failed
+  # `if: !cancelled()` instead of the implicit `needs: images` gate: one failed
   # leg must not skip every other target's publish and the weekly security
   # refresh along with it. Each target's own two-digest check below still fails
   # that target's merge leg; fail-fast: false leaves the others unaffected.
   merge:
-    needs: [build, release-matrix]
-    if: ${{ !cancelled() && needs.build.result != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    needs: [images, plan, release-source, trivy-db]
+    # A build leaves `images` run; a copy leaves it skipped, and needs the Trivy DB
+    # for the rescan.
+    if: ${{ !cancelled() && ((needs.release-source.outputs.mode == 'copy' && needs.trivy-db.result == 'success') || needs.images.result != 'skipped') && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     name: merge ${{ matrix.target.name }}
     strategy:
       fail-fast: false
       matrix:
-        target: ${{ fromJson(needs.release-matrix.outputs.targets) }}
+        target: ${{ fromJson(needs.plan.outputs.targets) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     permissions:
       contents: read # checkout, to read matrix.json for the image name
       packages: write # GHCR: the staged list, its tags, signatures and attestations
       id-token: write # cosign keyless OIDC
+      actions: read # a copy: the digests and test results of the develop run
     env:
+      SOURCE_RUN: ${{ needs.release-source.outputs.run-id }}
       TARGET_NAME: ${{ matrix.target.name }}
       TARGET_PHP: ${{ matrix.target.php }}
       TARGET_RELEASE: ${{ matrix.target.release }}
@@ -1563,24 +1639,104 @@ jobs:
       # a hyphen ("X.Y-cli" matches "X.Y-cli-builder"). The files inside are named
       # exactly "amd64"/"arm64", so both calls can share `path: digests`.
       - name: Download amd64 digest
+        if: ${{ needs.release-source.outputs.mode != 'copy' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: digest-${{ matrix.target.name }}-amd64
           path: digests
 
       - name: Download arm64 digest
+        if: ${{ needs.release-source.outputs.mode != 'copy' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: digest-${{ matrix.target.name }}-arm64
           path: digests
 
+      # A copy: the same two artifacts, from the develop run whose images are being
+      # released (the run the candidate names; ten days of retention there).
+      - name: Download amd64 digest (develop run)
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: digest-${{ matrix.target.name }}-amd64
+          path: digests
+          run-id: ${{ needs.release-source.outputs.run-id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Download arm64 digest (develop run)
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: digest-${{ matrix.target.name }}-arm64
+          path: digests
+          run-id: ${{ needs.release-source.outputs.run-id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Download the verified candidate
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: copy-candidate
+          path: copy
+
+      - name: Install Trivy
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.SETUP_TRIVY_VERSION }}
+          cache: true
+
+      - name: Download this run's Trivy DB
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: trivy-db
+          path: ${{ github.workspace }}/.cache/trivy
+
+      - name: Download this run's KEV catalog
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: kev-catalog
+          path: ${{ github.workspace }}/.cache/kev
+
       - name: Install Cosign
-        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        uses: sigstore/cosign-installer@881c63bd87e38389154debd8331404ce7ca8a3ab # v4.1.4
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 
       - name: Install regctl
         run: ./ci/install-regctl.sh
+
+      # A copy: what was downloaded must be exactly what the candidate records for
+      # this target (index and platform digests, both architectures, nothing else),
+      # then the two per-arch indexes move from php/dev to the staging repository by
+      # digest -- the same bytes, with the SBOM and provenance develop's build made --
+      # and both platform manifests are scanned again with today's DB, because
+      # develop passed them with the DB of its day. A finding fails this leg before
+      # anything is attested, listed or tagged. The age limit is checked again here:
+      # a failed leg re-run days later reuses the decision, and an image over seven
+      # days old is rebuilt (re-run the whole workflow), never copied.
+      - name: Copy the tested images from php/dev and scan them again
+        if: ${{ needs.release-source.outputs.mode == 'copy' }}
+        run: |
+          set -euo pipefail
+          python3 ci/release_source.py target --candidate copy/release-candidate.json --target "$TARGET_NAME" --digests digests
+          refs=()
+          for arch in amd64 arm64; do
+            index="$(cat "digests/$arch")"
+            platform="$(jq -er '.platforms[0].image_digest' "digests/$arch.test-result.json")"
+            [[ "$index" =~ ^sha256:[0-9a-f]{64}$ && "$platform" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "FAIL: $arch digests are malformed" >&2; exit 1; }
+            ./ci/retry.sh regctl image copy "${DEV_REPO}@${index}" "${STAGE_IMAGE}@${index}"
+            got="$(./ci/retry.sh regctl manifest head "${STAGE_IMAGE}@${index}")"
+            [ "$got" = "$index" ] || { echo "FAIL: ${STAGE_IMAGE}@${index} resolves to ${got:-nothing} after the copy" >&2; exit 1; }
+            echo "ok: $arch index $index copied from $DEV_REPO"
+            refs+=("${STAGE_IMAGE}@${platform}")
+          done
+          ./ci/rescan-image.sh "${refs[@]}"
+          printf '%s: copied from develop run %s, rescanned\n' "$TARGET_NAME" "$SOURCE_RUN" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Assemble multi-arch manifest and verify the full-version tag
         run: |
@@ -1735,19 +1891,19 @@ jobs:
   # there; promote-image.sh then checks it like any other (signed, staging
   # tags still on its list), so it publishes nothing unverified.
   #
-  # max-parallel: Docker Hub's write limits are not the pull limit, but fifty
-  # legs uploading at once is a burst for no gain -- four at a time is gentle and
-  # still well inside the run's time.
+  # max-parallel: Docker Hub's write limits are not the pull limit, but 78
+  # legs uploading at once is a burst for no gain -- sixteen at a time stays
+  # under the org's 20 concurrent jobs and well inside the run's time.
   promote:
-    needs: [merge, release-matrix]
-    if: ${{ !cancelled() && needs.merge.result != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    needs: [merge, plan, preflight]
+    if: ${{ !cancelled() && needs.merge.result != 'skipped' && needs.preflight.result == 'success' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     name: promote ${{ matrix.target.name }}
     environment: release
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 16
       matrix:
-        target: ${{ fromJson(needs.release-matrix.outputs.targets) }}
+        target: ${{ fromJson(needs.plan.outputs.targets) }}
     runs-on: ubuntu-26.04
     # ci/retry.sh waits 30+60+120+300+600+900 = 2010 s, plus up to 50% jitter,
     # before it gives up on one call: ~34-50 min for a single throttled registry
@@ -1816,14 +1972,14 @@ jobs:
   # signatures and attestations are there; this proves cosign finds and accepts
   # them there, for a handful of anonymous reads instead of hundreds.
   hub-verify:
-    needs: [promote, release-matrix]
+    needs: [promote, plan]
     if: ${{ !cancelled() && needs.promote.result != 'skipped' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: read
     env:
-      TARGETS: ${{ needs.release-matrix.outputs.targets }}
+      TARGETS: ${{ needs.plan.outputs.targets }}
       # Exactly the identity the merge job verifies against and SECURITY.md documents.
       COSIGN_VERIFY_FLAGS: >-
         --certificate-oidc-issuer https://token.actions.githubusercontent.com
@@ -1850,7 +2006,7 @@ jobs:
           path: release
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        uses: sigstore/cosign-installer@881c63bd87e38389154debd8331404ce7ca8a3ab # v4.1.4
         with:
           cosign-release: ${{ env.COSIGN_VERSION }}
 

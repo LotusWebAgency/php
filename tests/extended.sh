@@ -4,10 +4,10 @@
 # rebuild of all 78 targets on this machine.
 #
 #   tests/extended.sh pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--no-corpus] [--best-effort]
-#   tests/extended.sh uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
+#   tests/extended.sh uarch | ext-builder | corpus-tiers | jit-stress | smoke [--only V,..] [--flavor F,..]
 #   tests/extended.sh apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
 #   tests/extended.sh bench [--prepare] [--only V,..] [--flavor F,..]   report only, never fails the run
-#   tests/extended.sh all [pull flags] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, apps
+#   tests/extended.sh all [pull flags] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, jit-stress, apps
 #                                                                  (not smoke, not bench: those are separate subcommands)
 #
 # Typical use:  tests/extended.sh pull && tests/extended.sh all
@@ -29,7 +29,25 @@
 # $PHP_LOCAL_REPO-corpus:php<tier> that tests/test-pgo.sh reads. Under GitHub
 # Actions, or with PHP_LOCAL_REPO set to the empty string, the canonical names
 # are used instead: lotuswebagency/php:<tag> and
-# ghcr.io/lotuswebagency/php/corpus:php<tier>, as ci.yml's verify job tags them.
+# ghcr.io/lotuswebagency/php/corpus:php<tier>, as ci.yml's corpus-merge job tags them.
+#
+# With EXTENDED_CANDIDATE=<release-candidate.json> (ci/candidate.py; extended.yml's
+# plan verifies the one of the ci run that started it and freezes it for the legs) pull takes no tag at all:
+# every image is pulled as $EXTENDED_DEV_REPO@<index digest> of that file, for the
+# --platform asked, after ci/verify-pin.sh has read that index and found the
+# platform manifest the candidate recorded. A target the candidate lacks, a
+# digest or platform that differs, or a candidate that is not for this commit,
+# this tree's inputs-hash or EXTENDED_CANDIDATE_RUN (a ci run id) fails that
+# image's row, never falls back to a tag. The revision label such an image must
+# carry is the candidate's built_sha, not --sha: a reuse run's images were built
+# by an earlier commit. A tag pull has no candidate to say so, and accepts a label
+# that differs from --sha only when it is an ancestor with identical build inputs
+# (ci/verify-revision.sh). dev:<tag>-<sha12> is mutable (a
+# develop rebuild of the same commit re-points it), so without a candidate (a
+# dispatch, an extended-run push) the tag pull stands, and what it tests is not
+# what main copies: ci/release_source.py only copies an image set that an
+# extended run of exactly this candidate tested. Not with --latest or
+# --best-effort. The PGO corpus tiers stay hash-pinned tags.
 #
 # The inputs-hash rule has no override. tests/smoke.sh and tests/test-pgo.sh
 # fail an image whose label disagrees with the tree, and
@@ -71,6 +89,14 @@
 #   tests/extended.sh pull --only 8.0,8.1 && tests/extended.sh all --skip-pull --only 8.0,8.1
 # extended.yml does the same, one job per version.
 #
+# jit-stress runs tests/test-jit-stress.sh against the baseline fpm image of every
+# version from 8.0 up (not the -v3 images, which carry the same JIT; older versions
+# have none, a SKIP): concurrent load on JIT-heavy scripts with opcache_reset() in a
+# loop, and again in an opcache small enough to fill. A few minutes per image. 8.2 and
+# later have the JIT on by default and fail on a crashed worker or a wrong answer; 8.0
+# and 8.1 ship it off, so they are run with it forced on and recorded as `report`,
+# never a failure.
+#
 # apps drops the ext-builder flavor: apps/run.sh has no suites for it and
 # run-matrix.sh does not plan it. What each image runs is tests/apps/sets (via
 # apps/appsets.py): the cells of its php version, flavor and variant, which may
@@ -81,6 +107,8 @@
 #
 # Environment:
 #   EXTENDED_DEV_REPO      default ghcr.io/lotuswebagency/php/dev
+#   EXTENDED_CANDIDATE     pull: a release-candidate.json whose digests are pulled (see above)
+#   EXTENDED_CANDIDATE_RUN pull: the ci run id that candidate must name (optional)
 #   EXTENDED_CORPUS_REPO   default ghcr.io/lotuswebagency/php/corpus
 #   EXTENDED_LOG_DIR       logs; default a fresh mktemp -d
 #
@@ -106,10 +134,10 @@ usage() {
 usage: tests/extended.sh <subcommand> [options]
 
   pull [--sha REF | --latest] [--only V,..] [--flavor F,..] [--platform P] [--jobs N] [--no-corpus] [--best-effort]
-  uarch | ext-builder | corpus-tiers | smoke [--only V,..] [--flavor F,..]
+  uarch | ext-builder | corpus-tiers | jit-stress | smoke [--only V,..] [--flavor F,..]
   apps [--only V,..] [--flavor F,..] [run-matrix.sh args, e.g. --jobs 2 --app laravel]
   bench [--prepare] [--only V,..] [--flavor F,..]   report only, never fails the run
-  all [pull options] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, apps
+  all [pull options] [--skip-pull] [run-matrix.sh args]   pull, uarch, ext-builder, corpus-tiers, jit-stress, apps
 
   --sha REF          pull: the commit whose images to pull (default: git rev-parse HEAD)
   --latest           pull: the floating tags, i.e. the last fully green develop run
@@ -129,7 +157,7 @@ die() { echo "FAIL: $*" >&2; exit 1; }
 # ------------------------------------------------------------------- options
 CMD="${1:-}"
 case "$CMD" in
-  pull|uarch|ext-builder|corpus-tiers|smoke|apps|bench|all) shift ;;
+  pull|uarch|ext-builder|corpus-tiers|jit-stress|smoke|apps|bench|all) shift ;;
   -h|--help) usage; exit 0 ;;
   '') usage >&2; exit 2 ;;
   *) usage_die "unknown subcommand '$CMD'" ;;
@@ -182,6 +210,12 @@ esac
 [ "$CMD" = pull ] || [ "$BEST_EFFORT" -eq 0 ] || usage_die "--best-effort applies to pull only"
 [ "$CMD" = bench ] || [ "$BENCH_PREPARE" -eq 0 ] || usage_die "--prepare applies to bench only"
 { [ "$LATEST" -eq 0 ] || [ -z "$SHA_REF" ]; } || usage_die "--sha and --latest are exclusive"
+CANDIDATE="${EXTENDED_CANDIDATE:-}"
+CANDIDATE_RUN="${EXTENDED_CANDIDATE_RUN:-}"
+if [ -n "$CANDIDATE" ] && { [ "$CMD" = pull ] || [ "$CMD" = all ]; }; then
+  [ "$LATEST" -eq 0 ] || usage_die "EXTENDED_CANDIDATE and --latest are exclusive: a floating tag has no digest to pin"
+  [ "$BEST_EFFORT" -eq 0 ] || usage_die "EXTENDED_CANDIDATE and --best-effort are exclusive: a mismatch must fail"
+fi
 
 # Selection: same validation as tests/build-all.sh (tests/matrix-lib.sh).
 # shellcheck source=tests/matrix-lib.sh
@@ -349,6 +383,9 @@ corpus_floating() { matrix_target_corpus "$1"; }
 
 # ---------------------------------------------------------------------- pull
 PULL_DIR=""
+declare -A PIN_PLATFORM=()  # candidate pull: target name -> the platform digest the candidate recorded
+declare -A PIN_ERROR=()     # candidate pull: target name -> why the candidate cannot supply it
+declare -A PIN_REVISION=()  # candidate pull: target name -> the commit its image was built from (its revision label)
 
 # pull_one <key> <ref> <kind: image|corpus> -> writes $PULL_DIR/<key>.status:
 # status<TAB>detail<TAB>revision<TAB>image id. A status other than ok is a
@@ -356,6 +393,23 @@ PULL_DIR=""
 pull_one() {
   local ref="$2" kind="$3" out="$PULL_DIR/$1.status" log="$PULL_DIR/$1.log" arch rev hash id info
   rm -f "$out"
+  if [ "$kind" = image ] && [ -n "$CANDIDATE" ]; then
+    if [ -n "${PIN_ERROR[$1]:-}" ]; then
+      printf 'NOT-IN-CANDIDATE\t%s\t\t\n' "${PIN_ERROR[$1]}" >"$out"
+      return 0
+    fi
+    # The index is content-addressed; this proves the candidate describes it.
+    if ! "$ROOT/ci/verify-pin.sh" "$ref" "${PLATFORM#linux/}" "${PIN_PLATFORM[$1]}" >"$log" 2>&1; then
+      if grep -q 'the candidate recorded' "$log"; then
+        printf 'PLATFORM-MISMATCH\t%s\t\t\n' "$(tail -1 "$log" | cut -c1-200)" >"$out"
+      elif grep -qiE 'not found|manifest unknown|name unknown' "$log"; then
+        printf 'MISSING\t%s\t\t\n' "$ref is not in the registry" >"$out"
+      else
+        printf 'PULL-FAILED\t%s\t\t\n' "$(tail -1 "$log" | cut -c1-160)" >"$out"
+      fi
+      return 0
+    fi
+  fi
   # Retried on a registry 429/5xx/network error. A missing tag matches nothing
   # transient and fails at once, so the MISSING classification below holds.
   if ! "$ROOT/ci/retry.sh" docker pull --platform "$PLATFORM" "$ref" >"$log" 2>&1; then
@@ -380,8 +434,11 @@ pull_one() {
     printf 'INPUTS-MISMATCH\t%s\t%s\t\n' "label '${hash:-none}', this tree $TREE_HASH" "$rev" >"$out"
   elif [ "$kind" = image ] && [ -z "$rev" ]; then
     printf 'NO-REVISION\t%s\t\t\n' "no org.opencontainers.image.revision label" >"$out"
-  elif [ "$kind" = image ] && [ "$LATEST" -eq 0 ] && [ "$rev" != "$SHA_FULL" ]; then
-    printf 'REVISION-MISMATCH\t%s\t%s\t\n' "label ${rev:0:12}, asked for ${SHA_FULL:0:12}" "$rev" >"$out"
+  elif [ "$kind" = image ] && [ "$LATEST" -eq 0 ] && [ -n "${PIN_REVISION[$1]:-}" ] && [ "$rev" != "${PIN_REVISION[$1]}" ]; then
+    printf 'REVISION-MISMATCH\t%s\t%s\t\n' "label ${rev:0:12}, expected ${PIN_REVISION[$1]}" "$rev" >"$out"
+  elif [ "$kind" = image ] && [ "$LATEST" -eq 0 ] && [ -z "${PIN_REVISION[$1]:-}" ] \
+      && ! "$ROOT/ci/verify-revision.sh" "$rev" "$SHA_FULL" >"$log" 2>&1; then
+    printf 'REVISION-MISMATCH\t%s\t%s\t\n' "label ${rev:0:12}, expected ${SHA_FULL}: $(tail -1 "$log" | cut -c1-160)" "$rev" >"$out"
   else
     printf 'ok\t%s\t%s\t%s\n' "" "$rev" "$id" >"$out"
   fi
@@ -447,10 +504,37 @@ cmd_pull() {
   PULL_DIR="$LOG_DIR/pull"
   mkdir -p "$PULL_DIR"
 
+  if [ -n "$CANDIDATE" ]; then
+    if ! python3 "$ROOT/ci/candidate.py" check --candidate "$CANDIDATE" --sha "$SHA_FULL" --inputs-hash "$TREE_HASH" \
+        ${CANDIDATE_RUN:+--run-id "$CANDIDATE_RUN"} >"$PULL_DIR/candidate.log" 2>&1; then
+      record pull candidate REFUSED 0 "$(tail -1 "$PULL_DIR/candidate.log" | cut -c1-200)"
+      { echo "REFUSED: $CANDIDATE cannot be pulled from for ${SHA_FULL:0:12}:"; cat "$PULL_DIR/candidate.log"; } >&2
+      return 3
+    fi
+    echo "pull: by digest, from the candidate $CANDIDATE (ci run ${CANDIDATE_RUN:-unchecked})"
+  else
+    echo "pull: by tag, no release candidate: what this run tests is not what main copies"
+  fi
+
   local -a keys=() refs=() canon=() kinds=()
+  local ref pin pin_ref pin_platform pin_revision
   for row in "${SELECTED[@]}"; do
     IFS=$'\t' read -r name flavor php tag <<<"$row"
-    keys+=("$name"); refs+=("$DEV_REPO:${tag#*:}$suffix"); canon+=("$tag"); kinds+=(image)
+    ref="$DEV_REPO:${tag#*:}$suffix"
+    if [ -n "$CANDIDATE" ]; then
+      if pin="$(python3 "$ROOT/ci/candidate.py" pin --candidate "$CANDIDATE" --target "$name" --arch "${PLATFORM#linux/}" \
+          --sha "$SHA_FULL" --inputs-hash "$TREE_HASH" ${CANDIDATE_RUN:+--run-id "$CANDIDATE_RUN"} 2>&1)"; then
+        IFS=$'\t' read -r pin_ref pin_platform pin_revision <<<"$pin"
+        if [ "${pin_ref%@*}" = "$DEV_REPO" ]; then
+          ref="$pin_ref"; PIN_PLATFORM[$name]="$pin_platform"; PIN_REVISION[$name]="$pin_revision"
+        else
+          PIN_ERROR[$name]="the candidate's repository ${pin_ref%@*} is not $DEV_REPO"
+        fi
+      else
+        PIN_ERROR[$name]="$(tail -1 <<<"$pin" | cut -c1-200)"
+      fi
+    fi
+    keys+=("$name"); refs+=("$ref"); canon+=("$tag"); kinds+=(image)
   done
   declare -A seen_tier=()
   for row in "${SELECTED[@]}"; do
@@ -610,6 +694,36 @@ cmd_ext_builder() {
     gate ext-builder "$v" "${TAG_OF[$(matrix_ext_target "$v" ext-builder)]}" "${TAG_OF[$(matrix_ext_target "$v" fpm)]}" "${TAG_OF[$(matrix_ext_target "$v" cli)]}" || continue
     run_step ext-builder "$v" "ext-builder-$v" ./tests/test-ext-builder.sh "$v"
   done
+}
+
+cmd_jit_stress() {
+  local row name flavor php tag major minor log t0 secs rc ran=0
+  for row in "${SELECTED[@]}"; do
+    IFS=$'\t' read -r name flavor php tag <<<"$row"
+    [ "$flavor" = fpm ] || continue
+    case "$name" in *-v3) continue ;; esac
+    ran=1
+    IFS=. read -r major minor <<<"$php"
+    if [ "$major" -lt 8 ]; then
+      record jit-stress "$name" SKIP 0 "PHP $php has no JIT"
+      echo "--- jit-stress: $name SKIP, PHP $php has no JIT"
+      continue
+    fi
+    gate jit-stress "$name" "$tag" || continue
+    if [ "$major" -eq 8 ] && [ "$minor" -le 1 ]; then
+      echo "--- jit-stress: $name (JIT is off by default here: forced on, report only)"
+      log="$LOG_DIR/jit-stress-$name.log"
+      rc=0
+      t0=$(date +%s)
+      ./tests/test-jit-stress.sh "$tag" --informational >"$log" 2>&1 || rc=$?
+      secs=$(( $(date +%s) - t0 ))
+      grep -E '^(INFORMATIONAL|ok:|note:)' "$log" | sed 's/^/    | /' || true
+      record jit-stress "$name" report "$secs" "exit $rc, JIT forced on (off by default on $php), not a verdict, $log"
+    else
+      run_step jit-stress "$name" "jit-stress-$name" ./tests/test-jit-stress.sh "$tag"
+    fi
+  done
+  [ "$ran" -eq 1 ] || { record jit-stress "-" SKIP 0 "no fpm target in this selection"; echo "--- jit-stress: SKIP, no fpm target in this selection"; }
 }
 
 cmd_corpus_tiers() {
@@ -838,6 +952,7 @@ case "$CMD" in
   uarch) cmd_uarch ;;
   ext-builder) cmd_ext_builder ;;
   corpus-tiers) cmd_corpus_tiers ;;
+  jit-stress) cmd_jit_stress ;;
   apps) cmd_apps ;;
   bench) cmd_bench ;;
   all)
@@ -849,6 +964,7 @@ case "$CMD" in
       cmd_uarch
       cmd_ext_builder
       cmd_corpus_tiers
+      cmd_jit_stress
       cmd_apps
     fi ;;
 esac

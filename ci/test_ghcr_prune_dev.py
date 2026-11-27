@@ -192,6 +192,64 @@ class TestPlan(unittest.TestCase):
         self.assertEqual(delete, [])
 
 
+class TestPerArchIndexes(unittest.TestCase):
+    """Per-arch tags that are indexes (platform manifest + attestation manifest, both
+    untagged versions), a list flattened from them, and digests that carry the tags of
+    more than one commit (a reused build)."""
+
+    def target(self, tag, sha, age):
+        """What one commit leaves behind: list + 2 per-arch indexes + 4 untagged children."""
+        kids = {k: version([], age) for k in ("amd64", "amd64-att", "arm64", "arm64-att")}
+        s = sha_set(tag, sha, age)
+        children = {
+            s["amd64"]["name"]: {kids["amd64"]["name"], kids["amd64-att"]["name"]},
+            s["arm64"]["name"]: {kids["arm64"]["name"], kids["arm64-att"]["name"]},
+            s["list"]["name"]: {k["name"] for k in kids.values()},
+        }
+        return s, kids, children
+
+    def test_children_of_kept_indexes_are_kept_and_those_of_stale_ones_go(self):
+        cur, cur_kids, cur_children = self.target("8.5-fpm", SHA_NEW, 20)
+        cur["list"]["metadata"]["container"]["tags"].append("8.5-fpm")
+        old, old_kids, old_children = self.target("8.5-fpm", SHA_OLD, 40)
+        everything = [*cur.values(), *cur_kids.values(), *old.values(), *old_kids.values()]
+        keep, delete, notes = prune.plan(everything, NOW, 14, lambda d: {**cur_children, **old_children}.get(d, set()))
+        self.assertEqual(notes, [])
+        self.assertEqual(ids(delete), {v["id"] for v in (*old.values(), *old_kids.values())})
+        self.assertTrue({v["id"] for v in cur_kids.values()} <= ids(keep))
+
+    def test_a_child_shared_with_a_kept_index_survives_the_stale_sha(self):
+        cur, cur_kids, cur_children = self.target("8.5-fpm", SHA_NEW, 20)
+        cur["list"]["metadata"]["container"]["tags"].append("8.5-fpm")
+        old, old_kids, old_children = self.target("8.5-fpm", SHA_OLD, 40)
+        shared = cur_kids["amd64"]["name"]
+        old_children[old["amd64"]["name"]] = {shared, old_kids["amd64-att"]["name"]}
+        keep, delete, _ = prune.plan([*cur.values(), *cur_kids.values(), *old.values(), *old_kids.values()],
+                                     NOW, 14, lambda d: {**cur_children, **old_children}.get(d, set()))
+        self.assertIn(cur_kids["amd64"]["id"], ids(keep))
+        self.assertIn(old_kids["amd64-att"]["id"], ids(delete))
+
+    def test_a_digest_tagged_for_two_shas_is_kept_while_either_is_kept(self):
+        reused = version([f"8.5-fpm-{SHA_OLD}-amd64", f"8.5-fpm-{SHA_NEW}-amd64"], 40)
+        current = version([f"8.5-fpm-{SHA_NEW}", "8.5-fpm"], 1)
+        keep, delete, _ = prune.plan([reused, current], NOW, 14, no_children)
+        self.assertEqual(delete, [])
+        self.assertIn(reused["id"], ids(keep))
+
+    def test_a_digest_tagged_for_two_shas_is_kept_while_either_is_within_retention(self):
+        reused = version([f"8.5-fpm-{SHA_OLD}-amd64", f"8.5-fpm-{SHA_MID}-amd64"], 40)
+        mid_list = version([f"8.5-fpm-{SHA_MID}"], 5)
+        newest = version([f"8.5-fpm-{SHA_NEW}"], 1)
+        keep, delete, _ = prune.plan([reused, mid_list, newest], NOW, 14, no_children)
+        self.assertEqual(delete, [])
+
+    def test_a_digest_tagged_for_two_stale_shas_goes_once_not_twice(self):
+        reused = version([f"8.5-fpm-{SHA_OLD}-amd64", f"8.5-fpm-{SHA_MID}-amd64"], 40)
+        newest = version([f"8.5-fpm-{SHA_NEW}"], 1)
+        _, delete, _ = prune.plan([reused, newest], NOW, 14, no_children)
+        self.assertEqual([v["id"] for v, _ in delete], [reused["id"]])
+
+
 class TestIo(unittest.TestCase):
     def test_paginated_gh_output_is_concatenated_arrays(self):
         page1 = json.dumps([{"id": 1}, {"id": 2}])
