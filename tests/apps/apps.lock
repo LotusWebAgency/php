@@ -71,8 +71,8 @@ wordpress-seo            7.1   28.9        1f1af9d3dff70288b37e6edc04e27cff4979b
 classic-editor           7.1   1.7.0       7cc7799b0b7d820fbb7528dbff8027c736e52513992416cb37279f44d3d9dd77  https://downloads.wordpress.org/plugin/classic-editor.1.7.0.zip
 wordfence                7.1   9.1.1       51acb206ebaef1756e03112df81c749a70e4086d1a71b6e3426373e393880ad1  https://downloads.wordpress.org/plugin/wordfence.9.1.1.zip
 wpforms-lite             7.1   2.0.5.2     48bc21d8bd0c95627eaf82cb973e4410b2ab6420ccbdd509ab6b7c30e6139f2e  https://downloads.wordpress.org/plugin/wpforms-lite.2.0.5.2.zip
-all-in-one-wp-migration  7.1   7.113       69d8369ac615fee1706340710bc2ff240a4f1fa18687107b613db773a6435a22  https://downloads.wordpress.org/plugin/all-in-one-wp-migration.7.113.zip
-redis-cache              7.1   3.0.1       8de85553394c4462dd43d38a403b805e8fb404d7dc34e02ecd313ea37002196b  https://downloads.wordpress.org/plugin/redis-cache.3.0.1.zip
+all-in-one-wp-migration  7.1   7.114       15f8375f82fc7c1082d36d581d133224b9f32ba880f3b888ca15a1af73a65394  https://downloads.wordpress.org/plugin/all-in-one-wp-migration.7.114.zip
+redis-cache              7.1   3.0.2       89dc9553b5014d2f752b8cc6d945a5117974eb92225f6cfe15618b7f275ec31f  https://downloads.wordpress.org/plugin/redis-cache.3.0.2.zip
 # 6.9 / php 7.2 (8.5 too). WooCommerce 7.6.2 is the newest with a 7.2 header (7.7 wants 7.3). Contact Form 7 5.7.7
 # (5.8 wants PHP 7.4), Yoast SEO 20.4 (20.5 wants PHP 7.2.5), Akismet 5.7.2 and WPForms Lite 2.0.4 (PHP 7.2) are
 # the newest whose WordPress and PHP minimums fit.
@@ -84,8 +84,8 @@ wordpress-seo            6.9   20.4        b42836f065b00811ca6725abe54597ba38511
 classic-editor           6.9   1.7.0       7cc7799b0b7d820fbb7528dbff8027c736e52513992416cb37279f44d3d9dd77  https://downloads.wordpress.org/plugin/classic-editor.1.7.0.zip
 wordfence                6.9   9.1.1       51acb206ebaef1756e03112df81c749a70e4086d1a71b6e3426373e393880ad1  https://downloads.wordpress.org/plugin/wordfence.9.1.1.zip
 wpforms-lite             6.9   2.0.4       0417412b098809eb8bf439b4c4d3419bc3e3343b199ba5d9a5dfd436a2415f7a  https://downloads.wordpress.org/plugin/wpforms-lite.2.0.4.zip
-all-in-one-wp-migration  6.9   7.113       69d8369ac615fee1706340710bc2ff240a4f1fa18687107b613db773a6435a22  https://downloads.wordpress.org/plugin/all-in-one-wp-migration.7.113.zip
-redis-cache              6.9   3.0.1       8de85553394c4462dd43d38a403b805e8fb404d7dc34e02ecd313ea37002196b  https://downloads.wordpress.org/plugin/redis-cache.3.0.1.zip
+all-in-one-wp-migration  6.9   7.114       15f8375f82fc7c1082d36d581d133224b9f32ba880f3b888ca15a1af73a65394  https://downloads.wordpress.org/plugin/all-in-one-wp-migration.7.114.zip
+redis-cache              6.9   3.0.2       89dc9553b5014d2f752b8cc6d945a5117974eb92225f6cfe15618b7f275ec31f  https://downloads.wordpress.org/plugin/redis-cache.3.0.2.zip
 # 5.9 / php 7.0 (8.1 too). WooCommerce 6.4.2 (header: WP 5.7, PHP 7.0; 6.5 wants PHP 7.2), Akismet 5.3.7 (5.4 wants
 # PHP 7.2), Contact Form 7 5.6.4 (5.7 says WP 6.0), Yoast SEO 19.13 (20.0 says WP 6.0), WPForms Lite 1.9.2.3 (1.9.3
 # wants PHP 7.1). Wordfence, Classic Editor and All-in-One WP Migration as in 4.9. Redis Object Cache 2.0.26, see 4.9.
@@ -97,13 +97,13 @@ wordpress-seo            5.9   19.13       93ebcc5bdbc6d68cf198649abd9879c732781
 classic-editor           5.9   1.7.0       7cc7799b0b7d820fbb7528dbff8027c736e52513992416cb37279f44d3d9dd77  https://downloads.wordpress.org/plugin/classic-editor.1.7.0.zip
 wordfence                5.9   9.1.1       51acb206ebaef1756e03112df81c749a70e4086d1a71b6e3426373e393880ad1  https://downloads.wordpress.org/plugin/wordfence.9.1.1.zip
 wpforms-lite             5.9   1.9.2.3     130ba1a4f2396a8e183b8ce732c9bc8a3cf6698890f6f216550188e78e082fda  https://downloads.wordpress.org/plugin/wpforms-lite.1.9.2.3.zip
-all-in-one-wp-migration  5.9   7.113       69d8369ac615fee1706340710bc2ff240a4f1fa18687107b613db773a6435a22  https://downloads.wordpress.org/plugin/all-in-one-wp-migration.7.113.zip
+all-in-one-wp-migration  5.9   7.114       15f8375f82fc7c1082d36d581d133224b9f32ba880f3b888ca15a1af73a65394  https://downloads.wordpress.org/plugin/all-in-one-wp-migration.7.114.zip
 redis-cache              5.9   2.0.26      c881088286ccb789a307313a79d67fac0ec83817452c640f44e00249dbcebe1d  https://downloads.wordpress.org/plugin/redis-cache.2.0.26.zip
 # 4.9 / php 7.0 (7.2 too). WooCommerce 3.8.3 is the last whose readme says Requires at least 4.9 (3.9.x says 5.0).
 # Yoast SEO 12.4 is the last that says 4.9 (12.5 says 5.2); wordpress.org does not list releases before 18.0 in its
 # API or SVN, but the zips are still served and the pin is the zip. Contact Form 7 5.1.9 (5.2 says 5.3) and WPForms
 # Lite 1.7.2.1 (1.7.3 says 5.2) are the last for 4.9; Akismet 4.1.12 is the newest that fits (5.3.x says 5.8).
-# Classic Editor 1.7.0 and All-in-One WP Migration 7.113 are current and already declare 4.9 / 3.3. Wordfence 8.1.0, not
+# Classic Editor 1.7.0 and All-in-One WP Migration 7.114 are current and already declare 4.9 / 3.3. Wordfence 8.1.0, not
 # the current 9.1.1 (which declares 4.7): from 8.1.1 on its REST credentials check calls WP_REST_Request::has_param(),
 # which 4.9 does not have, so POST /wp/v2/users is a fatal there (measured on 4.9.33); 8.1.0 is the newest without it. Redis Object Cache 2.0.26 (Requires PHP 5.6): 2.1.0 is the last that declares PHP 7.0 but is broken on
 # WordPress 6.5 (its add_multiple(), which core calls from 6.0, leaves the result `true` in the runtime cache instead
@@ -116,7 +116,7 @@ wordpress-seo            4.9   12.4        47e38fcce48dc64e97e1afb882bb030fca794
 classic-editor           4.9   1.7.0       7cc7799b0b7d820fbb7528dbff8027c736e52513992416cb37279f44d3d9dd77  https://downloads.wordpress.org/plugin/classic-editor.1.7.0.zip
 wordfence                4.9   8.1.0       aac04c6c83b888118cb8374175e1ec0caebe1c78f139420ed3366be71759943c  https://downloads.wordpress.org/plugin/wordfence.8.1.0.zip
 wpforms-lite             4.9   1.7.2.1     5cb5d12169b56cbf2054bfa72a52c125b5c5de43381149ec28449f2f06bc7c43  https://downloads.wordpress.org/plugin/wpforms-lite.1.7.2.1.zip
-all-in-one-wp-migration  4.9   7.113       69d8369ac615fee1706340710bc2ff240a4f1fa18687107b613db773a6435a22  https://downloads.wordpress.org/plugin/all-in-one-wp-migration.7.113.zip
+all-in-one-wp-migration  4.9   7.114       15f8375f82fc7c1082d36d581d133224b9f32ba880f3b888ca15a1af73a65394  https://downloads.wordpress.org/plugin/all-in-one-wp-migration.7.114.zip
 redis-cache              4.9   2.0.26      c881088286ccb789a307313a79d67fac0ec83817452c640f44e00249dbcebe1d  https://downloads.wordpress.org/plugin/redis-cache.2.0.26.zip
 laravel-app       13    13.11.0     afd5c6f2d147287b6ccc04b505cc673e12bb583ceb4d68c763c5c2646431639d  https://github.com/laravel/laravel/archive/refs/tags/v13.11.0.tar.gz
 laravel-app       9     9.5.2       3ca1fd3bebe4ceacbc37f8508a2a8ab97974b5107829a975b2163977f4b01d58  https://github.com/laravel/laravel/archive/refs/tags/v9.5.2.tar.gz

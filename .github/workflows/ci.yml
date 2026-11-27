@@ -175,7 +175,7 @@ env:
   # action's own setup and run it.
   SETUP_TRIVY_VERSION: v0.76.2
   # The Cosign release cosign-installer fetches (its own default is older).
-  COSIGN_VERSION: v3.1.5
+  COSIGN_VERSION: v3.1.6
   # Control for the Trivy scans: an image's report must list more than this many
   # OS packages (the "Trivy package floor" steps), so a scan that read no package
   # database (an empty report passes every gate above it) cannot go green. A
@@ -1240,8 +1240,11 @@ jobs:
   # (php version, flavor...), so a version bump renames them and silently drops
   # coverage from a rule that names the old ones. pr-gate is the only check to
   # require (together with preflight, which it also depends on) and it fails
-  # unless every entry that ran actually succeeded.
+  # unless every entry that ran actually succeeded. Only a pull_request run may
+  # report a check named pr-gate: a skipped check counts as passed, so the develop
+  # push run of the same SHA would otherwise satisfy the promote PR before it ran.
   pr-gate:
+    name: ${{ github.event_name == 'pull_request' && 'pr-gate' || 'pr-gate (pull requests only)' }}
     needs: [preflight, plan, images, promote-check]
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
