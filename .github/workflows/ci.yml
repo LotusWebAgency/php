@@ -1240,8 +1240,11 @@ jobs:
   # (php version, flavor...), so a version bump renames them and silently drops
   # coverage from a rule that names the old ones. pr-gate is the only check to
   # require (together with preflight, which it also depends on) and it fails
-  # unless every entry that ran actually succeeded.
+  # unless every entry that ran actually succeeded. Only a pull_request run may
+  # report a check named pr-gate: a skipped check counts as passed, so the develop
+  # push run of the same SHA would otherwise satisfy the promote PR before it ran.
   pr-gate:
+    name: ${{ github.event_name == 'pull_request' && 'pr-gate' || 'pr-gate (pull requests only)' }}
     needs: [preflight, plan, images, promote-check]
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
