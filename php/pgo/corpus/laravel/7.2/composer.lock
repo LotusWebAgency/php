@@ -2668,16 +2668,16 @@
         },
         {
             "name": "symfony/mime",
-            "version": "v5.4.55",
+            "version": "v5.4.57",
             "source": {
                 "type": "git",
                 "url": "https://github.com/symfony/mime.git",
-                "reference": "aefc42a0233050ed08c20580137dd857352f214f"
+                "reference": "2f6dbd1590b4cdd47ed8cf05c25f81a2d31758a8"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/symfony/mime/zipball/aefc42a0233050ed08c20580137dd857352f214f",
-                "reference": "aefc42a0233050ed08c20580137dd857352f214f",
+                "url": "https://api.github.com/repos/symfony/mime/zipball/2f6dbd1590b4cdd47ed8cf05c25f81a2d31758a8",
+                "reference": "2f6dbd1590b4cdd47ed8cf05c25f81a2d31758a8",
                 "shasum": ""
             },
             "require": {
@@ -2733,7 +2733,7 @@
                 "mime-type"
             ],
             "support": {
-                "source": "https://github.com/symfony/mime/tree/v5.4.55"
+                "source": "https://github.com/symfony/mime/tree/v5.4.57"
             },
             "funding": [
                 {
@@ -2753,8 +2753,8 @@
                     "type": "tidelift"
                 }
             ],
-            "time": "2026-10-28T17:48:24+00:00",
-            "published-time": "2026-10-28T18:14:12+00:00"
+            "time": "2026-11-23T01:19:29+00:00",
+            "published-time": "2026-11-25T09:17:08+00:00"
         },
         {
             "name": "symfony/polyfill-ctype",

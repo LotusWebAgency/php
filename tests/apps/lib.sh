@@ -38,7 +38,7 @@ APPTEST_DB_ARGS=(
 
 # Side services, pinned the same way. compose.yml reads them from the
 # environment run.sh exports, so this is the only place they are named.
-export APPTEST_WEB_IMAGE="nginx:1.30-alpine@sha256:8eb2b5540eae779603cc3db84b3986a15ecb5308b54303146eee9837c137b51a"
+export APPTEST_WEB_IMAGE="nginx:1.30-alpine@sha256:8eb04fe3b385090e9aa02961f77398ad09b6bf33ab07f6669a5bb7acce22c0d3"
 export APPTEST_REDIS_IMAGE="redis:8-alpine@sha256:5af80107c1eeecb484a2269b80a26d12bfa6521787da4663bd9f19f60a163483"
 export APPTEST_MEMCACHED_IMAGE="memcached:1.6-alpine@sha256:084fb554292d1447bc2c68b80c2331b98834514f56c866bc21a61be3c2ee376d"
 apptest_service_image() {

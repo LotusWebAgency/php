@@ -175,7 +175,7 @@ env:
   # action's own setup and run it.
   SETUP_TRIVY_VERSION: v0.76.2
   # The Cosign release cosign-installer fetches (its own default is older).
-  COSIGN_VERSION: v3.1.5
+  COSIGN_VERSION: v3.1.6
   # Control for the Trivy scans: an image's report must list more than this many
   # OS packages (the "Trivy package floor" steps), so a scan that read no package
   # database (an empty report passes every gate above it) cannot go green. A
